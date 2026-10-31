@@ -271,7 +271,7 @@ struct LegacySavedMenuRestoreTests {
         let preview = try await LegacyOldMenuReclaim.preview(operationID: returned.operationID,
             workspace: workspace, confirmedTestedMenus: true, device: device)
         #expect(preview.previousGameCount == 31)
-        #expect(preview.previousSnapshotDirectory == alternateBackup)
+        #expect(preview.previousSnapshotDirectory.standardizedFileURL.path == alternateBackup.standardizedFileURL.path)
         #expect(preview.currentGameCount == 31)
 
         await device.setChangedOldInventory()
