@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Individual game tile for the explorer grid
+/// Bounded cover and persistent title; artwork is never required to identify a game.
 struct GameCardView: View {
     let game: Game
     let isActive: Bool
@@ -8,38 +8,26 @@ struct GameCardView: View {
     var cardSize: CGFloat = 130
 
     var body: some View {
-        ZStack {
-            // Cover art or placeholder
-            if let coverImage = game.coverImage {
-                Image(nsImage: coverImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: cardSize)
-                    .cornerRadius(8)
-            } else {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(.quaternary)
-                    .frame(width: cardSize, height: cardSize)
-                    .overlay {
-                        Image(systemName: game.isStock ? "star.fill" : "gamecontroller.fill")
-                            .font(.title2)
-                            .foregroundStyle(.secondary)
-                    }
-            }
-
-            // Tinted overlay when on the install bar
-            if isOnBar {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.accentColor.opacity(0.15))
-                    .allowsHitTesting(false)
-            }
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(.quaternary)
+                if let cover = game.coverImage {
+                    Image(nsImage: cover).resizable().scaledToFit().padding(3)
+                } else {
+                    Image(systemName: game.isStock ? "star.fill" : "gamecontroller.fill")
+                        .font(.title2).foregroundStyle(.secondary)
+                }
+            }.frame(width: cardSize, height: cardSize * 1.3)
+            Text(game.name).font(.callout.weight(.medium)).lineLimit(2)
+                .frame(width: cardSize, height: 34, alignment: .topLeading)
+            Label(isOnBar ? "Selected" : "Not selected", systemImage: isOnBar ? "checkmark.circle.fill" : "circle")
+                .font(.caption2).foregroundStyle(isOnBar ? Color.accentColor : .secondary)
         }
-        .shadow(color: .black.opacity(isActive ? 0.5 : 0.15), radius: isActive ? 8 : 2, y: isActive ? 4 : 1)
-        .scaleEffect(isActive ? 1.06 : 1.0)
-        .animation(.easeInOut(duration: 0.15), value: isActive)
-        .animation(.easeInOut(duration: 0.15), value: isOnBar)
-        .frame(width: cardSize)
-        .padding(4)
-        .contentShape(Rectangle())
+        .padding(6)
+        .background(isActive ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 10))
+        .overlay { RoundedRectangle(cornerRadius: 10).stroke(isActive ? Color.accentColor : .clear, lineWidth: 2) }
+        .contentShape(Rectangle()).help(game.name)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(game.name), \(isOnBar ? "selected" : "not selected")")
     }
 }

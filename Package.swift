@@ -10,6 +10,10 @@ let package = Package(
         .package(url: "https://github.com/tsolomko/SWCompression.git", from: "4.8.0"),
     ],
     targets: [
+        .target(name: "NativeLZO", path: "vendor/minilzo", sources: ["minilzo.c", "safe_decode.c", "safe_encode.c", "lzo999/src/lzo1x_9x.c"], publicHeadersPath: "include", cSettings: [.headerSearchPath("lzo999/include")]),
+        .target(name: "SwiftHakchiCore", dependencies: ["NativeLZO"], path: "SwiftHakchiCore"),
+        .testTarget(name: "SwiftHakchiCoreTests", dependencies: ["SwiftHakchiCore"]),
+        .testTarget(name: "SwiftHakchiTests", dependencies: ["SwiftHakchi", "SwiftHakchiCore", "USBBridge"]),
         .target(
             name: "MbedCrypto",
             path: "vendor/mbedtls",
@@ -46,17 +50,23 @@ let package = Package(
             name: "SwiftHakchi",
             dependencies: [
                 "USBBridge",
+                "SwiftHakchiCore",
                 .product(name: "SWCompression", package: "SWCompression"),
             ],
             path: "SwiftHakchi",
             resources: [
                 .copy("Resources/fes1.bin"),
+                .copy("Resources/snes-menu-launch"),
                 .copy("Resources/basehmods.tar"),
                 .copy("Resources/hakchi.hmod"),
                 .copy("Resources/snescarts.xml"),
                 .copy("Resources/nescarts.xml"),
                 .copy("Resources/romfiles.xml"),
+                .copy("Resources/genesis-metadata-v1.json"),
                 .copy("Resources/AppIcon.icns"),
+                .copy("Resources/AppIcons"),
+                .copy("Resources/CheatCodes"),
+                .copy("Resources/ThirdPartyLicenses"),
             ],
             linkerSettings: [
                 .linkedFramework("IOKit"),

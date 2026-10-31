@@ -168,6 +168,12 @@ struct rndis_handle {
     uint8_t  host_mac[6];
     uint8_t  *recv_buf;         // reusable buffer for bulk reads
     uint32_t recv_buf_size;
+    uint32_t recv_length;
+    uint32_t recv_offset;
+    uint64_t receive_transfers;
+    uint64_t receive_packets;
+    uint64_t coalesced_packets;
+    uint64_t invalid_messages;
 };
 
 // ---------------------------------------------------------------------------
@@ -333,17 +339,19 @@ static rndis_error_t rndis_set_filter(rndis_handle_t *h) {
 // Public API
 // ---------------------------------------------------------------------------
 
-rndis_handle_t *rndis_open(uint16_t vid, uint16_t pid) {
+static rndis_handle_t *rndis_open_impl(uint16_t vid, uint16_t pid, const hakchi_usb_identity_t *expected) {
     fprintf(stderr, "[RNDIS] Opening device VID=0x%04X PID=0x%04X\n", vid, pid);
 
     hakchi_usb_error_t usb_err;
-    hakchi_usb_device_t *usb = hakchi_usb_open_rndis(vid, pid, &usb_err);
+    hakchi_usb_device_t *usb = expected ? hakchi_usb_open_rndis_bound(expected, &usb_err)
+        : hakchi_usb_open_rndis(vid, pid, &usb_err);
     if (!usb) {
         fprintf(stderr, "[RNDIS] USB open failed: %d\n", usb_err);
         return NULL;
     }
 
     rndis_handle_t *h = calloc(1, sizeof(rndis_handle_t));
+    if (!h) { hakchi_usb_close(usb); return NULL; }
     h->usb = usb;
     h->request_id = 0;
 
@@ -380,6 +388,15 @@ rndis_handle_t *rndis_open(uint16_t vid, uint16_t pid) {
 
     fprintf(stderr, "[RNDIS] Device ready\n");
     return h;
+}
+
+rndis_handle_t *rndis_open(uint16_t vid, uint16_t pid) {
+    return rndis_open_impl(vid, pid, NULL);
+}
+rndis_handle_t *rndis_open_bound(const hakchi_usb_identity_t *e) {
+    if (!e || !e->registry_entry_id || !e->location_id || e->vendor_id != RNDIS_VID
+        || e->product_id != RNDIS_PID || e->device_class != 224) return NULL;
+    return rndis_open_impl(e->vendor_id, e->product_id, e);
 }
 
 uint32_t rndis_max_transfer_size(rndis_handle_t *h) {
@@ -422,56 +439,82 @@ int rndis_send_packet(rndis_handle_t *h, const uint8_t *eth_frame, uint32_t len)
     return (int)len;
 }
 
+static uint32_t rndis_read_le32(const uint8_t *bytes) {
+    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+           ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+}
+
+static int rndis_invalid_batch(rndis_handle_t *h) {
+    h->invalid_messages++;
+    h->recv_offset = h->recv_length = 0;
+    fprintf(stderr, "[RNDIS] Invalid message bounds; batch discarded\n");
+    return RNDIS_ERROR_PROTOCOL;
+}
+
 int rndis_recv_packet(rndis_handle_t *h, uint8_t *buf, uint32_t buf_len,
                        int timeout_ms) {
     if (!h || !h->usb) return RNDIS_ERROR_USB;
-
-    uint8_t pipe_in = hakchi_usb_get_pipe_in(h->usb);
-    int ret = hakchi_usb_bulk_read_pipe(h->usb, pipe_in, h->recv_buf,
-                                         h->recv_buf_size, timeout_ms);
-    if (ret < 0) {
-        if (ret == HAKCHI_USB_ERROR_TIMEOUT) return 0; // timeout → no packet
-        return ret;
-    }
-    if (ret < (int)sizeof(rndis_packet_hdr_t)) return 0;
-
-    rndis_packet_hdr_t *hdr = (rndis_packet_hdr_t *)h->recv_buf;
-
-    // Handle keepalive messages transparently
-    if (hdr->msg_type == RNDIS_MSG_KEEPALIVE) {
-        rndis_keepalive_cmplt_t resp = {
-            .msg_type = RNDIS_MSG_KEEPALIVE_C,
-            .msg_len = sizeof(resp),
-            .request_id = ((uint32_t *)(h->recv_buf))[2],
-            .status = RNDIS_STATUS_SUCCESS,
-        };
-        rndis_send_control(h, &resp, sizeof(resp));
-        return 0; // no data packet
+    if (!buf || !buf_len || !h->recv_buf || !h->recv_buf_size) return RNDIS_ERROR_PROTOCOL;
+    if (h->recv_offset >= h->recv_length) {
+        h->recv_offset = h->recv_length = 0;
+        int ret = hakchi_usb_bulk_read_pipe(h->usb, hakchi_usb_get_pipe_in(h->usb),
+                                            h->recv_buf, h->recv_buf_size, timeout_ms);
+        if (ret < 0) return ret == HAKCHI_USB_ERROR_TIMEOUT ? 0 : ret;
+        if (!ret) return 0;
+        if ((uint32_t)ret > h->recv_buf_size) return rndis_invalid_batch(h);
+        h->recv_length = (uint32_t)ret;
+        h->receive_transfers++;
     }
 
-    if (hdr->msg_type != RNDIS_MSG_PACKET) {
-        // Not a data packet — ignore
-        return 0;
+    // A USB transfer may concatenate several padded RNDIS messages. Keep the
+    // unread messages for the next caller rather than discarding the batch tail.
+    while (h->recv_offset < h->recv_length) {
+        uint32_t remaining = h->recv_length - h->recv_offset;
+        const uint8_t *message = h->recv_buf + h->recv_offset;
+        bool zero_tail = true;
+        for (uint32_t i = 0; i < remaining; i++) {
+            if (message[i] != 0) { zero_tail = false; break; }
+        }
+        if (zero_tail) { // USB padding is outside the final MessageLength.
+            h->recv_offset = h->recv_length;
+            return 0;
+        }
+        if (remaining < 8 || h->recv_offset % 8 != 0) return rndis_invalid_batch(h);
+        uint32_t type = rndis_read_le32(message), length = rndis_read_le32(message + 4);
+        if (length < 8 || length > remaining) return rndis_invalid_batch(h);
+        if (type == RNDIS_MSG_PACKET) {
+            if (length < sizeof(rndis_packet_hdr_t)) return rndis_invalid_batch(h);
+            uint32_t offset = rndis_read_le32(message + 8), count = rndis_read_le32(message + 12);
+            if (offset < 36 || offset > length - 8) return rndis_invalid_batch(h);
+            uint32_t start = 8 + offset;
+            if (!count || count > length - start || count > buf_len) return rndis_invalid_batch(h);
+            if (h->recv_offset) h->coalesced_packets++;
+            memcpy(buf, message + start, count);
+            h->recv_offset += length;
+            h->receive_packets++;
+            return (int)count;
+        }
+        // Consume control/unknown records before a fallible response so a
+        // later caller cannot retry the same failed control request forever.
+        h->recv_offset += length;
+        if (type == RNDIS_MSG_KEEPALIVE) {
+            if (length < 12) return rndis_invalid_batch(h);
+            rndis_keepalive_cmplt_t response = {
+                .msg_type = RNDIS_MSG_KEEPALIVE_C, .msg_len = sizeof(response),
+                .request_id = rndis_read_le32(message + 8), .status = RNDIS_STATUS_SUCCESS,
+            };
+            if (rndis_send_control(h, &response, sizeof(response)) < 0) return RNDIS_ERROR_USB;
+        }
     }
-
-    // Extract Ethernet frame from RNDIS packet
-    uint32_t data_start = 8 + hdr->data_offset; // 8 = offset of data_offset field
-    uint32_t data_len = hdr->data_len;
-
-    if (data_start + data_len > (uint32_t)ret) {
-        fprintf(stderr, "[RNDIS] Truncated packet: start=%u len=%u total=%d\n",
-                data_start, data_len, ret);
-        return 0;
-    }
-
-    if (data_len > buf_len) data_len = buf_len;
-    memcpy(buf, h->recv_buf + data_start, data_len);
-    return (int)data_len;
+    return 0;
 }
 
 void rndis_close(rndis_handle_t *h) {
     if (!h) return;
 
+    fprintf(stderr, "[RNDIS] Receive summary: transfers=%llu packets=%llu coalesced=%llu invalid=%llu\n",
+            (unsigned long long)h->receive_transfers, (unsigned long long)h->receive_packets,
+            (unsigned long long)h->coalesced_packets, (unsigned long long)h->invalid_messages);
     if (h->usb) {
         // Send RNDIS_MSG_HALT
         rndis_halt_msg_t halt = {

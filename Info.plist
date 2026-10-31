@@ -3,16 +3,16 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Swift Hakchi2</string>
+    <string>Hakchi Console Hub</string>
     <key>CFBundleDisplayName</key>
-    <string>Swift Hakchi2</string>
+    <string>Hakchi Console Hub</string>
     <key>CFBundleIdentifier</key>
     <string>com.swifthakchi.app</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>7</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
-    <key>CFBundlePackagetype</key>
+    <string>0.2.0</string>
+    <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
     <string>SwiftHakchi</string>

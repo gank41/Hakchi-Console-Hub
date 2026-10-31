@@ -31,11 +31,8 @@ enum CRC32 {
 
         switch ext {
         case "nes":
-            // iNES header is 16 bytes, starts with "NES\x1A"
-            if data.count > 16,
-               data[0] == 0x4E, data[1] == 0x45, data[2] == 0x53, data[3] == 0x1A {
-                data = data.dropFirst(16)
-            }
+            guard let identity = try? NESROMIdentity(data: data) else { return nil }
+            data = Data(data[identity.content])
 
         case "fds":
             // FDS header is 16 bytes, starts with "FDS"

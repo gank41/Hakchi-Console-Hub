@@ -7,6 +7,10 @@ final class DesktopFile {
     var args: [String] = []
     var profilePath: String = ""
     var name: String = ""
+    var addedAt: Date?
+    var modifiedAt: Date?
+    var defaultName: String?
+    var displayPublisher: String?
     var cePrefix: String = ""
     var iconPath: String = ""
     var iconFilename: String?
@@ -86,6 +90,14 @@ final class DesktopFile {
                 profilePath = (normalized as NSString).deletingLastPathComponent
             case "name":
                 name = value
+            case "x-swifthakchi-addedat":
+                addedAt = Double(value).flatMap { $0.isFinite ? Date(timeIntervalSince1970: $0) : nil }
+            case "x-swifthakchi-modifiedat":
+                modifiedAt = Double(value).flatMap { $0.isFinite ? Date(timeIntervalSince1970: $0) : nil }
+            case "x-swifthakchi-publisher":
+                displayPublisher = value
+            case "x-swifthakchi-defaultname":
+                defaultName = value.isEmpty ? nil : value
             case "ceprefix":
                 cePrefix = value
             case "icon":
@@ -162,6 +174,10 @@ final class DesktopFile {
         }
 
         lines.append("Name=\(name.isEmpty ? code : name)")
+        if let addedAt { lines.append("X-SwiftHakchi-AddedAt=\(addedAt.timeIntervalSince1970)") }
+        if let modifiedAt { lines.append("X-SwiftHakchi-ModifiedAt=\(modifiedAt.timeIntervalSince1970)") }
+        if let defaultName { lines.append("X-SwiftHakchi-DefaultName=\(defaultName)") }
+        if let displayPublisher { lines.append("X-SwiftHakchi-Publisher=\(displayPublisher)") }
         lines.append("CePrefix=\(cePrefix)")
         lines.append("Icon=\(iconPath)/\(code)/\(iconFilename ?? "\(code).png")")
 

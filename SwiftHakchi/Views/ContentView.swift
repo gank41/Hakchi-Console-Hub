@@ -114,6 +114,30 @@ struct ContentView: View {
             Divider()
             StatusBarView()
         }
+        .sheet(isPresented: $appState.showLegacyChange) {
+            if let workspace = appState.legacyChangeWorkspace, let session = appState.legacyChangeSession {
+                LegacyGameChangeView(game: appState.legacyChangeGame, workspace: workspace, session: session)
+                    .environmentObject(appState)
+            }
+        }
+        .sheet(isPresented: $appState.showLegacySyncTrial) {
+            LegacySyncTrialView(workspace: AppConfig.shared.workspace,
+                                session: appState.deviceManager.sessionID)
+                .environmentObject(appState)
+        }
+        .sheet(isPresented: $appState.showLegacyFullSync) {
+            LegacyFullSyncView(workspace: AppConfig.shared.workspace,
+                               session: appState.deviceManager.sessionID)
+                .environmentObject(appState)
+        }
+        .sheet(isPresented: $appState.showSNESLibrarySync) {
+            SNESLibrarySyncView(originalsOnly: appState.snesLibraryOriginalsOnly).environmentObject(appState)
+        }
+        .sheet(isPresented: $appState.showLegacyArchiveReclaim) {
+            LegacyArchiveReclaimView(workspace: AppConfig.shared.workspace,
+                                     session: appState.deviceManager.sessionID)
+                .environmentObject(appState)
+        }
         .sheet(isPresented: $appState.showInstallConfig) {
             InstallConfigSheet()
                 .environmentObject(appState)
@@ -146,36 +170,60 @@ struct ContentView: View {
             ModuleManagerView()
                 .environmentObject(appState)
         }
+        .sheet(isPresented: $appState.showSNESBackup) {
+            SNESBackupView { progress in try await appState.captureSNESSetup(progress: progress) }
+                .environmentObject(appState)
+        }
+        .sheet(isPresented: $appState.showRecoveryReadiness, onDismiss: { appState.openRequestedOriginalGamesReview() }) {
+            RecoveryReadinessView(backups: AppConfig.shared.workspace.backups, context: appState.recoveryContext, legacySnapshot: appState.deviceManager.legacyReport,
+                                  onOriginalGamesReview: appState.deviceManager.consoleType == .snesUsa && appState.canReviewLibrarySync ? { appState.requestOriginalGamesReview() } : nil)
+        }
         .sheet(isPresented: $appState.showHelp) {
             HelpView()
         }
-        .alert("Delete Game", isPresented: $appState.showDeleteConfirmation) {
-            Button("Delete", role: .destructive) {
+        .alert("Remove Game from Mac Library?", isPresented: $appState.showDeleteConfirmation) {
+            Button("Remove from Mac", role: .destructive) {
                 appState.confirmDeleteSelectedGame()
             }
             Button("Cancel", role: .cancel) {
                 appState.showDeleteConfirmation = false
             }
         } message: {
-            Text("Are you sure you want to delete \"\(appState.selectedGame?.name ?? "")\"? This removes the imported copy from the app library. Your original ROM file is not affected.")
+            Text("Remove \"\(appState.selectedGame?.name ?? "")\" and its artwork from this app? Your original ROM file and games on the console stay unchanged. To remove it from the console too, use Sync Library and review the games to remove.")
         }
-        .alert(
-            "Remove Games from Console?",
-            isPresented: $appState.showSyncConfirmation
-        ) {
-            Button("Import First") {
-                Task { await appState.importFromConsole() }
-            }
-            Button("Sync Anyway", role: .destructive) {
-                appState.confirmSync()
-            }
+        .confirmationDialog("Remove all imported games from this library?", isPresented: $appState.showRemoveLocalLibrary) {
+            Button("Remove Imported Library", role: .destructive) { appState.removeLocalLibrary() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will remove \(appState.syncRemovedCount) game(s) from the console that aren't in your local library. You can import them first to keep a local copy.")
+            Text("The app moves this console’s imported games, titles, and artwork into Removed Libraries on your Mac. Your original ROM folders and games on the console are unchanged. You can then add a new collection.")
+        }
+        .sheet(isPresented: $appState.showSyncConfirmation) {
+            if let plan = appState.preparedPlan {
+                SyncReviewView(plan: plan, confirm: appState.confirmSync, cancel: { appState.showSyncConfirmation = false })
+            }
+        }
+        .sheet(isPresented: $appState.showCodeCatalog) {
+            GameGenieCatalogView(gameName: "", system: GameGenieSystem(console: AppConfig.shared.lastConsoleType) ?? .nes)
+        }
+        .sheet(isPresented: $appState.showFolders) {
+            let report = appState.deviceManager.legacyReport
+            let remote = appState.gameManager.legacyRemoteGames
+            let complete = report.map { $0.visibleCodes.isSubset(of: Set(remote.map(\.code))) } ?? false
+            ConsoleStructureView(
+                console: appState.deviceManager.consoleType == .unknown
+                    ? AppConfig.shared.lastConsoleType : appState.deviceManager.consoleType,
+                games: complete ? remote.filter { report!.visibleCodes.contains($0.code) } : nil,
+                stockCodes: complete ? report?.stockCodes : nil)
+                .environmentObject(appState)
+        }
+        .alert("Console Operation", isPresented: $appState.showOperationError) {
+            Button("OK") {}
+        } message: {
+            Text(appState.operationError ?? "The operation could not be completed.")
         }
         .onAppear {
             appState.gameManager.loadGames()
-            appState.gameManager.matchExistingGames()
+
         }
     }
 
@@ -316,19 +364,42 @@ private struct Triangle: Shape {
 /// Toolbar-style action bar with prominent buttons for common tasks
 struct ActionBarView: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var config = AppConfig.shared
     @State private var isReconnecting = false
     @State private var showReconnectFailed = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Install Kernel — the primary action
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Picker("Console", selection: Binding(get: { config.lastConsoleType }, set: { appState.changeLibraryConsole(to: $0) })) {
+                    ForEach(ConsoleType.allCases.filter { $0 != .unknown }) { console in
+                        Text(console.displayName).tag(console)
+                    }
+                }.frame(width: 250)
+                    .disabled(isReconnecting || appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
+                    .help("Choose a local library. A recognized console switches this automatically when connected.")
+                if appState.deviceManager.isConnected {
+                    Text("Connected: " + appState.deviceManager.consoleType.displayName).foregroundStyle(.secondary)
+                }
+                if config.lastConsoleType == .snesUsa {
+                    Button("Prepare SNES Setup…", systemImage: "externaldrive.badge.checkmark") {
+                        appState.reviewSNESBackup()
+                    }.disabled(appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
+                }
+                Spacer()
+            }
+        HStack(spacing: 6) {
             Button {
                 appState.requestFlash(.installHakchi)
             } label: {
                 Label("Install Kernel", systemImage: "cpu")
             }
-            .buttonStyle(ActionButtonStyle(role: .primary))
-            .help("Install or repair custom kernel on the console")
+            .buttonStyle(ActionButtonStyle(role: .primary, compact: true))
+            .disabled(true)
+            .help("Permanently changes console startup software; currently unavailable. Select the info button for details.")
+
+            FirmwareActionInfo(title: "Install Kernel", explanation:
+                "Installs modified startup software in the console's internal storage. It stays installed after power is turned off and can enable custom game management. It does not add games by itself. This action needs a verified original-kernel backup and a guided recovery path, so it is unavailable while installation is validated for each console.")
 
             // Connect / Disconnect
             Button {
@@ -338,7 +409,7 @@ struct ActionBarView: View {
                     attemptReconnect()
                 }
             } label: {
-                if isReconnecting {
+                if isReconnecting || appState.deviceManager.isConnecting {
                     ProgressView()
                         .controlSize(.small)
                         .frame(width: 16, height: 16)
@@ -348,15 +419,21 @@ struct ActionBarView: View {
                     Label("Connect", systemImage: "cable.connector")
                 }
             }
-            .buttonStyle(ActionButtonStyle(role: appState.deviceManager.isConnected ? .connected : .normal))
-            .disabled(isReconnecting)
+            .buttonStyle(ActionButtonStyle(role: appState.deviceManager.isConnected ? .connected : .normal, compact: true))
+            .disabled(isReconnecting || appState.deviceManager.isConnecting || appState.taskRunner.isRunning || appState.isPreparingSync)
             .help(appState.deviceManager.isConnected
                   ? "Disconnect from console"
                   : "Connect to console")
             .alert("Connection Failed", isPresented: $showReconnectFailed) {
                 Button("OK") {}
             } message: {
-                Text("Could not connect to the console.\n\n\u{2022} If demo mode is playing, press a button on the controller to exit it first.\n\u{2022} Try removing the USB cable, waiting a few seconds, and plugging it back in.\n\u{2022} If the console is unresponsive, unplug the power and reconnect it.\n\nThe app will keep trying to connect automatically in the background while the console is plugged in.")
+                if let error = appState.deviceManager.lastConnectionError {
+                    Text(error)
+                } else if appState.deviceManager.felDevicePresent && !appState.deviceManager.usbMonitor.rndisDevicePresent {
+                    Text("This USB identity is shared by older Clovershell firmware and the FEL bootloader. Connect verifies Clovershell before attempting a read-only inspection. A genuine FEL device cannot provide a game library. A USB ID alone does not establish FEL mode. Do not reinstall or reset the console just to connect; preserve its current games and saves first.")
+                } else {
+                    Text("Could not connect to the console.\n\n\u{2022} If a game or demo is playing, return to the game-selection menu.\n\u{2022} Check the USB cable and reconnect it if needed.\n\u{2022} If another app or virtual machine is using the console's USB connection, disconnect it there first.\n\u{2022} If the console is unresponsive, switch it off, wait a few seconds, then switch it on.\n\nChoose Connect to try again.")
+                }
             }
 
             Button {
@@ -364,19 +441,61 @@ struct ActionBarView: View {
             } label: {
                 Label("Memboot", systemImage: "bolt")
             }
-            .buttonStyle(ActionButtonStyle())
-            .help("Boot custom kernel without installing")
+            .buttonStyle(ActionButtonStyle(compact: true))
+            .disabled(true)
+            .help("Temporarily boots a system from memory; currently unavailable. Select the info button for details.")
+
+            FirmwareActionInfo(title: "Memboot", explanation:
+                "Starts a temporary system sent from the Mac while the console is in FEL mode. It can support inspection or recovery without installing that system in internal storage. The temporary system disappears when power is removed. This guided action is unavailable while its hardware workflow is being validated.")
 
             Button {
                 Task { await appState.rebootConsole() }
             } label: {
                 Label("Reboot", systemImage: "arrow.clockwise")
             }
-            .buttonStyle(ActionButtonStyle())
-            .disabled(!appState.deviceManager.isConnected)
+            .buttonStyle(ActionButtonStyle(compact: true))
+            .disabled(!appState.deviceManager.canInteract)
             .help("Reboot the console")
 
+            Button {
+                appState.showFolders = true
+            } label: {
+                Label("Folder Structure", systemImage: "folder")
+            }
+            .buttonStyle(ActionButtonStyle(compact: true))
+            .disabled(appState.taskRunner.isRunning || appState.isPreparingSync)
+            .help("Choose how games and folders appear on the console")
+
+            Button {
+                appState.reviewLibrarySync()
+            } label: {
+                Label("Sync Library", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .buttonStyle(ActionButtonStyle(compact: true))
+            .disabled(!appState.canReviewLibrarySync)
+            .help("Review changes to the connected console's game library before syncing")
+
+            Button {
+                appState.showRecoveryReadiness = true
+            } label: {
+                Label("Restore Console", systemImage: "arrow.uturn.backward.circle")
+            }
+            .buttonStyle(ActionButtonStyle(compact: true))
+            .disabled(appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
+            .help("Review original games, startup recovery and save-reset options for this console")
+
+            Button {
+                appState.reviewLegacyArchiveReclaim()
+            } label: {
+                Label("Reclaim Space", systemImage: "externaldrive.badge.minus")
+            }
+            .buttonStyle(ActionButtonStyle(compact: true))
+            .disabled(appState.deviceManager.legacyReport == nil || appState.taskRunner.isRunning
+                      || appState.isPreparingSync || appState.gameManager.isLoading)
+            .help("Review cleanup of a tested NES library's temporary transfer archive and former menu")
+
             Spacer()
+        }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -395,6 +514,31 @@ struct ActionBarView: View {
         }
     }
 
+}
+
+private struct FirmwareActionInfo: View {
+    let title: String
+    let explanation: String
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented = true
+        } label: {
+            Image(systemName: "info.circle")
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel("About \(title)")
+        .help("About \(title)")
+        .popover(isPresented: $isPresented) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.headline)
+                Text(explanation).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(16)
+            .frame(width: 320)
+        }
+    }
 }
 
 /// Custom button style for the action bar

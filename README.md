@@ -1,140 +1,77 @@
-# Swift Hakchi2
+# Hakchi Console Hub
 
-A native macOS application for modding Nintendo mini consoles, built with Swift and SwiftUI. This is a ground-up rewrite of [Hakchi2 CE](https://github.com/TeamShinkansen/Hakchi2-CE) targeting macOS.
+A work-in-progress macOS app for managing classic mini-console libraries, built with Swift and SwiftUI. This project continues [Swift Hakchi2](https://github.com/mattackerman808/swift-hakchi2), a native macOS rewrite inspired by [Hakchi2 CE](https://github.com/TeamShinkansen/Hakchi2-CE).
 
-## Supported Consoles
+> **Development preview:** Some functions require a console that has already been modified. First-time console setup and recovery are not generally available in this preview. Read the status below before making changes to a device.
 
-- NES Classic / Famicom Mini
-- SNES Classic (USA / EUR) / Super Famicom Mini
+## Supported consoles and status
+
+| Console | Current status |
+| --- | --- |
+| NES Classic (USA) | Library management and synchronization have been exercised on one already-modified console. Other devices, layouts and first-time installation need further testing. |
+| SNES Classic (USA) | Native game synchronization has been exercised on one prepared console. General first-time setup, other devices and restoration still need independent validation. |
+| Famicom Mini, Super Famicom Mini, European models | Library and console choices exist, but hardware operations are not generally verified. |
+| Sega Genesis / Mega Drive Mini | Library support is experimental; console setup and synchronization are not ready. |
+
+Games requiring an additional SNES compatibility emulator **cannot yet be synced through the app**. Temporary gameplay and save tests have been performed, but the launcher, persistent save recovery and normal synchronization are not complete. No per-game compatibility is guaranteed.
 
 ## Features
 
-- **Custom Kernel Install** — Flash a custom kernel to enable homebrew, or uninstall/factory reset
-- **Game Management** — Import ROMs, auto-match metadata via CRC32, edit game details
-- **Drag-and-Drop Sync** — Drag games into the Console Game Bar, click Sync to upload over USB
-- **Module Manager** — Browse, install, and manage hakchi modules (hmods) from an online repository
-- **Scraper** — Search TheGamesDB for cover art, descriptions, and metadata
-- **Stock Kernel Backup** — Back up and restore the original kernel
+- Import game files into a local library, edit metadata and artwork, and organize console menus into folders.
+- Review supported NES and SNES sync operations, space requirements, duplicates and backups before applying changes to a recognized, prepared console.
+- Search for game metadata and artwork using supported providers.
+- Manage cheat codes and create a separate patched game copy where supported. Cheat availability and patching vary by platform and game.
+- Review available console restore options. Their availability depends on the console, its setup and verified recovery files.
+
+Firmware installation, memboot, and some recovery and module operations are disabled or limited in this preview. Third-party downloaded cheat-code catalogs are not bundled in this source snapshot; users can supply their own catalog where supported. The app does not include personal game files, console backups, or save data. Obtain your own games and keep your own backups.
 
 ## Requirements
 
-- macOS 14.0 (Sonoma) or later
-- Swift 5.9+
-- USB-A cable (or USB-C adapter) to connect to the console
+- macOS 14 or later and a compatible USB connection to the console.
+- Xcode with a recent Swift toolchain; Swift 6 / Xcode 16 or newer is recommended for the test suite.
+- Internet access to resolve Swift Package Manager dependencies when building for the first time.
 
-## Installation
+## Build from source
 
-Download the latest `.zip` from [Releases](https://github.com/mattackerman808/swift-hakchi2/releases), extract it, and double-click **Swift Hakchi2.app**.
-
-Because the app is not signed with an Apple Developer certificate, macOS will block it on first launch. To allow it:
-
-1. Open **System Settings > Privacy & Security**
-2. Scroll down to **Security**
-3. Click **Open Anyway** next to the message about Swift Hakchi2, or change the **Allow applications from** setting to include the app
-
-Alternatively, right-click the app and choose **Open** to bypass the warning once.
-
-## Building
-
-Clone the repository and run:
-
-```bash
-./run.sh
+```sh
+swift build
+swift test
+./scripts/build-app.sh release
 ```
 
-This builds the project, assembles a `.app` bundle, and launches it. For build-only:
+Open `Package.swift` in Xcode if you prefer. The packaging script creates an ad-hoc-signed local app under `Builds/` and prints its path. It does not create an installer, publish a release or connect to a console. The app is a development build and is not notarized.
 
-```bash
-swift build              # Debug
-swift build -c release   # Release
-```
+For a fresh configuration, the default workspace is `~/Library/Application Support/Hakchi Console Hub/`. Games and backups are kept in its subfolders; choose another location in Settings if desired. Existing configurations retain their chosen paths. A build may download the open-source Swift dependencies listed in `Package.resolved`.
 
 ## Usage
 
-### Window Layout
+1. Add your own game files with **Add Game Files** and review their metadata and artwork.
+2. Select the appropriate console library. Connect a recognized, already-prepared console when you are ready to review a supported sync.
+3. Review the proposed games, folder structure, compatibility messages and backup before proceeding. Follow the app's staged instructions and test the updated menu before finishing a sync.
+4. Keep recovery files in a safe location. Do not assume that a backup from a different console or region is suitable for yours.
 
-The main window is organized top to bottom:
+Some screens and tools remain experimental. Do not use the app to install firmware on an untested device or assume that every game, save format, accessory or console revision is supported.
 
-1. **Action Bar** — Buttons for **Install Kernel**, **Connect/Disconnect**, **Memboot**, and **Reboot**
-2. **Games Explorer** — Your ROM library displayed as a grid of cover art cards (left), with an editable detail panel (right). The header has **Add ROMs** and **Import from Console** buttons, plus a search field.
-3. **Console Game Bar** — A tray along the bottom labeled "Desired Console Config" that shows which games will be on your console after the next sync. Has **Custom Games** and **Default Games** tabs, and a centered **Sync** button.
-4. **Status Bar** — Connection indicator (green = connected, orange = FEL mode, red = disconnected), console type, and game counts.
+## How it works
 
-### Flashing the Console
+The app uses USB recovery and management protocols to inspect compatible consoles, prepare backups and perform supported operations. Some workflows use temporary recovery images; supported game syncs use staged copies and a review before switching menus. The app keeps a local library and console recovery data on the Mac.
 
-1. Click **Install Kernel** in the action bar
-2. Choose whether to back up the stock kernel (recommended for first-time setup)
-3. If the console isn't in FEL mode, the app shows instructions and waits:
-   - Power off the console and unplug USB
-   - Hold the **RESET** button on the console
-   - While holding RESET, plug in the USB cable
-   - Release after 3 seconds
-4. The app flashes the custom kernel automatically once the console is detected
+## Project structure
 
-Additional kernel operations are in the **Kernel** menu: Uninstall, Factory Reset, and Shutdown.
-
-### Managing Games
-
-- **Add ROMs** — Click "Add ROMs" in the Games Explorer header. Supported formats: `.nes`, `.sfc`, `.smc`, `.md`, `.bin`, `.zip`
-- **Import from Console** — Click "Import from Console" to copy existing custom games from a connected console into your library
-- **Auto-matching** — Imported ROMs are matched by CRC32 against a built-in database to fill in name, publisher, release date, and cover art
-- **Edit details** — Click any game card to select it. The detail panel shows editable fields for name, publisher, genre, release date, players, command line, and description. Click "Save" to persist changes.
-- **Scraper** — Select a game and click "Search Online..." in the detail panel to search TheGamesDB for metadata and cover art. Requires an API key (see Settings).
-- **Delete** — Right-click a game card and choose "Delete Game..." to remove it from the library (your original ROM file is not affected)
-
-### Syncing Games to the Console
-
-1. **Drag** game cards from the Games Explorer down into the Console Game Bar
-2. The Console Game Bar shows your desired configuration — Custom Games tab for your imports, Default Games tab for stock titles
-3. To remove a game, drag it off the Console Game Bar back up into the explorer area (a "Remove" label follows your cursor and a poof animation plays on drop)
-4. Stock games can be hidden by dragging them off, or re-enabled via right-click → "Re-enable"
-5. Click the **Sync** button in the Console Game Bar to upload everything to the console
-
-The console has approximately 300 MB of usable storage. If syncing would remove games already on the console, the app warns you and offers to import them first.
-
-### Modules (hmods)
-
-Open the **Module Manager** from the Modules menu (Cmd+Shift+M):
-
-- **Browse tab** — Click "Load Repository" to fetch available modules, then click "Install" next to any module. You can also use "Install from File..." for local `.hmod` files.
-- **Installed tab** — View modules on the console, select any to uninstall with "Uninstall Selected"
-
-### Settings
-
-Open from the Swift Hakchi2 menu (Cmd+,):
-
-- **Console tab** — Default console type (NES/SNES/Famicom/Super Famicom), TheGamesDB API key, and "Enrich Library Now" button to bulk-fetch metadata
-- **Storage tab** — Upload games compressed, separate game storage per console, max game size (MB), and games folder path
-- **Advanced tab** — Purge all cover art (re-downloads from database), purge all imported games (clears library, does not delete original ROM files)
-
-## How It Works
-
-The app communicates with the console through two USB protocols:
-
-1. **FEL Mode** — When the console is in its Allwinner bootloader, the app uses the FEL protocol to initialize DRAM and boot a custom kernel image. The user enters FEL mode by holding Reset while powering on.
-
-2. **RNDIS/SSH** — After memboot, the console exposes a USB RNDIS network gadget. The app runs a user-space TCP/IP stack over this link and opens an SSH session to execute commands and transfer files — no network drivers or kernel extensions required.
-
-## Project Structure
-
-```
-SwiftHakchi/          Swift application
-├── App/              Entry point and AppState (global coordinator)
-├── Models/           Data models (Game, ConsoleType, DesktopFile, AppConfig)
-├── Services/         Actor-based business logic (device, flash, games, SSH, FEL)
-├── Views/            SwiftUI interface
-├── Utilities/        Helpers (TarWriter, CRC32, Game Genie codecs)
-└── Resources/        Binary payloads (fes1.bin, hakchi.hmod, basehmods.tar)
-
-USBBridge/            C library — USB and network protocol stack
-├── src/              IOKit USB, FEL, RNDIS, TCP/IP, SSH bridge, Clovershell
-└── include/          Public headers consumed by Swift
-
-vendor/               Vendored C dependencies
-├── mbedtls/          MBedTLS (cryptography, used by libssh2)
-└── libssh2/          LibSSH2 (SSH protocol)
+```text
+SwiftHakchi/       SwiftUI app, models, services and resources
+SwiftHakchiCore/   Shared formats and preparation logic
+USBBridge/         Native USB and communication bridge
+vendor/            Vendored C dependencies
+Tests/             Unit and integration tests
+scripts/           Local build and packaging scripts
+tools/             Console-side tooling and experiments
 ```
 
-## License
+## License and attribution
 
-This project is not affiliated with Nintendo. Use at your own risk.
+This preview retains third-party notices, including the LZO and Libretro Database notices in `SwiftHakchi/Resources/ThirdPartyLicenses/` and license files under `vendor/`. The source snapshot also retains binary support payloads inherited from the original Swift Hakchi2 repository.
+
+The upstream Swift Hakchi2 repository did not show a project-level license when this preview was prepared. No new project-wide license has been assumed. Review the upstream project's licensing, binary payloads, third-party artwork, and dependency obligations before publishing or distributing this snapshot. See [THIRD_PARTY.md](THIRD_PARTY.md).
+
+This project is not affiliated with Nintendo or Sega.

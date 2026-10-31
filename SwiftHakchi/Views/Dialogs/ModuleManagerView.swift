@@ -75,7 +75,8 @@ struct ModuleManagerView: View {
                 Button("Install from File...") {
                     installFromFile()
                 }
-                .disabled(!appState.deviceManager.isConnected || isInstalling)
+                .disabled(true)
+                .help("Module installation awaits separate hardware validation")
 
                 Spacer()
 
@@ -83,7 +84,8 @@ struct ModuleManagerView: View {
                     Button("Uninstall Selected") {
                         uninstallSelected()
                     }
-                    .disabled(selectedModules.isEmpty || !appState.deviceManager.isConnected || isUninstalling)
+                    .disabled(true)
+                    .help("Module removal awaits separate hardware validation")
                 }
             }
             .padding()
@@ -216,7 +218,8 @@ struct ModuleManagerView: View {
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
-                            .disabled(!appState.deviceManager.isConnected)
+                            .disabled(true)
+                            .help("Module installation awaits separate hardware validation")
                         }
                     }
                 }

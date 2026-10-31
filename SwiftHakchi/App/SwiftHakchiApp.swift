@@ -1,9 +1,11 @@
 import SwiftUI
 import AppKit
 
+#if !RECOVERY_DIAGNOSTIC && !RECOVERY_ASSISTANT
 @main
+#endif
 struct SwiftHakchiApp: App {
-    @StateObject private var appState = AppState()
+    @StateObject private var appState = AppState(startDeviceMonitoring: ProcessInfo.processInfo.environment["SWIFTHAKCHI_DISABLE_USB_MONITOR"] != "1")
 
     init() {
         // When running via `swift run` (not from a .app bundle), macOS treats
@@ -12,15 +14,11 @@ struct SwiftHakchiApp: App {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
 
-        // Set the app icon for Dock and About panel
-        if let iconURL = Bundle.appBundle.url(forResource: "AppIcon", withExtension: "icns"),
-           let icon = NSImage(contentsOf: iconURL) {
-            NSApplication.shared.applicationIconImage = icon
-        }
+        AppIconCatalog.apply(AppConfig.shared.appIconID)
     }
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("Hakchi Console Hub") {
             ContentView()
                 .environmentObject(appState)
                 .frame(minWidth: 800, minHeight: 500)
@@ -59,16 +57,17 @@ struct FileCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("Add ROMs...") {
+            Button("Add Game Files") {
                 appState.addROMs()
             }
             .keyboardShortcut("o")
+            .disabled(appState.gameManager.isInspectingLegacy)
 
             Button("Import from Console") {
                 Task { await appState.importFromConsole() }
             }
             .keyboardShortcut("i", modifiers: [.command, .option])
-            .disabled(!appState.deviceManager.isConnected)
+            .disabled(!appState.deviceManager.canInteract || appState.taskRunner.isRunning || appState.isPreparingSync)
 
             Divider()
 
@@ -76,7 +75,7 @@ struct FileCommands: Commands {
                 Task { await appState.syncGames() }
             }
             .keyboardShortcut("s")
-            .disabled(!appState.deviceManager.isConnected)
+            .disabled(!appState.deviceManager.canInteract || appState.taskRunner.isRunning || appState.isPreparingSync)
         }
     }
 }
@@ -85,23 +84,29 @@ struct EditCommands: Commands {
     @ObservedObject var appState: AppState
 
     private var canDelete: Bool {
-        appState.selectedGame?.source == .local
+        appState.selectedGame?.source == .local && appState.canChangeGameSelection
     }
 
     var body: some Commands {
         CommandGroup(after: .pasteboard) {
             Divider()
 
-            Button("Delete Game") {
+            Button("Remove from Mac Library…") {
                 appState.deleteSelectedGame()
             }
             .keyboardShortcut(.delete)
             .disabled(!canDelete)
 
-            Button("Select All for Sync") {
-                appState.selectAllGamesForSync()
+            Button("Select All Custom Games for Sync") {
+                appState.setAllCustomGamesSelectedForSync(true)
             }
             .keyboardShortcut("a", modifiers: [.command, .shift])
+            .disabled(!appState.canChangeGameSelection)
+
+            Button("Select No Custom Games for Sync") {
+                appState.setAllCustomGamesSelectedForSync(false)
+            }
+            .disabled(!appState.canChangeGameSelection)
         }
     }
 }
@@ -135,7 +140,7 @@ struct GameCommands: Commands {
                 }
             }
             .keyboardShortcut("d")
-            .disabled(appState.selectedGame == nil || !appState.deviceManager.isConnected)
+            .disabled(appState.selectedGame == nil || appState.deviceManager.sshService == nil)
         }
     }
 }
@@ -145,39 +150,43 @@ struct KernelCommands: Commands {
 
     var body: some Commands {
         CommandMenu("Kernel") {
-            Button("Install / Repair") {
+            Button("Advanced NES Recovery Assistant…") {
+                Task {
+                    do { try await RecoveryAssistantLauncher.open(workspace:AppConfig.shared.workspace.root) }
+                    catch { appState.reportOperationError(error.localizedDescription) }
+                }
+            }
+            .disabled(appState.recoveryContext.console != .nes || appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
+            Text("Save edits and quit this app before starting recovery.")
+            Button("Restore Console…") { appState.showRecoveryReadiness = true }
+                .disabled(appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
+            Divider()
+
+            Button("Install Kernel (Persistent)") {
                 appState.requestFlash(.installHakchi)
             }
             .keyboardShortcut("i", modifiers: [.command, .shift])
-            .disabled(!appState.deviceManager.felDevicePresent)
-
-            Button("Uninstall") {
-                appState.requestFlash(.uninstallHakchi)
-            }
-
-            Button("Factory Reset") {
-                appState.requestFlash(.factoryReset)
-            }
+            .disabled(true)
 
             Divider()
 
-            Button("Flash Custom Kernel") {
+            Button("Memboot (Temporary)") {
                 appState.requestFlash(.memboot)
             }
             .keyboardShortcut("k", modifiers: [.command, .shift])
-            .disabled(!appState.deviceManager.felDevicePresent)
+            .disabled(true)
 
             Divider()
 
             Button("Reboot") {
                 Task { await appState.rebootConsole() }
             }
-            .disabled(!appState.deviceManager.isConnected)
+            .disabled(!appState.deviceManager.canInteract || appState.taskRunner.isRunning || appState.isPreparingSync)
 
             Button("Shutdown") {
                 Task { await appState.shutdownConsole() }
             }
-            .disabled(!appState.deviceManager.isConnected)
+            .disabled(!appState.deviceManager.canInteract || appState.taskRunner.isRunning || appState.isPreparingSync)
         }
     }
 }
@@ -200,6 +209,25 @@ struct ToolsCommands: Commands {
 
     var body: some Commands {
         CommandMenu("Tools") {
+            Button("Cheat Codes…") { appState.showCodeCatalog = true }
+            Button("Automatic Folders...") { appState.showFolders = true }
+            Button("Back Up Console...") { appState.exportConsoleBackup() }
+                .disabled((!appState.deviceManager.canSync && appState.deviceManager.legacyReport == nil) || appState.taskRunner.isRunning || appState.gameManager.isLoading || appState.isPreparingSync)
+            Button("Review Legacy Change / Undo…") { appState.reviewLegacyChange() }
+                .disabled(appState.deviceManager.legacyReport == nil || appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading || appState.isPreparingSync)
+            Button("Review Legacy NES Sync Trial…") { appState.reviewLegacySyncTrial() }
+                .disabled(appState.deviceManager.legacyReport == nil || appState.taskRunner.isRunning
+                          || appState.isPreparingSync || appState.gameManager.isLoading)
+            Button("Sync Library / Update Game Library…") { appState.reviewLibrarySync() }
+                .disabled(!appState.canReviewLibrarySync)
+            Button("Reclaim Console Space…") { appState.reviewLegacyArchiveReclaim() }
+                .disabled(appState.deviceManager.legacyReport == nil || appState.taskRunner.isRunning
+                          || appState.isPreparingSync || appState.gameManager.isLoading)
+            Button("Recover Interrupted Sync") { appState.recoverInterruptedSync() }
+                .disabled(!appState.deviceManager.canSync || appState.taskRunner.isRunning)
+            Button("Reset Selections to Installed Games") { appState.gameManager.resetSelectionsToInstalled() }
+                .disabled(appState.taskRunner.isRunning || appState.gameManager.isInspectingLegacy)
+            Divider()
             Button("Scraper...") {
                 appState.showScraper = true
             }
@@ -209,7 +237,7 @@ struct ToolsCommands: Commands {
             Button("Dump Stock Kernel") {
                 appState.requestFlash(.dumpStockKernel)
             }
-            .disabled(!appState.deviceManager.isConnected)
+            .disabled(!appState.deviceManager.canInteract || appState.taskRunner.isRunning || appState.isPreparingSync)
         }
     }
 }
@@ -219,7 +247,7 @@ struct HelpCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .help) {
-            Button("Swift Hakchi2 Help") {
+            Button("Hakchi Console Hub Help") {
                 appState.showHelp = true
             }
             .keyboardShortcut("?")
@@ -230,13 +258,13 @@ struct HelpCommands: Commands {
 struct AboutCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .appInfo) {
-            Button("About Swift Hakchi2") {
+            Button("About Hakchi Console Hub") {
                 let credits = NSMutableAttributedString()
                 let style = NSMutableParagraphStyle()
                 style.alignment = .center
 
                 credits.append(NSAttributedString(
-                    string: "A native macOS tool for modding Nintendo mini consoles.\n",
+                    string: "Beta software · Built with Swift\nManage games and backups for classic mini consoles.\n",
                     attributes: [
                         .font: NSFont.systemFont(ofSize: 11),
                         .foregroundColor: NSColor.secondaryLabelColor,
@@ -246,7 +274,7 @@ struct AboutCommands: Commands {
 
                 let url = URL(string: "https://github.com/mattackerman808/swift-hakchi2")!
                 credits.append(NSAttributedString(
-                    string: "GitHub",
+                    string: "Original project on GitHub",
                     attributes: [
                         .font: NSFont.systemFont(ofSize: 11),
                         .link: url,

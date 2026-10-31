@@ -1,320 +1,146 @@
 import Foundation
 import CoreGraphics
 import ImageIO
-import os
+import SwiftHakchiCore
 
-private let logger = Logger(subsystem: "com.swifthakchi.app", category: "GameSync")
-
-/// Syncs games to the console matching the upstream .NET hakchi2-CE layout exactly:
-///
-///   {syncBase}/.storage/{code}/   — ROM + PNG (actual game files)
-///   {syncBase}/000/               — main menu: stock game .desktops + "More games..." folder
-///   {syncBase}/001/               — custom games page: game .desktops + "Original games" back button
-///   /var/games → {syncBase}/000   — symlink (current page)
-///   gamepath bind-mounted with 000/ content
-///
-/// Stock game dirs in 000/ contain only .desktop + autoplay/pixelart symlinks to squashfs.
-/// Custom game .desktop Exec points to absolute .storage path for the ROM.
+/// Builds a separate, checksummed library. Activation belongs to SyncTransactionService.
 actor GameSyncService {
-    private let shell: SSHService
+    private let shell: any ConsoleShell
     private let consoleType: ConsoleType
+    private var checksums: [String: String] = [:]
 
-    private static let nesDefaultArgs = "--guest-overscan-dimensions 0,0,9,3 --initial-fadein-durations 3,2 --volume 75 --enable-armet"
-    private static let squashfsBase = "/var/squashfs"
-
-    init(shell: SSHService, consoleType: ConsoleType) {
-        self.shell = shell
-        self.consoleType = consoleType
+    init(shell: any ConsoleShell, consoleType: ConsoleType) {
+        self.shell = shell; self.consoleType = consoleType
     }
 
-    func syncGames(
-        games: [Game],
-        gameSyncPath: String,
-        progress: @Sendable (String, Double) -> Void
-    ) async throws {
-        let selectedGames = games.filter { $0.isSelected && $0.source == .local }
-        let deselectedStockCodes = Set(games.filter { $0.isStock && !$0.isSelected }.map { $0.code })
-        let gamePath = consoleType.originalGamesPath
-        let syncBase = "\(gameSyncPath)/\(consoleType.syncCode)"
-        let storageDir = "\(syncBase)/.storage"
-        let page0 = "\(syncBase)/000"
-        let page1 = "\(syncBase)/001"
-        let squashfsGamePath = "\(Self.squashfsBase)\(gamePath)"
+    func prepareStage(plan: SyncPlan, stagingBase: String, finalBase: String,
+                      progress: @Sendable (String, Double) -> Void = { _, _ in }) async throws {
+        guard consoleType.isNES, plan.profile.systemCode == consoleType.syncCode,
+              stagingBase != finalBase, stagingBase.hasPrefix("/") else { throw SyncPlanError.unsupportedConsole }
+        checksums = [:]
+        _ = try await shell.executeChecked("mkdir -p \(q(stagingBase + "/.storage"))")
+        for page in plan.pages {
+            let pagePath = stagingBase + "/" + String(format: "%03d", page.number)
+            _ = try await shell.executeChecked("mkdir -p \(q(pagePath))")
+            for code in page.gameCodes {
+                try Task.checkCancellation()
+                guard let input = plan.selectedGames.first(where: { $0.code == code }) else { throw SyncPlanError.invalidInput("The sync plan is incomplete.") }
+                progress("Preparing \(input.name)...", Double(checksums.count) / Double(max(1, plan.selectedGames.count * 5)))
+                if input.isStock {
+                    try await stageStock(input, page: pagePath, stage: stagingBase)
+                } else {
+                    try await stageCustom(input, page: pagePath, stage: stagingBase, final: finalBase)
+                }
+            }
+            if let previous = page.previousPage { try await stageNavigation(target: previous, name: "Previous games", in: pagePath, stage: stagingBase, back: true) }
+            if let next = page.nextPage { try await stageNavigation(target: next, name: "More games...", in: pagePath, stage: stagingBase, back: false) }
+            let squashfs = "/var/squashfs" + consoleType.originalGamesPath
+            _ = try await shell.executeChecked("ln -sfn \(q(squashfs + "/copyright.fnt")) \(q(pagePath + "/copyright.fnt"))")
+            _ = try await shell.executeChecked("ln -sfn /var/lib/hakchi/rootfs/usr/share/fonts/title.fnt \(q(pagePath + "/title.fnt"))")
+        }
+        let marker = Data("SwiftHakchi sync for \(plan.profile.storageKey)\n".utf8)
+        try await shell.upload(data: marker, to: stagingBase + "/.sync-info", timeout: 60_000)
+        checksums[".sync-info"] = BackupManifest.digest(marker)
+        let manifest = checksums.keys.sorted().map { "\(checksums[$0]!)  \($0)\n" }.joined()
+        try await shell.upload(data: Data(manifest.utf8), to: stagingBase + "/.sync-checksums", timeout: 60_000)
+        _ = try await shell.executeChecked("cd \(q(stagingBase)) && sha256sum -c .sync-checksums", timeout: 300_000)
+    }
 
-        logger.info("Syncing \(selectedGames.count) custom games, syncBase=\(syncBase)")
+    private func stageStock(_ game: SyncGameInput, page: String, stage: String) async throws {
+        let desktop = DesktopFile(data: game.desktopData)
+        guard !desktop.exec.isEmpty else { throw SyncPlanError.invalidInput("Stock game metadata is incomplete: \(game.name)") }
+        let original = consoleType.originalGamesPath
+        let arguments = try LaunchCommand.arguments(in: desktop.exec)
+        let roms = arguments.filter { $0.hasPrefix(original + "/" + game.code + "/") }
+        guard roms.count == 1, let rom = roms.first else { throw SyncPlanError.unsafeCommand }
+        desktop.exec = try LaunchCommand.replacingROM(in: desktop.exec, oldPath: rom, newPath: "/var/squashfs" + rom)
+        desktop.code = game.code
+        desktop.iconPath = "/var/squashfs" + original
+        desktop.iconFilename = game.code + ".png"
+        try await upload([game.code + "/" + game.code + ".desktop": desktop.toData()], to: page, stage: stage)
+        for folder in ["autoplay", "pixelart"] {
+            let source = "/var/squashfs" + original + "/" + game.code + "/" + folder
+            _ = try await shell.executeChecked("ln -sfn \(q(source)) \(q(page + "/" + game.code + "/" + folder))")
+        }
+    }
 
-        // Step 1: Stop console UI
-        progress("Preparing console...", 0.05)
-        _ = try? await shell.execute("uistop")
+    private func stageCustom(_ game: SyncGameInput, page: String, stage: String, final: String) async throws {
+        guard let directory = game.localDirectory, let filename = game.romFilename else { throw SyncPlanError.missingFile(game.name) }
+        let desktop = DesktopFile(data: game.desktopData)
+        let oldROM = try LaunchCommand.romPath(in: desktop.exec, filename: filename)
+        let remoteROM = final + "/.storage/" + game.code + "/" + filename
+        desktop.exec = try LaunchCommand.replacingROM(in: desktop.exec, oldPath: oldROM, newPath: remoteROM)
+        desktop.code = game.code; desktop.profilePath = "/var/saves"; desktop.omitProfilePathCode = false
+        desktop.iconPath = final + "/.storage"; desktop.iconFilename = game.code + ".png"
+        var files = try readFiles(in: directory, code: game.code)
+        guard files[game.code + "/" + filename] != nil else { throw SyncPlanError.missingFile(filename) }
+        guard files.values.reduce(Int64(0), { $0 + Int64($1.count) }) <= game.byteCount else {
+            throw SyncPlanError.invalidInput("Game files changed after review. Prepare the sync again.")
+        }
+        let artURL = directory.appendingPathComponent(game.code + ".png")
+        let art = (try? Data(contentsOf: artURL)) ?? Self.generatePlaceholderPNG()
+        files[game.code + "/" + game.code + ".png"] = resizeCoverArt(data: art, width: consoleType.coverWidth, height: consoleType.coverHeight)
+        files[game.code + "/" + game.code + "_small.png"] = resizeCoverArt(data: art, width: 40, height: 40)
+        files[game.code + "/" + game.code + ".desktop"] = desktop.toData()
+        guard files.values.reduce(Int64(0), { $0 + Int64($1.count) }) <= game.byteCount + 64 * 1024 else {
+            throw SyncPlanError.invalidInput("Generated game assets exceed the reviewed staging budget.")
+        }
+        try await upload(files, to: stage + "/.storage", stage: stage)
+        try await upload([game.code + "/" + game.code + ".desktop": desktop.toData()], to: page, stage: stage)
+    }
 
-        // Step 2: Unmount any existing bind mount on gamepath
-        progress("Unmounting overlay...", 0.08)
-        _ = try? await shell.execute("umount \"\(gamePath)\" 2>/dev/null")
-        _ = try? await shell.execute("rm -f /var/games")
-
-        // Step 3: Clean and recreate sync directories
-        progress("Preparing sync directory...", 0.10)
-        _ = try? await shell.execute("rm -rf \"\(syncBase)\"")
-        _ = try? await shell.execute("mkdir -p \"\(storageDir)\" \"\(page0)\" \"\(page1)\"")
-
-        // Step 4: Build page 000/ — stock game entries from squashfs (skip deselected)
-        progress("Building stock game entries...", 0.12)
-        try await buildStockGameEntries(
-            page0: page0, squashfsGamePath: squashfsGamePath, excludeCodes: deselectedStockCodes
-        )
-
-        // Step 5: Create "More games..." folder entry (CLV-S-00001) in page 000/
-        progress("Creating folder structure...", 0.18)
-        try await createFolderEntry(in: page0)
-
-        // Step 6: Create font symlinks in page 000/
-        _ = try? await shell.execute(
-            "ln -sf \"\(squashfsGamePath)/copyright.fnt\" \"\(page0)/copyright.fnt\" 2>/dev/null; " +
-            "ln -sf /var/lib/hakchi/rootfs/usr/share/fonts/title.fnt \"\(page0)/title.fnt\" 2>/dev/null"
-        )
-
-        // Step 7: Upload custom games to .storage/ and page 001/
-        if selectedGames.isEmpty {
-            logger.info("No custom games to upload")
-        } else {
-            let total = Double(selectedGames.count)
-            for (index, game) in selectedGames.enumerated() {
-                let fraction = 0.20 + (Double(index) / total) * 0.55
-                progress("Uploading \(game.name)...", fraction)
-                try await uploadGame(game: game, storageDir: storageDir, menuDir: page1)
+    private func readFiles(in directory: URL, code: String) throws -> [String: Data] {
+        var files: [String: Data] = [:]
+        guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) else { throw SyncPlanError.missingFile(directory.path) }
+        for case let url as URL in enumerator {
+            let properties = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard properties.isSymbolicLink != true else { throw SyncPlanError.invalidInput("Linked files cannot be synced automatically: \(url.lastPathComponent)") }
+            if properties.isRegularFile == true {
+                let relative = String(url.path.dropFirst(directory.path.count + 1))
+                if relative.hasSuffix(".desktop") || relative.hasSuffix(".png") { continue }
+                files[code + "/" + relative] = try Data(contentsOf: url)
             }
         }
-
-        // Step 8: Create "Original games" back button (CLV-S-00000) in page 001/
-        try await createBackButton(in: page1)
-
-        // Step 9: Bind mount page 000/ onto gamepath and create /var/games symlink
-        progress("Mounting games...", 0.82)
-        _ = try? await shell.execute("mount --bind \"\(page0)\" \"\(gamePath)\"")
-        _ = try? await shell.execute("ln -sf \"\(page0)\" /var/games")
-
-        // Step 10: Restart console UI
-        progress("Restarting console...", 0.92)
-        _ = try? await shell.execute("uistart")
-
-        progress("Sync complete!", 1.0)
-        logger.info("Game sync complete")
+        return files
     }
 
-    // MARK: - Stock Games
-
-    /// Build stock game entries in page 000/ from squashfs.
-    /// Each entry has: .desktop + autoplay/pixelart symlinks to squashfs.
-    /// Games in `excludeCodes` are skipped (user deselected them).
-    private func buildStockGameEntries(
-        page0: String, squashfsGamePath: String, excludeCodes: Set<String>
-    ) async throws {
-        // Run a console-side script to create all stock game dirs at once.
-        // After copying .desktop from squashfs, rewrite Icon= to point to the
-        // squashfs path (e.g. /var/squashfs/usr/share/games/...) since the
-        // original gamepath will be covered by our bind mount.
-        let gamePath = consoleType.originalGamesPath
-
-        // Build exclusion list for the shell script
-        let excludeList = excludeCodes.joined(separator: "|")
-        let excludeCheck = excludeCodes.isEmpty ? "" : """
-          case "$code" in \(excludeList)) continue ;; esac
-        """
-
-        let script = """
-        sqfs="\(squashfsGamePath)"
-        dst="\(page0)"
-        gp="\(gamePath)"
-        for d in "$sqfs"/CLV-*; do
-          [ -d "$d" ] || continue
-          code=$(basename "$d")
-          \(excludeCheck)
-          mkdir -p "$dst/$code"
-          # Copy .desktop file from squashfs
-          cp "$d/$code.desktop" "$dst/$code/" 2>/dev/null
-          # Rewrite all paths (Exec ROM path, Icon) to use squashfs
-          # (gamepath will be covered by bind mount, squashfs still accessible)
-          sed -i "s|$gp|$sqfs|g" "$dst/$code/$code.desktop" 2>/dev/null
-          # Symlink autoplay/pixelart directories
-          [ -d "$d/autoplay" ] && ln -sf "$d/autoplay" "$dst/$code/autoplay"
-          [ -d "$d/pixelart" ] && ln -sf "$d/pixelart" "$dst/$code/pixelart"
-        done
-        echo "done"
-        """
-        let result = try? await shell.execute(script)
-        let excluded = excludeCodes.count
-        logger.info("Stock game entries: \(result?.output ?? "no output") (excluded \(excluded))")
-    }
-
-    // MARK: - Folder Navigation
-
-    /// Create "More games..." folder entry (CLV-S-00001) in page 000/
-    private func createFolderEntry(in page0: String) async throws {
-        let code = "CLV-S-00001"
-        let desktop = buildFolderDesktop(
-            code: code,
-            name: "More games...",
-            targetPage: 1,
-            sortTitle: "\u{042E}more games...",   // Ю prefix (Priority.Rightmost)
-            publisher: "ZZZZZZZZZY",
-            releaseDate: "8888-88-88"
-        )
-        let png = Self.generateFolderPNG()
-        let smallPng = Self.generateFolderSmallPNG()
-
-        var tar = TarWriter()
-        tar.addDirectory(name: "\(code)/")
-        tar.addFile(name: "\(code)/\(code).desktop", contents: desktop)
-        tar.addFile(name: "\(code)/\(code).png", contents: png)
-        tar.addFile(name: "\(code)/\(code)_small.png", contents: smallPng)
-        try await shell.uploadTar(data: tar.finalize(), to: page0)
-    }
-
-    /// Create "Original games" back button (CLV-S-00000) in page 001/
-    private func createBackButton(in page1: String) async throws {
-        let code = "CLV-S-00000"
-        let desktop = buildFolderDesktop(
-            code: code,
-            name: "Original games",
-            targetPage: 0,
-            sortTitle: "\u{042F}original games", // Я prefix (Priority.Back)
-            publisher: "ZZZZZZZZZZ",
-            releaseDate: "9999-99-99"
-        )
-        let png = Self.generateBackPNG()
-        let smallPng = Self.generateBackSmallPNG()
-
-        var tar = TarWriter()
-        tar.addDirectory(name: "\(code)/")
-        tar.addFile(name: "\(code)/\(code).desktop", contents: desktop)
-        tar.addFile(name: "\(code)/\(code).png", contents: png)
-        tar.addFile(name: "\(code)/\(code)_small.png", contents: smallPng)
-        try await shell.uploadTar(data: tar.finalize(), to: page1)
-    }
-
-    /// Build a folder/back .desktop matching upstream format exactly
-    private func buildFolderDesktop(
-        code: String, name: String, targetPage: Int,
-        sortTitle: String, publisher: String, releaseDate: String
-    ) -> Data {
+    private func stageNavigation(target: Int, name: String, in page: String, stage: String, back: Bool) async throws {
+        let code = String(format: "CLV-S-%05d", target)
         let desktop = DesktopFile()
-        desktop.code = code
-        desktop.name = name
-        desktop.exec = "/bin/chmenu \(String(format: "%03d", targetPage)) /var/games"
-        desktop.profilePath = "/var/saves/FOLDER"
-        desktop.omitProfilePathCode = true
-        desktop.iconPath = "/var/games"
-        desktop.iconFilename = "\(code).png"
-        desktop.testId = 777
-        desktop.sortName = sortTitle
-        desktop.publisher = publisher
-        desktop.releaseDate = releaseDate
-        desktop.players = 1
-        desktop.simultaneous = false
-        return desktop.toData()
+        desktop.code = code; desktop.name = name
+        desktop.exec = "/bin/chmenu \(String(format: "%03d", target)) /var/games"
+        desktop.profilePath = "/var/saves/FOLDER"; desktop.omitProfilePathCode = true
+        desktop.iconPath = "/var/games"; desktop.iconFilename = code + ".png"
+        desktop.sortName = (back ? "Я" : "Ю") + name
+        desktop.publisher = "ZZZZZZZZZZ"; desktop.testId = 777
+        try await upload([
+            code + "/" + code + ".desktop": desktop.toData(),
+            code + "/" + code + ".png": back ? Self.generateBackPNG() : Self.generateFolderPNG(),
+            code + "/" + code + "_small.png": back ? Self.generateBackSmallPNG() : Self.generateFolderSmallPNG()
+        ], to: page, stage: stage)
     }
 
-    // MARK: - Custom Game Upload
-
-    private func uploadGame(game: Game, storageDir: String, menuDir: String) async throws {
-        let gameDir = URL(fileURLWithPath: game.romPath)
-        guard FileManager.default.fileExists(atPath: gameDir.path),
-              let files = try? FileManager.default.contentsOfDirectory(
-                  at: gameDir, includingPropertiesForKeys: nil
-              ) else {
-            logger.warning("Game directory not found: \(gameDir.path)")
-            return
-        }
-
-        let code = game.code
-        let romFile = files.first { f in
-            let name = f.lastPathComponent
-            return !name.hasSuffix(".desktop") && !name.hasSuffix(".png") && !name.hasPrefix(".")
-        }
-
-        let romExt = romFile?.pathExtension ?? "nes"
-        let safeRomFilename = "\(code).\(romExt)"
-        let romConsolePath = "\(storageDir)/\(code)/\(safeRomFilename)"
-
-        let desktopData = buildGameDesktop(
-            localData: files.first { $0.lastPathComponent.hasSuffix(".desktop") }
-                .flatMap { try? Data(contentsOf: $0) } ?? Data(),
-            game: game,
-            romConsolePath: romConsolePath,
-            storagePath: "\(storageDir)/\(code)"
-        )
-
-        // --- .storage/{code}/ — ROM + PNG ---
-        var storageTar = TarWriter()
-        storageTar.addDirectory(name: "\(code)/")
-
-        let coverW = consoleType.coverWidth
-        let coverH = consoleType.coverHeight
-
-        var hasPng = false
-        for file in files {
-            guard let data = try? Data(contentsOf: file) else { continue }
-            let filename = file.lastPathComponent
-            if filename.hasSuffix(".desktop") {
-                continue
-            } else if filename.hasSuffix(".png") {
-                hasPng = true
-                // Resize cover art to console dimensions (saves upload bandwidth)
-                let resized = resizeCoverArt(data: data, width: coverW, height: coverH)
-                storageTar.addFile(name: "\(code)/\(code).png", contents: resized)
-                let small = resizeCoverArt(data: data, width: 40, height: 40)
-                storageTar.addFile(name: "\(code)/\(code)_small.png", contents: small)
-            } else if romFile != nil && filename == romFile!.lastPathComponent {
-                storageTar.addFile(name: "\(code)/\(safeRomFilename)", contents: data)
-            } else {
-                storageTar.addFile(name: "\(code)/\(filename)", contents: data)
+    private func upload(_ files: [String: Data], to directory: String, stage: String) async throws {
+        var tar = TarWriter()
+        let directories = Set(files.keys.flatMap { path -> [String] in
+            let pieces = path.split(separator: "/").dropLast()
+            return (1...max(1, pieces.count)).compactMap { count in pieces.isEmpty ? nil : pieces.prefix(count).joined(separator: "/") }
+        })
+        for name in directories.sorted() { tar.addDirectory(name: name) }
+        for name in files.keys.sorted() {
+            guard name.utf8.count < 100, !name.contains("\\"),
+                  !name.split(separator: "/").contains(where: { $0 == ".." || $0 == "." }),
+                  !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+                throw SyncPlanError.invalidInput("A game filename cannot be represented safely: \(name)")
             }
+            let data = files[name]!
+            tar.addFile(name: name, contents: data)
+            let relative = String(directory.dropFirst(stage.count + 1))
+            checksums[(relative.isEmpty ? "" : relative + "/") + name] = BackupManifest.digest(data)
         }
-
-        if !hasPng {
-            storageTar.addFile(name: "\(code)/\(code).png", contents: Self.generatePlaceholderPNG())
-            storageTar.addFile(name: "\(code)/\(code)_small.png", contents: Self.generatePlaceholderPNG())
-        }
-
-        try await shell.uploadTar(data: storageTar.finalize(), to: storageDir)
-
-        // --- 001/{code}/ — .desktop only ---
-        var menuTar = TarWriter()
-        menuTar.addDirectory(name: "\(code)/")
-        menuTar.addFile(name: "\(code)/\(code).desktop", contents: desktopData)
-        try await shell.uploadTar(data: menuTar.finalize(), to: menuDir)
+        try await shell.uploadTar(data: tar.finalize(), to: directory, extraArgs: "", timeout: 300_000)
     }
-
-    private func buildGameDesktop(
-        localData: Data, game: Game, romConsolePath: String, storagePath: String
-    ) -> Data {
-        let desktop: DesktopFile
-        if localData.isEmpty {
-            desktop = DesktopFile()
-            desktop.code = game.code
-            desktop.name = game.name
-        } else {
-            desktop = DesktopFile(data: localData)
-        }
-
-        switch consoleType {
-        case .nes, .famicom:
-            desktop.exec = "/bin/clover-kachikachi-wr \(romConsolePath) \(Self.nesDefaultArgs)"
-        case .snesUsa, .snesEur, .superFamicom, .superFamicomShonenJump:
-            desktop.exec = "/bin/clover-canoe-shvc-wr -rom \(romConsolePath) --volume 100 -rollback-snapshot-period 600"
-        default:
-            desktop.exec = romConsolePath
-        }
-
-        desktop.profilePath = "/var/saves"
-        desktop.omitProfilePathCode = false
-        // Icon={iconPath}/{code}/{iconFilename} — iconPath is .storage parent
-        let storageParent = (storagePath as NSString).deletingLastPathComponent
-        desktop.iconPath = storageParent
-        desktop.iconFilename = "\(game.code).png"
-
-        return desktop.toData()
-    }
+    private func q(_ value: String) -> String { LaunchCommand.shellQuote(value) }
 
     // MARK: - Icon Assets
 

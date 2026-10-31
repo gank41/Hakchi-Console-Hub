@@ -1,72 +1,55 @@
 import SwiftUI
+import AppKit
 
-/// Modal sheet showing task progress with cancel button
 struct TaskProgressSheet: View {
-    @EnvironmentObject var appState: AppState
+    @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
-
+    var body: some View { TaskProgressContent(runner:appState.taskRunner, close:{ dismiss() }) }
+}
+struct TaskProgressContent: View {
+    @ObservedObject var runner: TaskRunner
+    let close: () -> Void
+    @State private var detailsExpanded = false
     var body: some View {
-        VStack(spacing: 16) {
-            if appState.taskRunner.isRunning {
-                // Running state
-                Text(appState.taskRunner.currentTask)
-                    .font(.headline)
-
-                ProgressView(value: appState.taskRunner.progress)
-                    .progressViewStyle(.linear)
-
-                Text(String(format: "%.0f%%", appState.taskRunner.progress * 100))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                if appState.taskRunner.canCancel {
-                    Button("Cancel") {
-                        appState.taskRunner.cancel()
-                        dismiss()
-                    }
-                }
-            } else if let error = appState.taskRunner.error {
-                // Error state
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 36))
-                    .foregroundStyle(.red)
-
-                Text("Error")
-                    .font(.headline)
-
-                ScrollView {
-                    Text(error.localizedDescription)
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxHeight: 150)
-
-                Button("OK") {
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
+        VStack(alignment:.leading,spacing:16) {
+            Text(runner.operationName).font(.title2.bold())
+            if runner.isRunning {
+                Label(runner.cancelRequested ? "Stopping…" : runner.currentTask,systemImage:"gearshape.2")
+                    .fixedSize(horizontal:false,vertical:true)
+                if runner.hasMeasuredProgress {
+                    ProgressView(value:runner.progress)
+                    Text(runner.progress,format:.percent.precision(.fractionLength(0))).font(.caption).foregroundStyle(.secondary)
+                } else { ProgressView().controlSize(.small) }
+                Text(runner.cancelRequested ? "Waiting for the operation to stop. Leave any connected console powered and plugged in." : "Keep this window open while the operation is working. If a console is connected, leave it powered and plugged in.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else if runner.wasCancelled {
+                Label("Cancelled",systemImage:"stop.circle").font(.headline)
+                Text("The operation stopped. Review the details before trying again.")
+            } else if let error = runner.error {
+                Label("Needs attention",systemImage:"exclamationmark.triangle.fill").font(.headline).foregroundStyle(.orange)
+                Text(OperationActivity.safe(error.localizedDescription)).textSelection(.enabled).fixedSize(horizontal:false,vertical:true)
             } else {
-                // Success state
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 36))
-                    .foregroundStyle(.green)
-
-                Text("Complete")
-                    .font(.headline)
-
-                Text(appState.taskRunner.currentTask)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Button("OK") {
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
+                Label("Complete",systemImage:"checkmark.circle.fill").font(.headline).foregroundStyle(.green)
+                Text(runner.currentTask).foregroundStyle(.secondary).textSelection(.enabled)
+                Text("You can close this window to return to your library.").font(.callout)
             }
-        }
-        .padding(30)
-        .frame(minWidth: 400)
+            if let start = runner.startedAt {
+                TimelineView(.periodic(from:.now,by:1)) { context in
+                    Text("Elapsed: \(Int(max(0,(runner.endedAt ?? context.date).timeIntervalSince(start)))) seconds")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+            }
+            DisclosureGroup("Activity details",isExpanded:$detailsExpanded) {
+                ScrollView { Text(runner.activity.details).font(.caption.monospaced()).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading) }
+                    .frame(height:180)
+            }
+            HStack {
+                Button("Copy Details") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(runner.activity.details,forType:.string) }
+                Spacer()
+                if runner.isRunning {
+                    if runner.canCancel { Button("Cancel") { runner.cancel() } }
+                } else { Button("Done",action:close).keyboardShortcut(.defaultAction) }
+            }
+        }.padding(24).frame(width:540).interactiveDismissDisabled(runner.isRunning)
     }
 }

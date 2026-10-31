@@ -9,7 +9,7 @@
 #include "rndis.h"
 #include "tcpip.h"
 
-#include <libssh2.h>
+#include <LibSSH2.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +22,13 @@
 // ---------------------------------------------------------------------------
 // Timing helper
 // ---------------------------------------------------------------------------
+
+int ssh_transfer_completion(uint32_t expected, uint32_t written, bool eof, bool timed_out) {
+    if (timed_out) return -5;
+    if (written != expected) return -4;
+    if (!eof) return -6;
+    return 0;
+}
 
 static uint64_t now_ms_ssh(void) {
     struct timespec ts;
@@ -86,8 +93,8 @@ static ssize_t ssh_recv_cb(libssh2_socket_t fd, void *buf, size_t len,
 // Public API
 // ---------------------------------------------------------------------------
 
-ssh_session_t *ssh_session_open(uint16_t vid, uint16_t pid,
-                                 const char *host_ip, const char *remote_ip) {
+static ssh_session_t *ssh_session_open_impl(uint16_t vid, uint16_t pid,
+                                 const char *host_ip, const char *remote_ip, const hakchi_usb_identity_t *expected) {
     fprintf(stderr, "[SSH] Opening session\n");
 
     // Initialize libssh2
@@ -98,7 +105,7 @@ ssh_session_t *ssh_session_open(uint16_t vid, uint16_t pid,
     }
 
     // Step 1: Open RNDIS device
-    rndis_handle_t *rndis = rndis_open(vid, pid);
+    rndis_handle_t *rndis = expected ? rndis_open_bound(expected) : rndis_open(vid, pid);
     if (!rndis) {
         fprintf(stderr, "[SSH] RNDIS open failed\n");
         return NULL;
@@ -191,8 +198,41 @@ ssh_session_t *ssh_session_open(uint16_t vid, uint16_t pid,
     return s;
 }
 
-int ssh_exec(ssh_session_t *s, const char *command, ssh_exec_result_t *result,
-             int timeout_ms) {
+ssh_session_t *ssh_session_open(uint16_t vid, uint16_t pid, const char *host_ip, const char *remote_ip) {
+    return ssh_session_open_impl(vid, pid, host_ip, remote_ip, NULL);
+}
+ssh_session_t *ssh_session_open_bound(const hakchi_usb_identity_t *e, const char *host_ip, const char *remote_ip) {
+    if (!e || !e->registry_entry_id || !e->location_id || e->vendor_id != RNDIS_VID
+        || e->product_id != RNDIS_PID || e->device_class != 224) return NULL;
+    return ssh_session_open_impl(e->vendor_id, e->product_id, host_ip, remote_ip, e);
+}
+
+// Limits include payload bytes only; reserve one extra byte for the C terminator.
+static size_t ssh_read_capacity(size_t capacity, size_t length, uint32_t limit) {
+    if (limit && (size_t)limit - length < capacity) return (size_t)limit - length + 1;
+    return capacity;
+}
+static int ssh_append_output(char **buffer, size_t *capacity, size_t *length,
+                             const char *chunk, size_t count, uint32_t limit) {
+    size_t kept = count;
+    if (limit && kept > (size_t)limit - *length) kept = (size_t)limit - *length;
+    if (kept > SIZE_MAX - *length - 1) return -8;
+    size_t needed = *length + kept + 1;
+    if (needed > *capacity) {
+        size_t grown = *capacity > SIZE_MAX / 2 ? needed : *capacity * 2;
+        if (grown < needed) grown = needed;
+        if (limit && grown > (size_t)limit + 1) grown = (size_t)limit + 1;
+        char *replacement = realloc(*buffer, grown);
+        if (!replacement) return -8;
+        *buffer = replacement; *capacity = grown;
+    }
+    memcpy(*buffer + *length, chunk, kept); *length += kept;
+    (*buffer)[*length] = '\0';
+    return kept == count ? 0 : -7;
+}
+
+static int ssh_exec_internal(ssh_session_t *s, const char *command, ssh_exec_result_t *result,
+             int timeout_ms, uint32_t out_limit, uint32_t err_limit) {
     if (!s || !s->ssh || !result) return -1;
     memset(result, 0, sizeof(*result));
 
@@ -219,53 +259,61 @@ int ssh_exec(ssh_session_t *s, const char *command, ssh_exec_result_t *result,
     // Switch to non-blocking for the read loop so we can poll EOF.
     // Use short recv timeout so callbacks return quickly.
     libssh2_session_set_blocking(s->ssh, 0);
-    s->recv_timeout_ms = 100;
+    // Keep transport callbacks effectively nonblocking while channel output is
+    // buffered. tcp_recv(0) drains its ring without USB waits; the outer
+    // tcp_poll below pumps the wire and provides the bounded idle wait.
+    s->recv_timeout_ms = 0;
 
     // Read stdout
-    size_t stdout_cap = 4096;
+    size_t stdout_cap = out_limit && out_limit < 4096 ? (size_t)out_limit + 1 : 4096;
     size_t stdout_len = 0;
     char *stdout_buf = malloc(stdout_cap);
 
     // Read stderr
-    size_t stderr_cap = 4096;
+    size_t stderr_cap = err_limit && err_limit < 4096 ? (size_t)err_limit + 1 : 4096;
     size_t stderr_len = 0;
     char *stderr_buf = malloc(stderr_cap);
 
     char tmp[4096];
+    int read_error = 0;
+    bool timed_out = false;
     uint64_t read_deadline = now_ms_ssh() + (uint64_t)timeout_ms;
 
+    if (!stdout_buf || !stderr_buf) {
+        free(stdout_buf); free(stderr_buf);
+        s->recv_timeout_ms = 30000;
+        libssh2_session_set_blocking(s->ssh, 1);
+        libssh2_channel_close(ch); libssh2_channel_free(ch);
+        return -8;
+    }
     for (;;) {
         if (now_ms_ssh() > read_deadline) {
-            fprintf(stderr, "[SSH] exec: read timed out after %d ms\n", timeout_ms);
+            fprintf(stderr, "[SSH] exec: read timed out after %d ms (stdout=%zu bytes, stderr=%zu bytes)\n", timeout_ms, stdout_len, stderr_len);
+            timed_out = true;
             break;
         }
 
         int got_data = 0;
 
         // Read stdout (non-blocking)
-        ssize_t n = libssh2_channel_read(ch, tmp, sizeof(tmp));
+        ssize_t n = libssh2_channel_read(ch, tmp, ssh_read_capacity(sizeof(tmp), stdout_len, out_limit));
         if (n > 0) {
-            if (stdout_len + n > stdout_cap) {
-                stdout_cap = (stdout_len + n) * 2;
-                stdout_buf = realloc(stdout_buf, stdout_cap);
-            }
-            memcpy(stdout_buf + stdout_len, tmp, n);
-            stdout_len += n;
+            int appended = ssh_append_output(&stdout_buf, &stdout_cap, &stdout_len, tmp, (size_t)n, out_limit);
+            if (appended) { read_error = appended; break; }
             got_data = 1;
         }
+
+        if (n < 0 && n != LIBSSH2_ERROR_EAGAIN) { read_error = (int)n; break; }
 
         // Read stderr (non-blocking)
-        n = libssh2_channel_read_stderr(ch, tmp, sizeof(tmp));
+        n = libssh2_channel_read_stderr(ch, tmp, ssh_read_capacity(sizeof(tmp), stderr_len, err_limit));
         if (n > 0) {
-            if (stderr_len + n > stderr_cap) {
-                stderr_cap = (stderr_len + n) * 2;
-                stderr_buf = realloc(stderr_buf, stderr_cap);
-            }
-            memcpy(stderr_buf + stderr_len, tmp, n);
-            stderr_len += n;
+            int appended = ssh_append_output(&stderr_buf, &stderr_cap, &stderr_len, tmp, (size_t)n, err_limit);
+            if (appended) { read_error = appended; break; }
             got_data = 1;
         }
 
+        if (n < 0 && n != LIBSSH2_ERROR_EAGAIN) { read_error = (int)n; break; }
         if (libssh2_channel_eof(ch)) break;
 
         // If no data available, pump the TCP stack to receive more
@@ -280,21 +328,33 @@ int ssh_exec(ssh_session_t *s, const char *command, ssh_exec_result_t *result,
     libssh2_session_set_timeout(s->ssh, 30000);
 
     // Null-terminate
-    stdout_buf = realloc(stdout_buf, stdout_len + 1);
     stdout_buf[stdout_len] = '\0';
-    stderr_buf = realloc(stderr_buf, stderr_len + 1);
     stderr_buf[stderr_len] = '\0';
 
     result->stdout_buf = stdout_buf;
     result->stdout_len = (uint32_t)stdout_len;
     result->stderr_buf = stderr_buf;
     result->stderr_len = (uint32_t)stderr_len;
-    result->exit_code = libssh2_channel_get_exit_status(ch);
-
-    libssh2_channel_close(ch);
+    int completion = ssh_transfer_completion(0, 0, libssh2_channel_eof(ch), timed_out);
+    if (out_limit) libssh2_session_set_timeout(s->ssh, timeout_ms < 5000 ? timeout_ms : 5000);
+    int close_result = libssh2_channel_close(ch);
+    result->exit_code = close_result == 0 ? libssh2_channel_get_exit_status(ch) : -1;
     libssh2_channel_free(ch);
+    libssh2_session_set_timeout(s->ssh, 30000);
 
-    return 0;
+    return read_error ? read_error : (completion ? completion : close_result);
+}
+
+int ssh_exec(ssh_session_t *s, const char *command, ssh_exec_result_t *result, int timeout_ms) {
+    return ssh_exec_internal(s, command, result, timeout_ms, 0, 0);
+}
+int ssh_exec_bounded(ssh_session_t *s, const char *command, ssh_exec_result_t *result,
+                     int timeout_ms, uint32_t stdout_limit, uint32_t stderr_limit) {
+    if (!result) return -1;
+    memset(result, 0, sizeof(*result));
+    if (!command || timeout_ms <= 0 || !stdout_limit || !stderr_limit ||
+        stdout_limit > 64u * 1024 * 1024 || stderr_limit > 64u * 1024 * 1024) return -1;
+    return ssh_exec_internal(s, command, result, timeout_ms, stdout_limit, stderr_limit);
 }
 
 int ssh_exec_stdin(ssh_session_t *s, const char *command,
@@ -325,6 +385,7 @@ int ssh_exec_stdin(ssh_session_t *s, const char *command,
     s->recv_timeout_ms = 50;
 
     fprintf(stderr, "[SSH] exec_stdin: writing %u bytes\n", stdin_len);
+    int write_error = 0;
     uint32_t written = 0;
     uint32_t last_report = 0;
     while (written < stdin_len) {
@@ -334,6 +395,7 @@ int ssh_exec_stdin(ssh_session_t *s, const char *command,
         ssize_t n = libssh2_channel_write(ch, (const char *)(stdin_data + written), chunk);
         if (n < 0) {
             fprintf(stderr, "[SSH] stdin write error at %u/%u: %zd\n", written, stdin_len, n);
+            write_error = (int)n;
             break;
         }
         if (n == 0) {
@@ -352,11 +414,15 @@ int ssh_exec_stdin(ssh_session_t *s, const char *command,
     fprintf(stderr, "[SSH] exec_stdin: write complete (%u bytes), sending EOF\n", written);
 
     // Signal EOF on stdin
-    libssh2_channel_send_eof(ch);
+    int eof_result = libssh2_channel_send_eof(ch);
+    if (eof_result < 0) write_error = eof_result;
 
     // Switch to non-blocking for the read loop
     libssh2_session_set_blocking(s->ssh, 0);
-    s->recv_timeout_ms = 100;
+    // Keep transport callbacks effectively nonblocking while channel output is
+    // buffered. tcp_recv(0) drains its ring without USB waits; the outer
+    // tcp_poll below pumps the wire and provides the bounded idle wait.
+    s->recv_timeout_ms = 0;
 
     // Read stdout + stderr
     size_t stdout_cap = 4096, stdout_len = 0;
@@ -365,10 +431,12 @@ int ssh_exec_stdin(ssh_session_t *s, const char *command,
     char *stderr_buf = malloc(stderr_cap);
 
     char tmp[4096];
+    int read_error = 0;
+    bool timed_out = false;
     uint64_t read_deadline = now_ms_ssh() + (uint64_t)timeout_ms;
 
     for (;;) {
-        if (now_ms_ssh() > read_deadline) break;
+        if (now_ms_ssh() > read_deadline) { timed_out = true; break; }
 
         int got_data = 0;
 
@@ -383,6 +451,7 @@ int ssh_exec_stdin(ssh_session_t *s, const char *command,
             got_data = 1;
         }
 
+        if (n < 0 && n != LIBSSH2_ERROR_EAGAIN) { read_error = (int)n; break; }
         n = libssh2_channel_read_stderr(ch, tmp, sizeof(tmp));
         if (n > 0) {
             if (stderr_len + n > stderr_cap) {
@@ -394,6 +463,7 @@ int ssh_exec_stdin(ssh_session_t *s, const char *command,
             got_data = 1;
         }
 
+        if (n < 0 && n != LIBSSH2_ERROR_EAGAIN) { read_error = (int)n; break; }
         if (libssh2_channel_eof(ch)) break;
 
         if (!got_data) {
@@ -415,12 +485,12 @@ int ssh_exec_stdin(ssh_session_t *s, const char *command,
     result->stdout_len = (uint32_t)stdout_len;
     result->stderr_buf = stderr_buf;
     result->stderr_len = (uint32_t)stderr_len;
-    result->exit_code = libssh2_channel_get_exit_status(ch);
-
-    libssh2_channel_close(ch);
+    int completion = ssh_transfer_completion(stdin_len, written, libssh2_channel_eof(ch), timed_out);
+    int close_result = libssh2_channel_close(ch);
+    result->exit_code = close_result == 0 ? libssh2_channel_get_exit_status(ch) : -1;
     libssh2_channel_free(ch);
 
-    return 0;
+    return write_error ? write_error : (read_error ? read_error : (completion ? completion : close_result));
 }
 
 void ssh_result_free(ssh_exec_result_t *result) {

@@ -2,340 +2,226 @@ import Foundation
 import Combine
 import os
 
-private let logger = Logger(subsystem: "com.swifthakchi.app", category: "DeviceManager")
-
-/// Manages console connection lifecycle: USB detection → SSH connect → device probe.
-///
-/// Watches two device types:
-/// - FEL bootloader (VID 0x1F3A PID 0xEFE8) — for flashing
-/// - RNDIS gadget (VID 0x04E8 PID 0x6863) — for SSH communication
-///
-/// When RNDIS appears:
-/// 1. Wait for USB to stabilize
-/// 2. Connect via SSH over RNDIS (user-space network stack)
-/// 3. Probe device: read version info, detect console type
-/// 4. Set isConnected = true
+/// Owns one normal-mode connection. Shared recovery USB IDs never establish a console model.
 @MainActor
 final class DeviceManager: ObservableObject {
-    // MARK: - Published state
-    @Published var isConnected: Bool = false
-    @Published var felDevicePresent: Bool = false
+    @Published var isConnected = false
+    @Published var felDevicePresent = false
     @Published var consoleType: ConsoleType = .unknown
-    @Published var customFirmwareLoaded: Bool = false
-    @Published var canSync: Bool = false
-    @Published var canInteract: Bool = false
-
-    // Version info
-    @Published var bootVersion: String = ""
-    @Published var kernelVersion: String = ""
-    @Published var scriptVersion: String = ""
-    @Published var uniqueId: String = ""
-
-    // MARK: - Services
+    @Published var customFirmwareLoaded = false
+    @Published var canSync = false
+    @Published var canInteract = false
+    @Published var bootVersion = ""
+    @Published var kernelVersion = ""
+    @Published var scriptVersion = ""
+    @Published var uniqueId = ""
     let usbMonitor = USBMonitor()
     let felService = FELService()
     private(set) var sshService: SSHService?
-
-    /// Set to true before flash operations to prevent DeviceManager from auto-connecting.
-    /// When set, device appearance only sets felDevicePresent (no SSH probe).
-    var suppressAutoConnect: Bool = false {
-        didSet {
-            if suppressAutoConnect {
-                connectTask?.cancel()
-                connectTask = nil
-            } else if !suppressAutoConnect && oldValue {
-                Self.debugLog("suppressAutoConnect cleared: rndis=\(usbMonitor.rndisDevicePresent)")
-                if usbMonitor.rndisDevicePresent {
-                    Self.debugLog("RNDIS device already present, triggering connect")
-                    onRNDISDeviceAppeared()
-                }
-            }
-        }
+    private(set) var legacyClient: LegacyInspectionClient?
+    @Published private(set) var nativeSNESContext: SNESLibraryContext?
+    private(set) var nativeSNES: SNESLibraryConnectionSession?
+    @Published private(set) var legacyReport: LegacyConsoleReport?
+    @Published private(set) var lastConnectionError: String?
+    @Published private(set) var connectionStage: ConsoleConnectionStage?
+    var isConnecting: Bool { connectionStage != nil }
+    @discardableResult func updateConnectionStage(_ stage: ConsoleConnectionStage, session: UUID) -> Bool {
+        guard session == sessionID else { return false }
+        connectionStage = stage
+        return true
     }
-
+    private func recordConnectionStage(_ stage: ConsoleConnectionStage, session: UUID, started: ContinuousClock.Instant) {
+        guard updateConnectionStage(stage, session: session) else { return }
+        Self.debugLog("Connection stage=" + stage.rawValue + " elapsed=" + String(describing: started.duration(to: .now)))
+    }
+    private(set) var sessionID = UUID()
+    private let makeLegacyClient: @Sendable () -> LegacyInspectionClient
+    private let connectRuntime: (@Sendable (RecoveryProbeUSBDevice) async throws -> ConnectedConsoleInfo)?
     private var cancellables = Set<AnyCancellable>()
     private var connectTask: Task<Void, Never>?
+    private var closingTask: Task<Void, Never>?
+    private var observedDevices: [RecoveryProbeUSBDevice] = []
+    private var connectedAttachmentID: UInt64?
+    private var attemptedAttachmentID: UInt64?
+    private var manuallyDisconnectedID: UInt64?
+    private var observedRNDISPresent = false
+    private var awaitRecoveryUnplug = false
 
-    // Version minimums
-    private let minBootVersion = VersionTuple(1, 0, 2)
-    private let minKernelVersion = VersionTuple(3, 4, 113)
-    private let minScriptVersion = VersionTuple(1, 0, 4, 118)
-
-    init() {}
-
-    /// Write debug messages to a file since stdout isn't captured from GUI apps
-    static func debugLog(_ msg: String) {
-        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
-        let path = "/tmp/swifthakchi-debug.log"
-        if let fh = FileHandle(forWritingAtPath: path) {
-            fh.seekToEndOfFile()
-            fh.write(Data(line.utf8))
-            fh.closeFile()
-        } else {
-            FileManager.default.createFile(atPath: path, contents: Data(line.utf8))
+    /// A recovery operation owns USB until it explicitly releases it or normal boot is restored.
+    var suppressAutoConnect = false {
+        didSet {
+            if suppressAutoConnect { connectTask?.cancel() }
         }
     }
 
+    init(makeLegacyClient: @escaping @Sendable () -> LegacyInspectionClient = {
+        LegacyInspectionClient(diagnosticsURL: AppConfig.shared.workspace.logs.appendingPathComponent("legacy-usb-failures.jsonl"))
+    }, connectRuntime: (@Sendable (RecoveryProbeUSBDevice) async throws -> ConnectedConsoleInfo)? = nil) {
+        self.makeLegacyClient = makeLegacyClient; self.connectRuntime = connectRuntime
+    }
+    static func debugLog(_ message: String) {
+        let directory = AppConfig.shared.workspace.logs
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let path = directory.appendingPathComponent("device.log")
+        let data = Data(("[" + ISO8601DateFormatter().string(from: Date()) + "] " + message + "\n").utf8)
+        if let file = try? FileHandle(forWritingTo: path) {
+            _ = try? file.seekToEnd(); try? file.write(contentsOf: data); try? file.close()
+        } else { try? data.write(to: path, options: .atomic) }
+    }
     func start() {
+        usbMonitor.$attachments.removeDuplicates().receive(on: DispatchQueue.main)
+            .sink { [weak self] devices in self?.enqueue(devices) }.store(in: &cancellables)
         usbMonitor.start()
-
-        // FEL device — just track presence
-        usbMonitor.$felDevicePresent
-            .removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] present in
-                guard let self else { return }
-                self.felDevicePresent = present
-                if present {
-                    logger.info("FEL device detected")
-                }
-            }
-            .store(in: &cancellables)
-
-        // RNDIS device — auto-connect via SSH
-        usbMonitor.$rndisDevicePresent
-            .removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] present in
-                guard let self else { return }
-                if present {
-                    self.onRNDISDeviceAppeared()
-                } else {
-                    self.onRNDISDeviceDisappeared()
-                }
-            }
-            .store(in: &cancellables)
     }
-
     func stop() {
-        usbMonitor.stop()
-        connectTask?.cancel()
-        disconnect()
+        usbMonitor.stop(); cancellables.removeAll(); connectTask?.cancel(); _ = disconnect()
     }
-
-    // MARK: - Manual Connect/Disconnect
-
-    /// Manually disconnect from the console.
-    func manualDisconnect() {
-        Self.debugLog("manualDisconnect: user requested")
-        connectTask?.cancel()
-        connectTask = nil
-        suppressAutoConnect = true
-        disconnect()
-        // Re-enable auto-connect after a short delay so USB re-plug works
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(1))
-            self.suppressAutoConnect = false
+    private func enqueue(_ devices: [RecoveryProbeUSBDevice]) {
+        let prior = connectTask
+        prior?.cancel()
+        // Invalidate now, before waiting for a cancelled native open to finish.
+        if ConsoleAttachmentPolicy.single(devices)?.registryEntryID != connectedAttachmentID {
+            _ = disconnect()
+        }
+        connectTask = Task { @MainActor [weak self] in
+            await prior?.value
+            guard let self, !Task.isCancelled else { return }
+            await self.inspectAttachments(devices)
         }
     }
-
-    /// Manually attempt to reconnect. Disconnects any stale session first,
-    /// then tries SSH. Returns true if connected, false if failed.
-    @discardableResult
-    func reconnect() async -> Bool {
-        Self.debugLog("reconnect: manual attempt")
-        connectTask?.cancel()
-        disconnect()
-
-        // Give USB a moment to settle
-        try? await Task.sleep(for: .milliseconds(500))
-
-        // Try SSH if RNDIS device is present
-        if usbMonitor.rndisDevicePresent {
-            let success = await trySSHConnect()
-            if success { return true }
-
-            // Retry once more after a short delay
-            try? await Task.sleep(for: .seconds(2))
-            if await trySSHConnect() { return true }
+    func inspectAttachments(_ devices: [RecoveryProbeUSBDevice]) async {
+        let changed = devices != observedDevices
+        observedDevices = devices
+        felDevicePresent = devices.contains { ConsoleAttachmentPolicy.kind(of: $0) == .recovery }
+        if awaitRecoveryUnplug, devices.isEmpty {
+            awaitRecoveryUnplug = false; suppressAutoConnect = false
         }
-
-        Self.debugLog("reconnect: failed")
-        return false
-    }
-
-    // MARK: - USB Device Events
-
-    private func onRNDISDeviceAppeared() {
-        Self.debugLog("onRNDISDeviceAppeared: suppress=\(self.suppressAutoConnect)")
-        if suppressAutoConnect { return }
-
-        connectTask?.cancel()
-        connectTask = Task { @MainActor in
-            // Wait for USB gadget to stabilize
-            try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else {
-                Self.debugLog("Connect task cancelled during sleep")
-                return
-            }
-
-            // Retry SSH connection indefinitely while RNDIS device is present.
-            // The console's SSH server may take several seconds after RNDIS
-            // appears, and previous stale TCP state can cause early failures.
-            var attempt = 0
-            while !Task.isCancelled && self.usbMonitor.rndisDevicePresent {
-                attempt += 1
-                Self.debugLog("SSH connect attempt \(attempt)")
-                let success = await self.trySSHConnect()
-                if success { return }
-                try? await Task.sleep(for: .seconds(3))
-            }
-            Self.debugLog("SSH connect loop ended: cancelled=\(Task.isCancelled) rndis=\(self.usbMonitor.rndisDevicePresent)")
-        }
-    }
-
-    private func onRNDISDeviceDisappeared() {
-        Self.debugLog("onRNDISDeviceDisappeared")
-        connectTask?.cancel()
-        disconnect()
-    }
-
-    // MARK: - SSH Probe
-
-    /// Try to connect via SSH over RNDIS. If it works, probe the device.
-    /// Returns true on success.
-    @discardableResult
-    private func trySSHConnect() async -> Bool {
-        Self.debugLog("trySSHConnect: starting")
-        let shell = SSHService()
-        do {
-            try await shell.connect()
-            Self.debugLog("trySSHConnect: connected, testing...")
-
-            let testResult = try await shell.execute("echo ok", timeout: 5000)
-            guard testResult.succeeded, testResult.output == "ok" else {
-                Self.debugLog("trySSHConnect: test failed")
-                await shell.disconnect()
-                return false
-            }
-
-            Self.debugLog("trySSHConnect: test passed — probing device")
-            sshService = shell
-            await probeDevice()
-            Self.debugLog("trySSHConnect: probe complete, isConnected=\(isConnected)")
-            return isConnected
-        } catch {
-            Self.debugLog("trySSHConnect: error — \(error.localizedDescription)")
-            await shell.disconnect()
-            return false
-        }
-    }
-
-    private func disconnect() {
-        if let shell = sshService {
-            Task { await shell.disconnect() }
-        }
-        sshService = nil
-        isConnected = false
-        canSync = false
-        canInteract = false
-        customFirmwareLoaded = false
-        consoleType = .unknown
-        bootVersion = ""
-        kernelVersion = ""
-        scriptVersion = ""
-        uniqueId = ""
-    }
-
-    // MARK: - Device Probing
-
-    private func probeDevice() async {
-        guard let shell = sshService else {
-            Self.debugLog("probeDevice: no sshService")
+        guard let attachment = ConsoleAttachmentPolicy.single(devices) else {
+            _ = disconnect()
+            if changed { attemptedAttachmentID = nil }
+            if devices.count > 1 { lastConnectionError = "Connect one console at a time." }
             return
         }
-        Self.debugLog("probeDevice: starting")
-
-        do {
-            // Read unique hardware ID (matches Hakchi2-CE's "hakchi hwid")
-            let hwidResult = try await shell.execute("hakchi hwid 2>/dev/null")
-            if hwidResult.succeeded && !hwidResult.output.isEmpty {
-                uniqueId = hwidResult.output.replacingOccurrences(of: " ", with: "")
-            } else {
-                // Fallback: try /etc/clover/uid
-                let uidResult = try await shell.execute("cat /etc/clover/uid 2>/dev/null")
-                if uidResult.succeeded && !uidResult.output.isEmpty {
-                    uniqueId = uidResult.output
-                }
-            }
-
-            // Read version info
-            let hasVersion = try await shell.execute("[ -f /var/version ] && echo yes")
-            if hasVersion.output == "yes" {
-                let versionResult = try await shell.execute(
-                    "source /var/version && echo \"$bootVersion $kernelVersion $hakchiVersion\""
-                )
-                let parts = versionResult.output.components(separatedBy: " ")
-                if parts.count >= 3 {
-                    bootVersion = parts[0]
-                    kernelVersion = parts[1]
-                    scriptVersion = parts[2]
-                } else if parts.count >= 2 {
-                    bootVersion = parts[0]
-                    kernelVersion = parts[1]
-                    let unameResult = try await shell.execute("uname -r")
-                    if kernelVersion.isEmpty {
-                        kernelVersion = unameResult.output
-                    }
-                }
-            } else {
-                bootVersion = "1.0.0"
-                let unameResult = try await shell.execute("uname -r")
-                kernelVersion = unameResult.output
-                scriptVersion = "v1.0.0-000"
-            }
-
-            // Parse and check versions
-            let bootVer = VersionTuple.parse(bootVersion)
-            let kernelVer = VersionTuple.parse(kernelVersion)
-            let scriptVer = VersionTuple.parse(scriptVersion)
-
-            canInteract = bootVer >= minBootVersion
-                && kernelVer >= minKernelVersion
-                && scriptVer >= minScriptVersion
-
-            // Detect console type (3-method cascade)
-            var systemCode = ""
-
-            let sysCodeResult = try await shell.execute("cat /etc/clover/system_code 2>/dev/null")
-            if sysCodeResult.succeeded && !sysCodeResult.output.isEmpty {
-                systemCode = sysCodeResult.output
-            }
-
-            if systemCode.isEmpty || ConsoleType.fromSystemCode(systemCode) == .unknown {
-                let evalResult = try await shell.execute(
-                    "hakchi eval 'echo \"$sftype-$sfregion\"' 2>/dev/null"
-                )
-                if evalResult.succeeded && !evalResult.output.isEmpty {
-                    systemCode = evalResult.output
-                }
-            }
-
-            if systemCode.isEmpty || ConsoleType.fromSystemCode(systemCode) == .unknown {
-                let srcResult = try await shell.execute(
-                    "source /var/version 2>/dev/null && echo \"$sftype-$sfregion\""
-                )
-                if srcResult.succeeded && !srcResult.output.isEmpty {
-                    systemCode = srcResult.output
-                }
-            }
-
-            consoleType = ConsoleType.fromSystemCode(systemCode)
-
-            // Check if custom firmware is loaded
-            if canInteract {
-                let cfResult = try await shell.execute("ls /var/lib/hakchi/ 2>/dev/null")
-                customFirmwareLoaded = cfResult.succeeded
-                canSync = true
-            }
-
-            isConnected = true
-            Self.debugLog("probeDevice: SUCCESS type=\(self.consoleType.rawValue) fw=\(self.customFirmwareLoaded) canInteract=\(self.canInteract)")
-
-        } catch {
-            Self.debugLog("probeDevice: FAILED \(error.localizedDescription)")
-            isConnected = false
+        let id = attachment.registryEntryID!
+        if connectedAttachmentID != id {
+            _ = disconnect()
+            attemptedAttachmentID = nil
         }
+        guard !suppressAutoConnect, manuallyDisconnectedID != id,
+              !isConnected, attemptedAttachmentID != id else { return }
+        guard [.legacy, .nativeSNES, .rndis].contains(ConsoleAttachmentPolicy.kind(of: attachment)) else { return }
+        attemptedAttachmentID = id
+        await connect(attachment)
+    }
+    private func connect(_ attachment: RecoveryProbeUSBDevice) async {
+        let previousClose = disconnect()
+        let token = sessionID
+        connectedAttachmentID = attachment.registryEntryID
+        lastConnectionError = nil
+        let started = ContinuousClock.now
+        recordConnectionStage(.closingPrevious, session: token, started: started)
+        await previousClose?.value
+        guard token == sessionID, !Task.isCancelled else {
+            if token == sessionID { connectionStage = nil }
+            return
+        }
+        do {
+            let result: ConnectedConsoleInfo
+            if let connectRuntime { result = try await connectRuntime(attachment) }
+            else {
+                result = try await ConsoleRuntimeConnection.connect(attachment, makeLegacyClient: makeLegacyClient,
+                    workspace: AppConfig.shared.workspace, sessionID: token, progress: { [weak self] stage in
+                        await self?.recordConnectionStage(stage, session: token, started: started)
+                    })
+            }
+            guard sessionID == token, !Task.isCancelled,
+                  observedDevices.contains(attachment) else {
+                if sessionID == token { connectionStage = nil }
+                await result.close(); return
+            }
+            sshService = result.shell; legacyClient = result.legacy; legacyReport = result.legacyReport
+            nativeSNES = result.nativeSNES; nativeSNESContext = result.nativeSNESContext
+            consoleType = result.consoleType; uniqueId = result.uniqueID
+            bootVersion = result.bootVersion; kernelVersion = result.kernelVersion; scriptVersion = result.scriptVersion
+            customFirmwareLoaded = result.customFirmwareLoaded
+            canInteract = result.canInteract && result.consoleType == .nes
+            canSync = result.canSync && result.consoleType == .nes
+            isConnected = true
+            connectionStage = nil
+            Self.debugLog("Connected verified runtime type=" + result.consoleType.rawValue)
+        } catch {
+            guard token == sessionID else { return }
+            connectionStage = nil
+            guard !Task.isCancelled else { return }
+            lastConnectionError = error.localizedDescription
+            Self.debugLog("Runtime connection refused: " + error.localizedDescription)
+        }
+    }
+    func manualDisconnect() {
+        manuallyDisconnectedID = ConsoleAttachmentPolicy.single(observedDevices)?.registryEntryID
+            ?? ConsoleAttachmentPolicy.single(usbMonitor.attachments)?.registryEntryID
+        connectTask?.cancel(); _ = disconnect()
+    }
+    @discardableResult func reconnect() async -> Bool {
+        guard !suppressAutoConnect else {
+            lastConnectionError = "Another console operation is using USB. Finish it before connecting."; return false
+        }
+        let prior = connectTask; prior?.cancel(); await prior?.value
+        guard !Task.isCancelled else { return false }
+        manuallyDisconnectedID = nil; attemptedAttachmentID = nil
+        observedDevices = usbMonitor.attachments
+        guard let attachment = ConsoleAttachmentPolicy.single(observedDevices) else {
+            lastConnectionError = observedDevices.count > 1 ? "Connect one console at a time."
+                : "No console management connection was found. A stock console may need initial setup before normal-mode game management is available."
+            return false
+        }
+        guard ConsoleAttachmentPolicy.kind(of: attachment) != .recovery else {
+            lastConnectionError = "Recovery mode is ready. It cannot show a game library yet. Use the console backup or setup action, or boot normally if the console is already modified."
+            return false
+        }
+        await connect(attachment)
+        return isConnected
+    }
+    /// Compatibility entry point for existing presence observers; absent startup notifications are harmless.
+    func handleRNDISPresence(_ present: Bool) {
+        let previous = observedRNDISPresent; observedRNDISPresent = present
+        if previous != present { enqueue(usbMonitor.attachments) }
+    }
+    func pauseForRecovery() async {
+        suppressAutoConnect = true
+        let prior = connectTask; prior?.cancel()
+        let close = disconnect()
+        await prior?.value; await close?.value
+    }
+    /// Resume the normal tracked connection task after a foreground USB workflow releases its handle.
+    func resumeAfterExclusive() {
+        suppressAutoConnect = false; manuallyDisconnectedID = nil; attemptedAttachmentID = nil
+        enqueue(usbMonitor.attachments)
+    }
+    func waitForNormalBootAfterRecovery() {
+        awaitRecoveryUnplug = true
+        // Never auto-adopt the temporary RNDIS recovery shell as installed firmware.
+        suppressAutoConnect = true
+    }
+    func refreshLegacyReport() async throws {
+        let token = sessionID
+        guard consoleType == .nes, let client = legacyClient, legacyReport != nil else { throw LegacyInspectionError.disconnected }
+        let report = try await LegacyConsoleService.inspect(client: client)
+        guard sessionID == token else { throw LegacyInspectionError.disconnected }
+        legacyReport = report
+    }
+    @discardableResult private func disconnect() -> Task<Void, Never>? {
+        let shell = sshService, legacy = legacyClient, native = nativeSNES, previous = closingTask
+        sessionID = UUID(); connectedAttachmentID = nil
+        connectionStage = nil
+        sshService = nil; legacyClient = nil; legacyReport = nil; nativeSNES = nil; nativeSNESContext = nil
+        isConnected = false; canSync = false; canInteract = false
+        customFirmwareLoaded = false; consoleType = .unknown
+        bootVersion = ""; kernelVersion = ""; scriptVersion = ""; uniqueId = ""
+        guard shell != nil || legacy != nil || native != nil else { return previous }
+        let close = Task { await previous?.value; await shell?.disconnect(); await legacy?.disconnect(); await native?.disconnect() }
+        closingTask = close
+        return close
     }
 }
 

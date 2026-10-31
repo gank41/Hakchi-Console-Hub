@@ -6,3 +6,10 @@ DerivedData/
 *.xcworkspace
 Packages/
 xcuserdata/
+
+__pycache__/
+
+# Local builds and packages
+/Builds/
+/Distributions/
+/Hakchi Console Hub.app

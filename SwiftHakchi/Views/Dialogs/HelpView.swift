@@ -34,7 +34,7 @@ struct HelpView: View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Text("Swift Hakchi2 Help")
+                Text("Hakchi Console Hub Help")
                     .font(.title2.bold())
                 Spacer()
                 Button("Close") { dismiss() }
@@ -90,19 +90,19 @@ struct HelpView: View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("Getting Started")
 
-            bodyText("Swift Hakchi2 is a native macOS tool for modding Nintendo NES Classic Mini and SNES Classic Mini consoles. It lets you install a custom kernel, import your own game ROMs, and sync them to your console over USB.")
+            bodyText("Hakchi Console Hub manages copied game ROMs on your Mac and can inspect a connected classic console. Available console actions depend on the exact model and software detected. NES library sync and US SNES setup and library sync have passed supervised hardware tests. First-time setup on a stock NES has not been verified. Other console models and games still need testing. Cheat Codes are configured in this app.")
 
             heading("Requirements")
             bulletList([
                 "macOS 14 (Sonoma) or later",
                 "A USB-A cable (or USB-C adapter) to connect your console",
-                "An NES Classic Mini or SNES Classic Mini console",
+                "A compatible classic console for connected features; you can manage a local library without one",
             ])
 
             heading("Window Layout")
             bodyText("The main window is organized into four areas from top to bottom:")
             numberedList([
-                "Action Bar \u{2014} Buttons for Install Kernel, Connect, Memboot, and Reboot across the top",
+                "Action Bar \u{2014} Connection and available console actions across the top",
                 "Games Explorer \u{2014} Your ROM library as a grid of cover art cards on the left, with an editable detail panel on the right",
                 "Console Game Bar \u{2014} The tray along the bottom labeled \"Desired Console Config\" showing which games will be on your console",
                 "Status Bar \u{2014} Connection status and game counts at the very bottom",
@@ -110,11 +110,11 @@ struct HelpView: View {
 
             heading("Basic Workflow")
             numberedList([
-                "Flash \u{2014} Click \"Install Kernel\" in the action bar to install the custom kernel",
-                "Import \u{2014} Click \"Add ROMs\" in the Games Explorer to import your ROM files",
-                "Select \u{2014} Drag game cards from the explorer down into the Console Game Bar",
-                "Sync \u{2014} Click \"Sync\" in the Console Game Bar to upload games to the console",
-                "Play \u{2014} Unplug USB, power on, and enjoy your games",
+                "Import \u{2014} Add supported ROM files or ZIP/7z archives; the app copies extracted ROMs into its managed library and leaves your originals untouched",
+                "Edit \u{2014} Review names, metadata and cover art in the Games Explorer",
+                "Connect \u{2014} Connect one console over USB and let the app identify its available actions",
+                "Back up and review \u{2014} Use the guided review for a supported sync or recovery action before changing the console",
+                "Test \u{2014} After a supported sync, check the menu, artwork, game launch and controller on the console",
             ])
         }
     }
@@ -125,13 +125,13 @@ struct HelpView: View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("Flashing the Console")
 
-            bodyText("Flashing installs a custom kernel on your console that enables loading additional games. The process is safe and reversible \u{2014} you can always restore the stock kernel.")
+            bodyText("The kernel is the console's startup software. Changing it can enable custom game management, but a firmware operation is separate from copying games. It requires a verified image and recovery backup matched to the exact console. A general installation or factory restore is not yet available for every model.")
 
             heading("Install Kernel")
-            bodyText("Click the \"Install Kernel\" button in the action bar at the top of the window. A configuration dialog will appear where you can choose to back up the stock kernel before flashing. If the console isn't in FEL mode yet, the app will show instructions and wait for you to connect it.")
+            bodyText("Install Kernel would write modified startup software to the console's internal storage so it remains installed after power is turned off. It would first need to identify the console, verify its original kernel backup, and guide you through the installation and recovery steps. It does not add your ROMs by itself. This general installer is disabled while it is being validated for each supported console.")
 
             heading("Entering FEL Mode")
-            bodyText("The console must be in FEL (bootloader) mode for flashing. The app shows these steps automatically when needed:")
+            bodyText("A guided recovery action may ask you to enter FEL (bootloader) mode. Follow the instructions in that action; the usual NES sequence is:")
             numberedList([
                 "Unplug the console from USB to remove power",
                 "Make sure the console's power switch is ON",
@@ -139,23 +139,22 @@ struct HelpView: View {
                 "While holding RESET, plug in the USB cable to your Mac",
                 "Keep holding RESET for 3 seconds, then release",
             ])
-            bodyText("When the console is detected, the status bar at the bottom shows an orange dot and \"FEL Device Detected\".")
+            bodyText("A dark power light and blank display are expected in FEL mode. A USB identifier alone does not prove the console is in FEL mode; the app must verify it before a recovery action.")
 
             heading("Connect / Disconnect")
-            bodyText("After the custom kernel is installed, power cycle the console and it will boot into the custom firmware. Click the \"Connect\" button in the action bar. When connected, the button turns green and shows \"Disconnect\". The status bar shows a green dot and the console type.")
+            bodyText("For a normal USB connection, start the console without holding RESET and return to its game-selection menu. Choose Connect. If another app or virtual machine is using that USB device, release it there first.")
 
             heading("Memboot")
-            bodyText("Click the \"Memboot\" button in the action bar to boot the custom kernel temporarily without writing it to flash. The console reverts to stock on the next power cycle. Useful for testing.")
+            bodyText("Memboot means 'boot from memory.' It would send a temporary system from the Mac to a console in FEL mode for inspection or recovery work. By itself, it does not install firmware or games in the console's internal storage; the temporary system is gone after power is removed. Memboot is disabled in this app while its guided workflow is being validated.")
 
             heading("Reboot")
             bodyText("Click the \"Reboot\" button in the action bar to restart the console. Only available while connected.")
 
             heading("Other Kernel Operations")
-            bodyText("Additional operations are available in the Kernel menu:")
+            bodyText("The Kernel menu contains recovery-related actions, but availability depends on the connected console and verified recovery material:")
             bulletList([
-                "Uninstall \u{2014} Removes the custom kernel and restores stock",
-                "Factory Reset \u{2014} Full restore using a kernel backup file you select",
-                "Shutdown \u{2014} Powers off the console",
+                "Uninstall / Factory Reset \u{2014} Do not assume these are available or that either preserves games and saves; review the enabled action's details first",
+                "Shutdown \u{2014} Powers off a supported connected console",
             ])
         }
     }
@@ -166,20 +165,20 @@ struct HelpView: View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("Managing Games")
 
-            heading("Adding ROMs")
-            bodyText("Click the \"Add ROMs\" button in the top-right of the Games Explorer. Select one or more ROM files from your Mac. Supported formats:")
+            heading("Adding Game Files")
+            bodyText("Click Add Game Files in the Games Explorer and choose ROM files or ZIP/7z archives from your Mac. The app extracts supported ROMs into a temporary area, copies only the ROMs into its managed Games folder, and removes the temporary files. Your original ROMs and archives stay where they are. Open Settings > Storage to find the managed folder. Importing a file does not add it to a console. Current library formats are:")
             bulletList([
-                ".nes \u{2014} NES / Famicom ROMs",
-                ".sfc, .smc \u{2014} SNES / Super Famicom ROMs",
-                ".md, .bin \u{2014} Sega Genesis / Mega Drive ROMs",
-                ".zip \u{2014} Compressed ROM archives",
+                ".nes and .fds \u{2014} NES local library; the tested legacy sync path currently requires raw .nes",
+                ".sfc, .smc and .sfrom \u{2014} SNES local library; supported US SNES sync checks raw .sfc or .smc files",
+                ".md, .bin and .gen \u{2014} Genesis / Mega Drive local library; console transfer is not available yet",
+                ".zip and .7z \u{2014} The app imports supported ROMs inside; unrelated files are skipped. Very large, encrypted or unsafe archives may need manual extraction",
             ])
 
             heading("Importing from Console")
             bodyText("If your console already has custom games installed, click the \"Import from Console\" button in the Games Explorer header (only available while connected). This copies games from the console into your local library.")
 
             heading("Auto-Matching")
-            bodyText("When you import a ROM, the app calculates its CRC32 checksum and looks it up in a built-in game database. If a match is found, the game name, publisher, release date, and cover art are filled in automatically.")
+            bodyText("The app checks its bundled game database when you import a ROM. A matching title and details may be filled in; review them because ROM revisions and regions can differ. You can add or change box art separately.")
 
             heading("Editing Game Details")
             bodyText("Click any game card in the explorer to select it. The detail panel on the right shows editable fields:")
@@ -198,8 +197,8 @@ struct HelpView: View {
             heading("Downloading ROMs from Console")
             bodyText("To save a copy of a game's ROM from the console to your Mac, select the game and click \"Download from Console\" in the detail panel. You'll be prompted to choose a save location.")
 
-            heading("Deleting Games")
-            bodyText("Right-click a game card in the explorer and choose \"Delete Game...\" to remove it from your library. This only removes the imported copy \u{2014} your original ROM file is not affected.")
+            heading("Removing Games")
+            bodyText("Choose Remove Games beside Add Game Files. To remove games from the console, open the console game list, uncheck the games, then complete the three sync steps. Your Mac copies are kept. To remove a game from this app, open the Mac library, select the game, and choose Remove Selected Game. Your original ROM file and installed console games stay unchanged. Remove All Imported Games clears the Mac library and keeps a recoverable copy in Removed Libraries.")
         }
     }
 
@@ -209,7 +208,10 @@ struct HelpView: View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("Syncing Games")
 
-            bodyText("The Console Game Bar at the bottom of the window shows exactly which games will be on your console after the next sync. Think of it as a staging area \u{2014} arrange the games you want, then sync to apply.")
+            bodyText("The Console Game Bar shows your local selection. The connected console does not change until a supported sync review is prepared, transferred, verified and activated. On a supported older NES, use Folder Structure to choose the menu layout, then Sync Library to review changes before transferring them.")
+
+            heading("Folder Structure")
+            bodyText("Choose Folder Structure in the action bar to set how games are grouped, sorted and split across console menu pages. Save the layout first; saving it alone does not change the console.")
 
             heading("Adding Games to the Console Bar")
             bodyText("Drag game cards from the Games Explorer and drop them onto the Console Game Bar at the bottom. A dashed drop target appears when you start dragging. You can also double-click a game in the bar to re-enable it if it was hidden.")
@@ -225,14 +227,15 @@ struct HelpView: View {
             ])
             bodyText("Stock games can be hidden by dragging them off the bar, or re-enabled by right-clicking and choosing \"Re-enable\".")
 
-            heading("Syncing")
-            bodyText("Click the \"Sync\" button in the center of the Console Game Bar header. The app compresses the selected ROMs, uploads them to the console via USB, and rebuilds the console's game menu. The console must be connected (green status).")
+            heading("Sync Library")
+            bodyText("Choose Sync Library in the action bar when a supported console is connected. Review the games to add or remove, available space, and backup details before you approve transfer. You can use it again later to update the library. If the button is disabled, connect a supported console and let its library finish loading.")
+            bodyText("Checking a game does not use console space immediately. The space summary stays visible while you choose games. Review Sync checks the exact transfer size. A temporary second copy is needed while the new menu is installed and tested. After you test the games and choose Finish Sync, those temporary copies are removed; recovery backups stay on your Mac.")
 
             heading("Storage Limits")
-            bodyText("The console has approximately 300 MB of usable storage. You can set a maximum game size in Settings to skip oversized ROMs during sync.")
+            bodyText("Use Reclaim Space to review old files left by earlier transfers. It verifies a Mac backup before removing them. The built-in games remain on the console. Use Backup History to restore a previous library from your Mac, and Settings > Storage to choose your Backups Folder.")
 
             heading("Safety")
-            bodyText("If syncing would remove games already on the console that aren't in your current selection, the app warns you and offers to import them first so you don't lose anything.")
+            bodyText("Make a verified backup and review additions and removals before a console change. If an operation loses its USB response, inspect the saved transaction state before retrying or power cycling. A successful transfer alone does not prove every game will launch; test the menu and controls afterward.")
         }
     }
 
@@ -242,7 +245,7 @@ struct HelpView: View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("Modules (hmods)")
 
-            bodyText("Modules (also called hmods) are add-on packages that extend your console's capabilities \u{2014} RetroArch cores for additional emulators, themes, and other enhancements.")
+            bodyText("Modules (hmods) can add emulator cores and other features. Module installation has not been validated on the tested legacy NES. Browse locally if useful, but use only an enabled, reviewed console action for your device.")
 
             heading("Opening the Module Manager")
             bodyText("Open the Module Manager from the Modules menu or press Cmd+Shift+M.")
@@ -257,7 +260,7 @@ struct HelpView: View {
             bodyText("You can also install a module from a local .hmod file using the \"Install from File...\" button.")
 
             heading("Viewing Installed Modules")
-            bodyText("The \"Installed\" tab shows all modules currently on your console (the console must be connected). Each entry shows the module name, version, and category.")
+            bodyText("The Installed tab requires a supported console connection. An empty or disabled list does not prove no modules are installed on an older console.")
 
             heading("Removing Modules")
             bodyText("In the \"Installed\" tab, select one or more modules, then click \"Uninstall Selected\".")
@@ -270,21 +273,20 @@ struct HelpView: View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("Settings")
 
-            bodyText("Open Settings from the Swift Hakchi2 menu or press Cmd+,. Settings are organized into three tabs.")
+            bodyText("Open Settings from the Hakchi Console Hub menu or press Cmd+,. Settings include Console, Appearance, Storage and Advanced.")
 
             heading("Console Tab")
             bulletList([
                 "Default Console Type \u{2014} Choose NES Classic, SNES Classic, Famicom Mini, or Super Famicom Mini to match your hardware",
                 "TheGamesDB API Key \u{2014} Enter your free API key from thegamesdb.net to enable the Scraper and library enrichment",
-                "Enrich Library Now \u{2014} Fetches descriptions, genres, and cover art from TheGamesDB for all games in your library at once",
+                "Fill Missing Covers \u{2014} Looks for missing box art without changing covers you already chose",
             ])
 
             heading("Storage Tab")
             bulletList([
-                "Upload games compressed \u{2014} Compress ROMs during sync to save console storage",
-                "Separate game storage per console \u{2014} Keep game files separate for each console type",
-                "Max game size (MB) \u{2014} Skip ROMs larger than this limit during sync",
-                "Games folder \u{2014} Shows the path where your imported game library is stored",
+                "Workspace \u{2014} Shows where the app keeps its managed library, backups and journals",
+                "Games folder \u{2014} Shows your copied ROMs, details and art, with Show in Finder",
+                "Upload compressed and Max game size \u{2014} Planned controls that are currently disabled",
             ])
 
             heading("Advanced Tab")
@@ -313,7 +315,7 @@ struct HelpView: View {
 
             troubleItem(
                 problem: "Sync fails or stalls",
-                solution: "Make sure the console is connected (green status). Check the console has enough free storage \u{2014} try syncing fewer games. Make sure the console is running the custom kernel, not stock. Click \"Reboot\" in the action bar and reconnect."
+                solution: "Read the operation's status and saved recovery record. Keep the console connected if a write may be in progress. Use the guided Inspect Recovery action before retrying; do not power cycle an uncertain switch."
             )
 
             troubleItem(
@@ -323,12 +325,12 @@ struct HelpView: View {
 
             troubleItem(
                 problem: "Games don't appear on the console after sync",
-                solution: "Reboot the console \u{2014} click \"Reboot\" in the action bar, or unplug power and reconnect. The console rebuilds its game menu on boot."
+                solution: "First confirm the sync review was activated and accepted, then check the console's top-level menu and any More games folder. If the operation is uncertain, use its recovery inspection before restarting the console."
             )
 
             troubleItem(
                 problem: "App won't launch",
-                solution: "Swift Hakchi2 requires macOS 14 (Sonoma) or later. Check your macOS version in Apple menu \u{2192} About This Mac."
+                solution: "Hakchi Console Hub requires macOS 14 (Sonoma) or later. Check your macOS version in Apple menu \u{2192} About This Mac."
             )
         }
     }

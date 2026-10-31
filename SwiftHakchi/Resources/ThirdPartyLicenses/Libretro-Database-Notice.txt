@@ -1,0 +1,7 @@
+Genesis metadata adapted from Libretro Database and its contributors.
+https://github.com/libretro/libretro-database
+Source commit: 12c21cf79f1e20eff6ac68b80875816c717d0a7a
+License: Creative Commons Attribution-ShareAlike 4.0 International (CC-BY-SA-4.0).
+https://creativecommons.org/licenses/by-sa/4.0/
+
+Adaptation by Swift Hakchi: joined exact named CRC variants from publisher, releaseyear, releasemonth and maxusers metadata; projected game titles, regions, publisher, date and players to JSON; unknown fields remain absent. The adapted metadata is distributed under CC-BY-SA-4.0. Exact source paths and SHA256 values are recorded in genesis-metadata-v1.json. This notice concerns the metadata dataset.

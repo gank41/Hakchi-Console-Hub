@@ -2,15 +2,18 @@ import Foundation
 import AppKit
 
 /// Where this game came from
-enum GameSource: Hashable {
+enum GameSource: Hashable, Sendable {
     case stock          // Built into the console's squashfs
     case console        // User-installed on the console (in /var/games)
     case local          // Imported locally, not yet on console
 }
 
 /// Represents a game loaded from a .desktop file
-struct Game: Identifiable, Hashable {
+struct Game: Identifiable, Hashable, Sendable {
     let id: String  // CLV-P-XXXXX code
+    let defaultName: String
+    var addedAt: Date? = nil
+    var modifiedAt: Date? = nil
     var name: String
     var sortName: String
     var publisher: String
@@ -21,6 +24,7 @@ struct Game: Identifiable, Hashable {
     var simultaneous: Bool
     var description: String
     var romPath: String  // local path to ROM file
+    var artworkRevision = UUID()  // refreshes views when file bytes change at the same path
     var coverArtPath: String?  // local path to cover art
     var commandLine: String  // Exec line for .desktop
     var saveCount: Int
@@ -56,8 +60,9 @@ extension Game {
     init(desktopFile: DesktopFile, consoleType: ConsoleType, basePath: String, source: GameSource = .local) {
         self.id = desktopFile.code
         self.name = desktopFile.name
+        self.defaultName = desktopFile.defaultName ?? (desktopFile.name.isEmpty ? desktopFile.code : desktopFile.name)
         self.sortName = desktopFile.sortName
-        self.publisher = desktopFile.publisher
+        self.publisher = desktopFile.displayPublisher ?? desktopFile.publisher
         self.copyright = desktopFile.copyright
         self.genre = desktopFile.genre
         self.releaseDate = desktopFile.releaseDate
@@ -73,8 +78,15 @@ extension Game {
 
         let gamePath = (basePath as NSString).appendingPathComponent(desktopFile.code)
         self.romPath = gamePath
+        let metadataURL = URL(fileURLWithPath: gamePath).appendingPathComponent(desktopFile.code + ".desktop")
+        let dates = try? metadataURL.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+        self.addedAt = desktopFile.addedAt ?? dates?.creationDate
+        self.modifiedAt = desktopFile.modifiedAt ?? dates?.contentModificationDate
         if let iconFilename = desktopFile.iconFilename {
             self.coverArtPath = (gamePath as NSString).appendingPathComponent(iconFilename)
+            if let artDate = try? URL(fileURLWithPath: self.coverArtPath!).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate {
+                self.modifiedAt = max(self.modifiedAt ?? .distantPast, artDate)
+            }
         } else {
             self.coverArtPath = nil
         }
@@ -93,8 +105,9 @@ extension Game {
 
         self.id = desktop.code
         self.name = desktop.name.isEmpty ? code : desktop.name
+        self.defaultName = desktop.defaultName ?? (desktop.name.isEmpty ? code : desktop.name)
         self.sortName = desktop.sortName
-        self.publisher = desktop.publisher
+        self.publisher = desktop.displayPublisher ?? desktop.publisher
         self.copyright = desktop.copyright
         self.genre = desktop.genre
         self.releaseDate = desktop.releaseDate

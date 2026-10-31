@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "usb_device.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,6 +25,9 @@ typedef enum {
 /// Open an RNDIS device by VID/PID and perform RNDIS initialization.
 /// Returns NULL on failure.
 rndis_handle_t *rndis_open(uint16_t vid, uint16_t pid);
+
+/// Exact observed RNDIS attachment, propagated to the native USB opener.
+rndis_handle_t *rndis_open_bound(const hakchi_usb_identity_t *expected);
 
 /// Get the negotiated max transfer size (for buffer allocation).
 uint32_t rndis_max_transfer_size(rndis_handle_t *h);
