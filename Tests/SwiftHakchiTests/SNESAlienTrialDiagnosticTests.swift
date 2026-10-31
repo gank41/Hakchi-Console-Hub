@@ -18,7 +18,14 @@ struct SNESAlienTrialDiagnosticTests {
         #expect(try SNESAlienTrialDiagnosticOptions.parse(["--test-alien3-reset-trial"] + paths + [nonce, digest])?.resetTrial == true)
         #expect(try SNESAlienTrialDiagnosticOptions.parse(["--preview-simcity-sram-trial"] + paths + [nonce])?.sramTrial == true)
         #expect(try SNESAlienTrialDiagnosticOptions.parse(["--test-simcity-sram-trial"] + paths + [nonce, digest])?.sramTrial == true)
-        for bad in [Array(preview.dropLast()), ["--test-alien3-trial"] + paths + [nonce], ["--test-alien3-trial"] + paths + [nonce, "bad"], ["--preview-alien3-trial"] + ["relative"] + paths.dropFirst() + [nonce], ["--preview-alien3-trial"] + paths + ["bad"]] {
+        let invalidArguments: [[String]] = [
+            Array(preview.dropLast()),
+            ["--test-alien3-trial"] + paths + [nonce],
+            ["--test-alien3-trial"] + paths + [nonce, "bad"],
+            ["--preview-alien3-trial", "relative"] + Array(paths.dropFirst()) + [nonce],
+            ["--preview-alien3-trial"] + paths + ["bad"]
+        ]
+        for bad in invalidArguments {
             #expect(throws: (any Error).self) { _ = try SNESAlienTrialDiagnosticOptions.parse(bad) }
         }
     }

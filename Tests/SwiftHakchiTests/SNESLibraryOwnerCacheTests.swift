@@ -52,7 +52,8 @@ struct SNESLibraryOwnerCacheTests {
         }
         let review = BackupManifest.digest(try Data(contentsOf: file))
         var previous: String?
-        for (index, phase) in (unfinished ? ["prepared", "preflightVerified", "writeIntent"] : ["prepared"]).enumerated() {
+        let phases: [String] = unfinished ? ["prepared", "preflightVerified", "writeIntent"] : ["prepared"]
+        for (index, phase) in phases.enumerated() {
             var record = ["phase": phase, "planSHA256": review]
             record["previousSHA256"] = previous
             let bytes = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
