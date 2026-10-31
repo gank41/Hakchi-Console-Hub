@@ -1,5 +1,6 @@
 import Foundation
 import USBBridge
+import SwiftHakchiCore
 import os
 
 private let logger = Logger(subsystem: "com.swifthakchi.app", category: "SSH")
@@ -26,7 +27,7 @@ enum SSHError: Error, LocalizedError {
 }
 
 /// Result of an SSH command execution — mirrors ClovershellResult for drop-in replacement
-struct SSHResult {
+struct SSHResult: Sendable {
     let stdout: String
     let stderr: String
     let stdoutData: Data
@@ -40,7 +41,7 @@ struct SSHResult {
 /// Drop-in replacement for ClovershellService — same API shape.
 ///
 /// Architecture: SSHService → ssh_bridge.c → libssh2 → tcpip.c → rndis.c → USB
-actor SSHService {
+actor SSHService: ConsoleShell {
     // ssh_session_t* is opaque from C
     private var session: OpaquePointer?
 
@@ -62,6 +63,18 @@ actor SSHService {
         }
         session = s
         logger.info("SSH session established")
+    }
+
+    /// Recovery-only connection on the exact observed attachment, with no fallback.
+    func connect(expected: RecoveryProbeUSBDevice) throws {
+        try Task.checkCancellation()
+        guard session == nil else { throw SSHError.connectionFailed("A session is already open; the new attachment was not selected.") }
+        var identity = try expected.nativeIdentity(for: .rndis)
+        logger.info("Opening identity-bound recovery SSH session")
+        guard let opened = ssh_session_open_bound(&identity, HOST_IP_STR, CONSOLE_IP_STR) else {
+            throw SSHError.connectionFailed("The observed recovery attachment could not be opened and verified.")
+        }
+        session = opened
     }
 
     /// Close the SSH session and all underlying connections.
@@ -116,21 +129,40 @@ actor SSHService {
         )
     }
 
+    /// Bounded capture retains partial bytes even when transport completion fails.
+    func executeBounded(_ command: String, stdoutLimit: Int, stderrLimit: Int, timeout: Int) throws -> BoundedSSHExecution {
+        guard let session else { throw SSHError.notConnected }
+        guard (1...64*1024*1024).contains(stdoutLimit), (1...64*1024*1024).contains(stderrLimit),
+              (1...Int(Int32.max)).contains(timeout), !command.contains("\0") else {
+            throw SSHError.connectionFailed("Invalid bounded capture settings.")
+        }
+        var result = ssh_exec_result_t()
+        let status = ssh_exec_bounded(session, command, &result, Int32(timeout), UInt32(stdoutLimit), UInt32(stderrLimit))
+        defer { ssh_result_free(&result) }
+        guard Int(result.stdout_len) <= stdoutLimit, Int(result.stderr_len) <= stderrLimit,
+              result.stdout_len == 0 || result.stdout_buf != nil,
+              result.stderr_len == 0 || result.stderr_buf != nil else {
+            throw SSHError.connectionFailed("Invalid bounded capture response.")
+        }
+        let output = result.stdout_buf.map { Data(bytes: $0, count: Int(result.stdout_len)) } ?? Data()
+        let errors = result.stderr_buf.map { Data(bytes: $0, count: Int(result.stderr_len)) } ?? Data()
+        return BoundedSSHExecution(stdout: output, stderr: errors, exitCode: Int(result.exit_code), transportCode: Int(status))
+    }
+
     /// Upload data to a remote path via stdin pipe (cat > path)
     func upload(data: Data, to remotePath: String, timeout: Int = 60000) throws {
         guard let s = session else {
             throw SSHError.notConnected
         }
 
+        guard data.count <= Int(UInt32.max) else { throw SSHError.transferFailed("File is too large for the USB transport.") }
         logger.info("Upload \(data.count) bytes to \(remotePath)")
 
-        let command = "cat > \"\(remotePath)\""
+        let command = "cat > \(LaunchCommand.shellQuote(remotePath))"
         var result = ssh_exec_result_t()
 
         let ret = data.withUnsafeBytes { dataPtr -> Int32 in
-            guard let baseAddr = dataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return -1
-            }
+            let baseAddr = dataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
             return ssh_exec_stdin(s, command, baseAddr, UInt32(data.count),
                                    &result, Int32(timeout))
         }
@@ -146,6 +178,20 @@ actor SSHService {
         logger.info("Upload complete")
     }
 
+    /// Exclusive creation in a caller-owned temporary RAM directory.
+    func uploadExclusive(data: Data, to remotePath: String, timeout: Int) throws {
+        guard let session, data.count <= Int(UInt32.max), (1...Int(Int32.max)).contains(timeout) else { throw SSHError.notConnected }
+        let command = try SSHExclusiveUpload.command(path: remotePath)
+        var result = ssh_exec_result_t()
+        let status = data.withUnsafeBytes { bytes in
+            ssh_exec_stdin(session, command, bytes.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt32(data.count), &result, Int32(timeout))
+        }
+        defer { ssh_result_free(&result) }
+        guard status == 0, result.exit_code == 0, result.stdout_len == 0, result.stderr_len == 0 else {
+            throw SSHError.transferFailed("The temporary upload did not finish successfully. Existing files were not overwritten.")
+        }
+    }
+
     /// Upload tar data and extract on console
     func uploadTar(data: Data, to directory: String, extraArgs: String = "",
                     timeout: Int = 120000) throws {
@@ -153,17 +199,16 @@ actor SSHService {
             throw SSHError.notConnected
         }
 
+        guard data.count <= Int(UInt32.max) else { throw SSHError.transferFailed("Archive is too large for the USB transport.") }
         logger.info("Upload tar \(data.count) bytes to \(directory)")
 
         let command = extraArgs.isEmpty
-            ? "tar -xvC \"\(directory)\""
-            : "tar -xvC \"\(directory)\" \(extraArgs)"
+            ? "tar -xC \(LaunchCommand.shellQuote(directory))"
+            : "tar -xC \(LaunchCommand.shellQuote(directory)) \(extraArgs)"
         var result = ssh_exec_result_t()
 
         let ret = data.withUnsafeBytes { dataPtr -> Int32 in
-            guard let baseAddr = dataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return -1
-            }
+            let baseAddr = dataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
             return ssh_exec_stdin(s, command, baseAddr, UInt32(data.count),
                                    &result, Int32(timeout))
         }

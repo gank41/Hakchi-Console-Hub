@@ -17,10 +17,14 @@ final class GameDatabase {
         let releaseDate: String?
         let players: Int?
         let coverUrl: String?
+        var region: String? = nil
+        var regions: [String] = []
     }
 
     /// CRC32 hex string (uppercased) -> game metadata
     private var entries: [String: Entry] = [:]
+    private var platformEntries: [String: [String: Entry]] = [:]
+    private var metadataCandidates: Set<MetadataCandidate> = []
 
     /// CRC32 hex string (uppercased) -> TheGamesDB ID (from romfiles.xml)
     private var tgdbIds: [String: String] = [:]
@@ -34,6 +38,7 @@ final class GameDatabase {
         loadRomFilesDatabase()
         loadSNESDatabase()
         loadNESDatabase()
+        loadGenesisDatabase()
         enrichEntriesWithCovers()
         buildNameIndex()
     }
@@ -71,6 +76,8 @@ final class GameDatabase {
         xmlParser.parse()
 
         for game in delegate.games {
+            metadataCandidates.insert(MetadataCandidate(title: game.name, region: game.region, releaseDate: game.date,
+                players: game.players.flatMap(Int.init), publisher: game.publisher, genre: nil, overview: nil, platform: "snes"))
             let key = game.crc.uppercased()
             entries[key] = Entry(
                 name: game.name,
@@ -79,6 +86,7 @@ final class GameDatabase {
                 players: game.players.flatMap { Int($0) },
                 coverUrl: game.cover
             )
+            platformEntries["snes", default: [:]][key] = entries[key]
         }
         logger.info("Loaded SNES database with \(delegate.games.count) entries")
     }
@@ -97,21 +105,26 @@ final class GameDatabase {
         xmlParser.delegate = delegate
         xmlParser.parse()
 
-        var newCount = 0
-        for cart in delegate.cartridges {
-            let key = cart.crc.uppercased()
-            if entries[key] == nil {
-                entries[key] = Entry(
-                    name: cart.gameName,
-                    publisher: cart.publisher,
-                    releaseDate: cart.date,
-                    players: cart.players.flatMap { Int($0) },
-                    coverUrl: nil  // Will be enriched from romfiles.xml
-                )
-                newCount += 1
-            }
+        for cart in delegate.cartridges where !cart.gameName.isEmpty {
+            metadataCandidates.insert(MetadataCandidate(title: cart.gameName, region: cart.region, releaseDate: cart.date,
+                players: cart.players.flatMap(Int.init), publisher: cart.publisher, genre: nil, overview: nil, platform: "nes"))
         }
-        logger.info("Loaded NES database with \(newCount) new entries (\(delegate.cartridges.count) total cartridges)")
+        let groups = Dictionary(grouping: delegate.cartridges, by: { $0.crc.uppercased() })
+        for (crc, carts) in groups {
+            let names = Set(carts.map(\.gameName))
+            let regions = Set(carts.compactMap(\.region)).sorted()
+            let publishers = Set(carts.map { $0.publisher ?? "" })
+            let dates = Set(carts.map { $0.date ?? "" })
+            let players = Set(carts.map { $0.players ?? "" })
+            entries[crc] = Entry(
+                name: names.count == 1 ? names.first! : "",
+                publisher: publishers.count == 1 ? publishers.first.flatMap { $0.isEmpty ? nil : $0 } : nil,
+                releaseDate: dates.count == 1 ? dates.first.flatMap { $0.isEmpty ? nil : $0 } : nil,
+                players: players.count == 1 ? players.first.flatMap(Int.init) : nil,
+                coverUrl: nil, region: regions.count == 1 ? regions.first : nil, regions: regions)
+            platformEntries["nes", default: [:]][crc] = entries[crc]
+        }
+        logger.info("Loaded NES database with \(groups.count) distinct cartridge CRCs; ambiguous fields retained as unknown")
     }
 
     // MARK: - Enrich entries with cover URLs from romfiles.xml
@@ -129,7 +142,7 @@ final class GameDatabase {
                     publisher: entry.publisher,
                     releaseDate: entry.releaseDate,
                     players: entry.players,
-                    coverUrl: "\(Self.tgdbCoverBase)\(tgdbId)-1.jpg"
+                    coverUrl: "\(Self.tgdbCoverBase)\(tgdbId)-1.jpg", region: entry.region, regions: entry.regions
                 )
                 enriched += 1
             }
@@ -195,6 +208,62 @@ final class GameDatabase {
         }
 
         return variants
+    }
+
+    /// Punctuation-insensitive, platform-scoped candidate search, entirely offline.
+    func search(name: String, consoleType: ConsoleType) -> [MetadataCandidate] {
+        func key(_ value: String) -> String {
+            value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+                .unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(String.init).joined()
+        }
+        let query = key(name)
+        guard !query.isEmpty, let family = ArtworkPlatform(console: consoleType) else { return [] }
+        let platform = family.rawValue
+        return metadataCandidates.filter { $0.platform == platform && key($0.title).contains(query) }.sorted {
+            let left = [$0.title, $0.region ?? "", $0.releaseDate ?? "", $0.id]
+            let right = [$1.title, $1.region ?? "", $1.releaseDate ?? "", $1.id]
+            return left.lexicographicallyPrecedes(right)
+        }
+    }
+
+    /// Platform-scoped identification keeps a Genesis CRC from selecting Nintendo metadata.
+    func lookup(romURL: URL, consoleType: ConsoleType) -> Entry? {
+        guard let family = ArtworkPlatform(console: consoleType),
+              let crc = CRC32.romChecksum(file: romURL) else { return nil }
+        return platformEntries[family.rawValue]?[String(format: "%08X", crc)]
+    }
+
+    private struct GenesisCatalog: Decodable {
+        struct Record: Decodable {
+            let crc32: String, title: String
+            let region: String?, releaseDate: String?, publisher: String?, players: Int?
+        }
+        let version: Int, platform: String, records: [Record]
+    }
+    private func loadGenesisDatabase() {
+        guard let url = Bundle.appBundle.url(forResource: "genesis-metadata-v1", withExtension: "json"),
+              let data = try? Data(contentsOf: url), data.count <= 2 * 1024 * 1024,
+              let catalog = try? JSONDecoder().decode(GenesisCatalog.self, from: data),
+              catalog.version == 1, catalog.platform == "genesis", catalog.records.count <= 10000,
+              catalog.records.allSatisfy({ !$0.title.isEmpty && $0.title.utf8.count <= 512 &&
+                  $0.crc32.range(of: #"^[0-9A-F]{8}$"#, options: .regularExpression) != nil }) else {
+            logger.warning("Genesis metadata catalog could not be loaded")
+            return
+        }
+        for record in catalog.records {
+            metadataCandidates.insert(.init(title: record.title, region: record.region,
+                releaseDate: record.releaseDate, players: record.players, publisher: record.publisher,
+                genre: nil, overview: nil, platform: "genesis"))
+        }
+        for (crc, records) in Dictionary(grouping: catalog.records, by: \.crc32) {
+            func unique<T: Hashable>(_ values: [T]) -> T? { let set = Set(values); return set.count == 1 ? set.first : nil }
+            let regions = Set(records.compactMap(\.region).flatMap { $0.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) } }).subtracting(["Unknown"]).sorted()
+            platformEntries["genesis", default: [:]][crc] = Entry(name: unique(records.map(\.title)) ?? "",
+                publisher: unique(records.map { $0.publisher ?? "" }).flatMap { $0.isEmpty ? nil : $0 },
+                releaseDate: unique(records.map { $0.releaseDate ?? "" }).flatMap { $0.isEmpty ? nil : $0 },
+                players: unique(records.map { $0.players ?? 0 }).flatMap { $0 == 0 ? nil : $0 }, coverUrl: nil,
+                region: regions.count == 1 ? regions.first : nil, regions: regions)
+        }
     }
 
     // MARK: - TGDB ID Lookups
@@ -308,6 +377,7 @@ private class SNESCartsParserDelegate: NSObject, XMLParserDelegate {
         var date: String?
         var players: String?
         var cover: String?
+        var region: String?
     }
 
     var games: [GameEntry] = []
@@ -337,6 +407,7 @@ private class SNESCartsParserDelegate: NSObject, XMLParserDelegate {
         case "publisher": currentGame?.publisher = text.isEmpty ? nil : text
         case "date": currentGame?.date = text.isEmpty ? nil : text
         case "players": currentGame?.players = text.isEmpty ? nil : text
+        case "region": currentGame?.region = text.isEmpty ? nil : text
         case "cover": currentGame?.cover = text.isEmpty ? nil : text
         case "Game":
             if let game = currentGame, !game.crc.isEmpty, !game.name.isEmpty {
@@ -361,6 +432,7 @@ private class NESCartsParserDelegate: NSObject, XMLParserDelegate {
         let date: String?
         let players: String?
         let crc: String
+        let region: String?
     }
 
     var cartridges: [CartridgeEntry] = []
@@ -368,6 +440,7 @@ private class NESCartsParserDelegate: NSObject, XMLParserDelegate {
     private var currentPublisher: String?
     private var currentDate: String?
     private var currentPlayers: String?
+    private var currentRegion: String?
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
                 qualifiedName: String?, attributes: [String: String] = [:]) {
@@ -376,6 +449,7 @@ private class NESCartsParserDelegate: NSObject, XMLParserDelegate {
             currentPublisher = attributes["publisher"]
             currentDate = attributes["date"]
             currentPlayers = attributes["players"]
+            currentRegion = attributes["region"]
         } else if elementName == "cartridge" {
             if let crc = attributes["crc"], !crc.isEmpty {
                 cartridges.append(CartridgeEntry(
@@ -383,7 +457,7 @@ private class NESCartsParserDelegate: NSObject, XMLParserDelegate {
                     publisher: currentPublisher,
                     date: currentDate,
                     players: currentPlayers,
-                    crc: crc
+                    crc: crc, region: currentRegion
                 ))
             }
         }

@@ -3,13 +3,24 @@ import os
 
 private let logger = Logger(subsystem: "com.swifthakchi.app", category: "ScraperService")
 
+protocol GameMetadataProviding: Sendable {
+    func searchGames(name: String, apiKey: String, platform: Int?) async throws -> [ScraperService.SearchResult]
+}
+
 /// Game metadata scraping — bundled DB lookup + TheGamesDB API search
-actor ScraperService {
+actor ScraperService: GameMetadataProviding {
     private let baseURL = "https://api.thegamesdb.net/v1.1"
+    typealias SearchFetch = @Sendable (URL) async throws -> Data
+    private let searchFetch: SearchFetch
+    init(searchFetch: @escaping SearchFetch = { url in
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw ScraperError.downloadFailed }
+        return data
+    }) { self.searchFetch = searchFetch }
 
     // MARK: - Search Result
 
-    struct SearchResult: Identifiable {
+    struct SearchResult: Identifiable, Sendable {
         let id: Int
         let title: String
         let releaseDate: String?
@@ -64,6 +75,7 @@ actor ScraperService {
     static let platformSNES = 6
     static let platformFamicom = 39
     static let platformSuperFamicom = 48
+    static let platformGenesis = 18
 
     static func platformId(for consoleType: ConsoleType) -> Int? {
         switch consoleType {
@@ -71,6 +83,7 @@ actor ScraperService {
         case .famicom: return platformFamicom
         case .snesUsa, .snesEur: return platformSNES
         case .superFamicom, .superFamicomShonenJump: return platformSuperFamicom
+        case .megaDrive: return platformGenesis
         default: return nil
         }
     }
@@ -115,29 +128,33 @@ actor ScraperService {
             throw ScraperError.noApiKey
         }
 
+        guard let platform, [Self.platformNES, Self.platformSNES, Self.platformFamicom,
+                             Self.platformSuperFamicom, Self.platformGenesis].contains(platform) else {
+            throw ScraperError.unsupportedPlatform
+        }
         var components = URLComponents(string: "\(baseURL)/Games/ByGameName")!
         components.queryItems = [
             URLQueryItem(name: "apikey", value: apiKey),
             URLQueryItem(name: "name", value: name),
         ]
-        if let platform {
-            components.queryItems?.append(URLQueryItem(name: "filter[platform]", value: "\(platform)"))
-        }
+        components.queryItems?.append(URLQueryItem(name: "filter[platform]", value: "\(platform)"))
+        components.queryItems?.append(URLQueryItem(name: "fields", value: "players,overview"))
 
         guard let url = components.url else {
             throw ScraperError.invalidURL
         }
 
         logger.info("Searching TheGamesDB: \(name)")
-        let (data, _) = try await URLSession.shared.data(from: url)
+        let data = try await searchFetch(url)
         let response = try JSONDecoder().decode(GamesResponse.self, from: data)
-
-        return response.data.games.map { game in
+        let family = platform == Self.platformGenesis ? "genesis" :
+            ([Self.platformNES, Self.platformFamicom].contains(platform) ? "nes" : "snes")
+        return response.data.games.filter { $0.platform == platform }.map { game in
             SearchResult(
                 id: game.id,
                 title: game.game_title,
                 releaseDate: game.release_date,
-                platform: nil,
+                platform: family,
                 overview: game.overview,
                 players: game.players,
                 publisher: nil,
@@ -187,7 +204,7 @@ actor ScraperService {
     // MARK: - Batch Fetch by ID
 
     /// Metadata returned from a batch TGDB fetch
-    struct GameInfo {
+    struct GameInfo: Sendable {
         let id: Int
         let title: String
         let overview: String?
@@ -298,6 +315,7 @@ enum ScraperError: LocalizedError {
     case downloadFailed
     case noApiKey
     case invalidApiKey
+    case unsupportedPlatform
 
     var errorDescription: String? {
         switch self {
@@ -306,6 +324,7 @@ enum ScraperError: LocalizedError {
         case .downloadFailed: return "Download failed"
         case .noApiKey: return "No API key configured. Add your TheGamesDB API key in Settings."
         case .invalidApiKey: return "API key is not valid. Check your TheGamesDB API key in Settings."
+        case .unsupportedPlatform: return "Choose a supported console before searching metadata."
         }
     }
 }

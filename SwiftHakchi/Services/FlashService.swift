@@ -1,16 +1,17 @@
 import Foundation
+import SwiftHakchiCore
 import os
 
 private let logger = Logger(subsystem: "com.swifthakchi.app", category: "FlashService")
 
-/// Handles the complete flash/install/uninstall workflows.
+/// Retained upstream workflows. Firmware mutation entry points are gated until replacement and validation.
 /// After FEL memboot, the console boots with the RNDIS USB gadget.
 /// We communicate via user-space RNDIS + TCP/IP + SSH (same as upstream Windows client).
 actor FlashService {
-    private let felService: FELService
+    private let felService: any FELBooting
     private weak var deviceManager: DeviceManager?
 
-    init(felService: FELService, deviceManager: DeviceManager) {
+    init(felService: any FELBooting, deviceManager: DeviceManager) {
         self.felService = felService
         self.deviceManager = deviceManager
     }
@@ -31,6 +32,7 @@ actor FlashService {
         backupSettings: BackupSettings,
         progress: @Sendable (String, Double) -> Void
     ) async throws {
+        try Self.requireValidatedFirmwareWorkflow()
         // Step 1: FEL memboot
         logger.info("Step 1: FEL memboot")
         progress("Initializing DRAM...", 0.05)
@@ -154,6 +156,7 @@ actor FlashService {
         fes1: Data, uboot: Data, bootImg: Data,
         progress: @Sendable (String, Double) -> Void
     ) async throws {
+        try Self.requireValidatedFirmwareWorkflow()
         progress("Booting recovery...", 0.1)
         try await felService.memboot(fes1Data: fes1, ubootData: uboot, bootImgData: bootImg)
 
@@ -179,6 +182,7 @@ actor FlashService {
         kernelImage: Data?,
         progress: @Sendable (String, Double) -> Void
     ) async throws {
+        try Self.requireValidatedFirmwareWorkflow()
         progress("Booting recovery...", 0.05)
         try await felService.memboot(fes1Data: fes1, ubootData: uboot, bootImgData: bootImg)
 
@@ -261,6 +265,11 @@ actor FlashService {
 
     // MARK: - Helpers
 
+    /// UI eligibility and recognized local files cannot bypass this backend boundary.
+    private static func requireValidatedFirmwareWorkflow() throws {
+        throw FlashError.recoveryNotValidated
+    }
+
     /// Wait for RNDIS device to appear and SSH to connect after memboot.
     /// After FEL exec, the device goes through three phases:
     /// 1. FEL device disappears (kernel takes over)
@@ -331,29 +340,16 @@ actor FlashService {
     @discardableResult
     private func dumpStockKernel(shell: SSHService, saveDirectory: URL? = nil) async throws -> URL {
         let dumpDir = saveDirectory ?? AppConfig.shared.dumpDirectory
-        try FileManager.default.createDirectory(at: dumpDir, withIntermediateDirectories: true)
-        let backupPath = dumpDir.appendingPathComponent("kernel_backup.img")
-
-        // Skip if a valid backup already exists
-        if FileManager.default.fileExists(atPath: backupPath.path) {
-            if let existingData = try? Data(contentsOf: backupPath),
-               Self.verifyKernelBackup(existingData) {
-                logger.info("Valid kernel backup already exists (\(existingData.count) bytes), skipping")
-                return backupPath
-            }
-            logger.warning("Existing backup is invalid, re-dumping")
-            try? FileManager.default.removeItem(at: backupPath)
-        }
+        let identity = try await shell.executeChecked(DeviceInventoryService.Command.identity).output.filter { !$0.isWhitespace }
+        let system = try await shell.executeChecked(DeviceInventoryService.Command.system).output
+        let profile = ConsoleProfile(deviceID: identity, systemCode: ConsoleType.fromSystemCode(system).syncCode)
 
         // Try hakchi getBackup2 first
         if let result = try? await shell.execute("hakchi getBackup2", timeout: 60000),
            result.succeeded,
            result.stdoutData.count > 1024 {
             if Self.verifyKernelBackup(result.stdoutData) {
-                try result.stdoutData.write(to: backupPath)
-                logger.info("Stock kernel backed up via getBackup2 (\(result.stdoutData.count) bytes)")
-                try verifyWrittenBackup(at: backupPath, expectedSize: result.stdoutData.count)
-                return backupPath
+                return try KernelBackupStore.save(data: result.stdoutData, profile: profile, root: dumpDir)
             }
         }
 
@@ -362,10 +358,7 @@ actor FlashService {
            result.succeeded,
            result.stdoutData.count > 1024 {
             if Self.verifyKernelBackup(result.stdoutData) {
-                try result.stdoutData.write(to: backupPath)
-                logger.info("Stock kernel backed up via sunxi-flash (\(result.stdoutData.count) bytes)")
-                try verifyWrittenBackup(at: backupPath, expectedSize: result.stdoutData.count)
-                return backupPath
+                return try KernelBackupStore.save(data: result.stdoutData, profile: profile, root: dumpDir)
             }
         }
 
@@ -374,16 +367,7 @@ actor FlashService {
     }
 
     private static func verifyKernelBackup(_ data: Data) -> Bool {
-        guard data.count > 65536 else { return false }
-        guard data.count < 16 * 1024 * 1024 else { return false }
-
-        let magic = Data("ANDROID!".utf8)
-        if data.prefix(magic.count) == magic { return true }
-
-        let header = data.prefix(16)
-        let allZero = header.allSatisfy { $0 == 0 }
-        let allFF = header.allSatisfy { $0 == 0xFF }
-        return !(allZero || allFF)
+        KernelBackupStore.isRecognizedImage(data)
     }
 
     private func verifyWrittenBackup(at path: URL, expectedSize: Int) throws {
@@ -412,6 +396,7 @@ actor FlashService {
 }
 
 enum FlashError: Error, LocalizedError {
+    case recoveryNotValidated
     case notConnected
     case timeout
     case flashMismatch(String)
@@ -421,6 +406,8 @@ enum FlashError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .recoveryNotValidated:
+            return "Firmware reset, uninstall and installation remain unavailable until the audited recovery workflow passes its own device validation. Review Reset Readiness for the remaining steps."
         case .notConnected:
             return "Console is not connected"
         case .timeout:

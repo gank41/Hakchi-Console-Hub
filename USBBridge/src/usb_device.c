@@ -14,8 +14,10 @@
 struct hakchi_usb_device {
     IOUSBDeviceInterface300    **device;
     IOUSBInterfaceInterface300 **interface;
+    IOUSBInterfaceInterface300 **control_interface;
     uint8_t pipe_out;
     uint8_t pipe_in;
+    bool passive;
 };
 
 // Find the pipe index for a given endpoint address
@@ -39,7 +41,168 @@ static bool find_pipe_for_endpoint(IOUSBInterfaceInterface300 **intf,
     return false;
 }
 
-hakchi_usb_device_t *hakchi_usb_open(uint16_t vid, uint16_t pid, hakchi_usb_error_t *error) {
+// Bound opens select one retained registry service, then read back the interface's
+// cached descriptors before USBDeviceOpen/configuration/endpoint traffic.
+static bool bound_identity_valid(const hakchi_usb_identity_t *e) {
+    return e && e->registry_entry_id && e->location_id && e->vendor_id && e->product_id;
+}
+static bool bound_number(io_service_t service, CFStringRef key, uint64_t expected) {
+    CFTypeRef property = IORegistryEntryCreateCFProperty(service, key, kCFAllocatorDefault, 0);
+    if (!property) return false;
+    int64_t value = -1;
+    bool matches = CFGetTypeID(property) == CFNumberGetTypeID()
+        && !CFNumberIsFloatType((CFNumberRef)property)
+        && CFNumberGetValue((CFNumberRef)property, kCFNumberSInt64Type, &value)
+        && value >= 0 && (uint64_t)value == expected;
+    CFRelease(property);
+    return matches;
+}
+static bool bound_product(CFTypeRef observed, const char *expected) {
+    if (!observed || !expected || CFGetTypeID(observed) != CFStringGetTypeID()) return false;
+    CFStringRef value = CFStringCreateWithCString(kCFAllocatorDefault, expected, kCFStringEncodingUTF8);
+    if (!value) return false;
+    bool matches = CFEqual(observed, value); CFRelease(value); return matches;
+}
+static io_service_t bound_service(const hakchi_usb_identity_t *e, hakchi_usb_error_t *error, const char *expected_product) {
+    if (!bound_identity_valid(e)) {
+        if (error) *error = HAKCHI_USB_ERROR_INVALID_PARAM;
+        return 0;
+    }
+    CFMutableDictionaryRef match = IORegistryEntryIDMatching(e->registry_entry_id);
+    if (!match) { if (error) *error = HAKCHI_USB_ERROR_OTHER; return 0; }
+    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, match);
+    if (!service) { if (error) *error = HAKCHI_USB_ERROR_NOT_FOUND; return 0; }
+    uint64_t entry = 0;
+    bool matches = IORegistryEntryGetRegistryEntryID(service, &entry) == KERN_SUCCESS
+        && entry == e->registry_entry_id
+        && bound_number(service, CFSTR("idVendor"), e->vendor_id)
+        && bound_number(service, CFSTR("idProduct"), e->product_id)
+        && bound_number(service, CFSTR("bcdDevice"), e->device_version)
+        && bound_number(service, CFSTR("bDeviceClass"), e->device_class)
+        && bound_number(service, CFSTR("locationID"), e->location_id);
+    CFTypeRef product = IORegistryEntryCreateCFProperty(service, CFSTR("USB Product Name"), kCFAllocatorDefault, 0);
+    if (expected_product) matches = matches && bound_product(product, expected_product);
+    if (product) {
+        matches = matches && CFGetTypeID(product) == CFStringGetTypeID();
+        if (matches && e->require_empty_product) matches = CFStringGetLength((CFStringRef)product) == 0;
+        CFRelease(product);
+    }
+    if (!matches) {
+        IOObjectRelease(service);
+        if (error) *error = HAKCHI_USB_ERROR_ACCESS;
+        return 0;
+    }
+    return service;
+}
+static bool bound_handle(IOUSBDeviceInterface300 **device, const hakchi_usb_identity_t *e) {
+    UInt16 vid = 0, pid = 0, release = 0;
+    UInt8 device_class = 0;
+    UInt32 location = 0;
+    return (*device)->GetDeviceVendor(device, &vid) == kIOReturnSuccess && vid == e->vendor_id
+        && (*device)->GetDeviceProduct(device, &pid) == kIOReturnSuccess && pid == e->product_id
+        && (*device)->GetDeviceReleaseNumber(device, &release) == kIOReturnSuccess && release == e->device_version
+        && (*device)->GetDeviceClass(device, &device_class) == kIOReturnSuccess && device_class == e->device_class
+        && (*device)->GetLocationID(device, &location) == kIOReturnSuccess && location == e->location_id;
+}
+
+// Bound mode must never use outputs from a failed endpoint query. Cache one
+// fully checked result instead of repeating unchecked discovery later in open.
+static bool bound_bulk_pipes(IOUSBInterfaceInterface300 **interface, uint8_t *in,
+                             uint8_t *out, bool *known_fel_pair) {
+    UInt8 count = 0;
+    *in = *out = 0; *known_fel_pair = false;
+    uint8_t in_address = 0, out_address = 0;
+    if ((*interface)->GetNumEndpoints(interface, &count) != kIOReturnSuccess || count > 32) return false;
+    for (unsigned pipe = 1; pipe <= count; pipe++) {
+        UInt8 direction = 0, number = 0, type = 0, interval = 0;
+        UInt16 packet = 0;
+        if ((*interface)->GetPipeProperties(interface, (UInt8)pipe, &direction, &number,
+                                            &type, &packet, &interval) != kIOReturnSuccess) return false;
+        if (type != kUSBBulk) continue;
+        if (number == 0 || number > 15 || packet == 0) return false;
+        if (direction == kUSBIn && *in == 0) {
+            *in = (uint8_t)pipe; in_address = number | 0x80;
+        } else if (direction == kUSBOut && *out == 0) {
+            *out = (uint8_t)pipe; out_address = number;
+        } else return false;
+    }
+    if ((*in == 0) != (*out == 0)) return false;
+    *known_fel_pair = out_address == 0x01 && (in_address == 0x82 || in_address == 0x81);
+    return true;
+}
+
+static hakchi_usb_device_t *bound_interfaces(IOUSBDeviceInterface300 **device,
+                                             bool rndis, bool passive, hakchi_usb_error_t *error) {
+    hakchi_usb_device_t *dev = calloc(1, sizeof(*dev));
+    if (!dev) {
+        (*device)->USBDeviceClose(device); (*device)->Release(device);
+        if (error) *error = HAKCHI_USB_ERROR_OTHER;
+        return NULL;
+    }
+    dev->device = device;
+    dev->passive = passive;
+    IOUSBFindInterfaceRequest request = {kIOUSBFindInterfaceDontCare, kIOUSBFindInterfaceDontCare,
+                                        kIOUSBFindInterfaceDontCare, kIOUSBFindInterfaceDontCare};
+    io_iterator_t iterator = 0;
+    IOUSBInterfaceInterface300 **candidate = NULL;
+    bool candidate_open = false;
+    if ((*device)->CreateInterfaceIterator(device, &request, &iterator) != kIOReturnSuccess) goto failed;
+    io_service_t service;
+    while ((service = IOIteratorNext(iterator)) != 0) {
+        IOCFPlugInInterface **plugin = NULL;
+        SInt32 score = 0;
+        kern_return_t status = IOCreatePlugInInterfaceForService(service, kIOUSBInterfaceUserClientTypeID,
+                                           kIOCFPlugInInterfaceID, &plugin, &score);
+        IOObjectRelease(service);
+        if (status != KERN_SUCCESS || !plugin) {
+            if (plugin) (*plugin)->Release(plugin);
+            goto failed;
+        }
+        HRESULT query = (*plugin)->QueryInterface(plugin, CFUUIDGetUUIDBytes(kIOUSBInterfaceInterfaceID300),
+                                                   (LPVOID *)&candidate);
+        (*plugin)->Release(plugin);
+        if (query != 0 || !candidate) goto failed;
+        if ((*candidate)->USBInterfaceOpen(candidate) != kIOReturnSuccess) goto failed;
+        candidate_open = true;
+        uint8_t in = 0, out = 0;
+        bool fel_pair = false;
+        if (!bound_bulk_pipes(candidate, &in, &out, &fel_pair)) goto failed;
+        if (in && out) {
+            if (dev->interface) goto failed;
+            if (!rndis && !fel_pair) {
+                if (passive) goto failed;
+                if ((*candidate)->SetAlternateInterface(candidate, 1) != kIOReturnSuccess) goto failed;
+                if (!bound_bulk_pipes(candidate, &in, &out, &fel_pair) || !in || !out) goto failed;
+            }
+            dev->interface = candidate; dev->pipe_in = in; dev->pipe_out = out;
+            candidate = NULL; candidate_open = false;
+            if (!rndis) break;
+        } else if (rndis && !dev->control_interface) {
+            // Retain control-interface ownership through data discovery so both
+            // normal shutdown and failed initialization can close it.
+            dev->control_interface = candidate;
+            candidate = NULL; candidate_open = false;
+        } else {
+            (*candidate)->USBInterfaceClose(candidate); (*candidate)->Release(candidate);
+            candidate = NULL; candidate_open = false;
+        }
+    }
+    if (!dev->interface) goto failed;
+    IOObjectRelease(iterator);
+    if (error) *error = HAKCHI_USB_OK;
+    return dev;
+failed:
+    if (candidate) {
+        if (candidate_open) (*candidate)->USBInterfaceClose(candidate);
+        (*candidate)->Release(candidate);
+    }
+    if (iterator) IOObjectRelease(iterator);
+    hakchi_usb_close(dev);
+    if (error) *error = HAKCHI_USB_ERROR_IO;
+    return NULL;
+}
+
+static hakchi_usb_device_t *hakchi_usb_open_impl(uint16_t vid, uint16_t pid, hakchi_usb_error_t *error, bool passive, const hakchi_usb_identity_t *expected, const char *expected_product) {
     kern_return_t kr;
     io_iterator_t iterator = 0;
     io_service_t usb_service = 0;
@@ -47,6 +210,10 @@ hakchi_usb_device_t *hakchi_usb_open(uint16_t vid, uint16_t pid, hakchi_usb_erro
     setbuf(stderr, NULL);
     fprintf(stderr, "[USB] Opening device VID=0x%04X PID=0x%04X\n", vid, pid);
 
+    if (expected) {
+        usb_service = bound_service(expected, error, expected_product);
+        if (!usb_service) return NULL;
+    } else {
     // Create matching dictionary for USB device
     CFMutableDictionaryRef matchDict = IOServiceMatching(kIOUSBDeviceClassName);
     if (!matchDict) {
@@ -68,12 +235,20 @@ hakchi_usb_device_t *hakchi_usb_open(uint16_t vid, uint16_t pid, hakchi_usb_erro
     }
 
     usb_service = IOIteratorNext(iterator);
+    io_service_t second = passive ? IOIteratorNext(iterator) : 0;
     IOObjectRelease(iterator);
+    if (second) {
+        IOObjectRelease(second);
+        if (usb_service) IOObjectRelease(usb_service);
+        if (error) *error = HAKCHI_USB_ERROR_ACCESS;
+        return NULL;
+    }
 
     if (!usb_service) {
         fprintf(stderr, "[USB] No matching USB service found\n");
         if (error) *error = HAKCHI_USB_ERROR_NOT_FOUND;
         return NULL;
+    }
     }
     fprintf(stderr, "[USB] Found USB service\n");
 
@@ -101,9 +276,19 @@ hakchi_usb_device_t *hakchi_usb_open(uint16_t vid, uint16_t pid, hakchi_usb_erro
         return NULL;
     }
 
+    if (expected && !bound_handle(device, expected)) {
+        (*device)->Release(device);
+        if (error) *error = HAKCHI_USB_ERROR_ACCESS;
+        return NULL;
+    }
     // Open device
     kr = (*device)->USBDeviceOpen(device);
     if (kr != kIOReturnSuccess) {
+        if (passive || expected) {
+            (*device)->Release(device);
+            if (error) *error = HAKCHI_USB_ERROR_ACCESS;
+            return NULL;
+        }
         fprintf(stderr, "[USB] USBDeviceOpen failed: 0x%x, trying seize\n", kr);
         // Try with seize
         kr = (*device)->USBDeviceOpenSeize(device);
@@ -117,11 +302,18 @@ hakchi_usb_device_t *hakchi_usb_open(uint16_t vid, uint16_t pid, hakchi_usb_erro
     fprintf(stderr, "[USB] Device opened\n");
 
     // Set configuration (use first config)
-    IOUSBConfigurationDescriptorPtr configDesc;
+    IOUSBConfigurationDescriptorPtr configDesc = NULL;
     kr = (*device)->GetConfigurationDescriptorPtr(device, 0, &configDesc);
-    if (kr == kIOReturnSuccess) {
-        (*device)->SetConfiguration(device, configDesc->bConfigurationValue);
+    if (kr == kIOReturnSuccess && configDesc && !passive) {
+        kr = (*device)->SetConfiguration(device, configDesc->bConfigurationValue);
     }
+    if (expected && (kr != kIOReturnSuccess || !configDesc)) {
+        (*device)->USBDeviceClose(device); (*device)->Release(device);
+        if (error) *error = HAKCHI_USB_ERROR_IO;
+        return NULL;
+    }
+
+    if (expected) return bound_interfaces(device, false, passive, error);
 
     // Iterate through all interfaces to find one with bulk endpoints
     IOUSBFindInterfaceRequest req;
@@ -223,6 +415,15 @@ hakchi_usb_device_t *hakchi_usb_open(uint16_t vid, uint16_t pid, hakchi_usb_erro
     // Find pipe indices for our endpoints.
     // Try alternate setting 0 first (Clovershell gadget), then 1 (FEL protocol).
     hakchi_usb_device_t *dev = calloc(1, sizeof(hakchi_usb_device_t));
+    if (!dev) {
+        (*interface)->USBInterfaceClose(interface);
+        (*interface)->Release(interface);
+        (*device)->USBDeviceClose(device);
+        (*device)->Release(device);
+        if (error) *error = HAKCHI_USB_ERROR_OTHER;
+        return NULL;
+    }
+    dev->passive = passive;
     dev->device = device;
     dev->interface = interface;
 
@@ -260,7 +461,7 @@ hakchi_usb_device_t *hakchi_usb_open(uint16_t vid, uint16_t pid, hakchi_usb_erro
     }
 
     // If alt 0 didn't work, try alt 1
-    if (!found) {
+    if (!found && !passive) {
         fprintf(stderr, "[USB] Trying alternate setting 1\n");
         (*interface)->SetAlternateInterface(interface, 1);
         (*interface)->GetNumEndpoints(interface, &num_endpoints);
@@ -316,6 +517,30 @@ hakchi_usb_device_t *hakchi_usb_open(uint16_t vid, uint16_t pid, hakchi_usb_erro
     return dev;
 }
 
+hakchi_usb_device_t *hakchi_usb_open(uint16_t vid, uint16_t pid, hakchi_usb_error_t *error) {
+    return hakchi_usb_open_impl(vid, pid, error, false, NULL, NULL);
+}
+
+hakchi_usb_device_t *hakchi_usb_open_bound(const hakchi_usb_identity_t *expected, hakchi_usb_error_t *error) {
+    if (!bound_identity_valid(expected)) {
+        if (error) *error = HAKCHI_USB_ERROR_INVALID_PARAM;
+        return NULL;
+    }
+    return hakchi_usb_open_impl(expected->vendor_id, expected->product_id, error, false, expected, NULL);
+}
+
+hakchi_usb_device_t *hakchi_usb_open_passive_bound(const hakchi_usb_identity_t *expected, const char *expected_product, hakchi_usb_error_t *error) {
+    if (!bound_identity_valid(expected) || !expected_product || !*expected_product || strlen(expected_product) > 128) {
+        if (error) *error = HAKCHI_USB_ERROR_INVALID_PARAM;
+        return NULL;
+    }
+    return hakchi_usb_open_impl(expected->vendor_id, expected->product_id, error, true, expected, expected_product);
+}
+
+hakchi_usb_device_t *hakchi_usb_open_passive(uint16_t vid, uint16_t pid, hakchi_usb_error_t *error) {
+    return hakchi_usb_open_impl(vid, pid, error, true, NULL, NULL);
+}
+
 int hakchi_usb_bulk_write(hakchi_usb_device_t *dev, uint8_t endpoint,
                           const uint8_t *data, int length, int timeout_ms) {
     if (!dev || !dev->interface) return HAKCHI_USB_ERROR_INVALID_PARAM;
@@ -345,8 +570,10 @@ int hakchi_usb_bulk_read(hakchi_usb_device_t *dev, uint8_t endpoint,
 
     if (kr == kIOUSBTransactionTimeout) return HAKCHI_USB_ERROR_TIMEOUT;
     if (kr == kIOUSBPipeStalled) {
-        fprintf(stderr, "[USB] Read: pipe stalled, clearing\n");
-        (*dev->interface)->ClearPipeStallBothEnds(dev->interface, dev->pipe_in);
+        if (!dev->passive) {
+            fprintf(stderr, "[USB] Read: pipe stalled, clearing\n");
+            (*dev->interface)->ClearPipeStallBothEnds(dev->interface, dev->pipe_in);
+        }
         return HAKCHI_USB_ERROR_PIPE;
     }
     if (kr != kIOReturnSuccess) {
@@ -355,6 +582,16 @@ int hakchi_usb_bulk_read(hakchi_usb_device_t *dev, uint8_t endpoint,
     }
 
     return (int)bytes_read;
+}
+
+uint16_t hakchi_usb_get_packet_size_in(hakchi_usb_device_t *dev) {
+    if (!dev || !dev->interface || !dev->pipe_in) return 0;
+    UInt8 direction, number, type, interval;
+    UInt16 packet_size = 0;
+    IOReturn kr = (*dev->interface)->GetPipeProperties(dev->interface, dev->pipe_in,
+        &direction, &number, &type, &packet_size, &interval);
+    if (kr != kIOReturnSuccess || direction != kUSBIn || type != kUSBBulk) return 0;
+    return packet_size;
 }
 
 hakchi_usb_error_t hakchi_usb_clear_halt(hakchi_usb_device_t *dev, uint8_t endpoint) {
@@ -376,6 +613,10 @@ hakchi_usb_error_t hakchi_usb_reset(hakchi_usb_device_t *dev) {
 void hakchi_usb_close(hakchi_usb_device_t *dev) {
     if (!dev) return;
 
+    if (dev->control_interface) {
+        (*dev->control_interface)->USBInterfaceClose(dev->control_interface);
+        (*dev->control_interface)->Release(dev->control_interface);
+    }
     if (dev->interface) {
         (*dev->interface)->USBInterfaceClose(dev->interface);
         (*dev->interface)->Release(dev->interface);
@@ -451,14 +692,18 @@ uint8_t hakchi_usb_get_pipe_out(hakchi_usb_device_t *dev) {
     return dev ? dev->pipe_out : 0;
 }
 
-hakchi_usb_device_t *hakchi_usb_open_rndis(uint16_t vid, uint16_t pid,
-                                            hakchi_usb_error_t *error) {
+static hakchi_usb_device_t *hakchi_usb_open_rndis_impl(uint16_t vid, uint16_t pid,
+                                            hakchi_usb_error_t *error, const hakchi_usb_identity_t *expected) {
     kern_return_t kr;
     io_iterator_t iterator = 0;
     io_service_t usb_service = 0;
 
     fprintf(stderr, "[USB-RNDIS] Opening RNDIS device VID=0x%04X PID=0x%04X\n", vid, pid);
 
+    if (expected) {
+        usb_service = bound_service(expected, error, NULL);
+        if (!usb_service) return NULL;
+    } else {
     CFMutableDictionaryRef matchDict = IOServiceMatching(kIOUSBDeviceClassName);
     if (!matchDict) {
         if (error) *error = HAKCHI_USB_ERROR_OTHER;
@@ -483,6 +728,8 @@ hakchi_usb_device_t *hakchi_usb_open_rndis(uint16_t vid, uint16_t pid,
         return NULL;
     }
 
+    }
+
     // Get device interface
     IOCFPlugInInterface **plugIn = NULL;
     SInt32 score;
@@ -503,8 +750,18 @@ hakchi_usb_device_t *hakchi_usb_open_rndis(uint16_t vid, uint16_t pid,
         return NULL;
     }
 
+    if (expected && !bound_handle(device, expected)) {
+        (*device)->Release(device);
+        if (error) *error = HAKCHI_USB_ERROR_ACCESS;
+        return NULL;
+    }
     kr = (*device)->USBDeviceOpen(device);
     if (kr != kIOReturnSuccess) {
+        if (expected) {
+            (*device)->Release(device);
+            if (error) *error = HAKCHI_USB_ERROR_ACCESS;
+            return NULL;
+        }
         kr = (*device)->USBDeviceOpenSeize(device);
         if (kr != kIOReturnSuccess) {
             (*device)->Release(device);
@@ -514,11 +771,18 @@ hakchi_usb_device_t *hakchi_usb_open_rndis(uint16_t vid, uint16_t pid,
     }
 
     // Set configuration
-    IOUSBConfigurationDescriptorPtr configDesc;
+    IOUSBConfigurationDescriptorPtr configDesc = NULL;
     kr = (*device)->GetConfigurationDescriptorPtr(device, 0, &configDesc);
-    if (kr == kIOReturnSuccess) {
-        (*device)->SetConfiguration(device, configDesc->bConfigurationValue);
+    if (kr == kIOReturnSuccess && configDesc) {
+        kr = (*device)->SetConfiguration(device, configDesc->bConfigurationValue);
     }
+    if (expected && (kr != kIOReturnSuccess || !configDesc)) {
+        (*device)->USBDeviceClose(device); (*device)->Release(device);
+        if (error) *error = HAKCHI_USB_ERROR_IO;
+        return NULL;
+    }
+
+    if (expected) return bound_interfaces(device, true, false, error);
 
     // RNDIS: interface 0 = control (CDC), interface 1 = data (bulk IN/OUT)
     // We need to claim both, but only open/use interface 1 for bulk transfers.
@@ -610,6 +874,12 @@ hakchi_usb_device_t *hakchi_usb_open_rndis(uint16_t vid, uint16_t pid,
     }
 
     hakchi_usb_device_t *dev = calloc(1, sizeof(hakchi_usb_device_t));
+    if (!dev) {
+        (*dataInterface)->USBInterfaceClose(dataInterface); (*dataInterface)->Release(dataInterface);
+        (*device)->USBDeviceClose(device); (*device)->Release(device);
+        if (error) *error = HAKCHI_USB_ERROR_OTHER;
+        return NULL;
+    }
     dev->device = device;
     dev->interface = dataInterface;
 
@@ -638,6 +908,18 @@ hakchi_usb_device_t *hakchi_usb_open_rndis(uint16_t vid, uint16_t pid,
             dev->pipe_in, dev->pipe_out);
     if (error) *error = HAKCHI_USB_OK;
     return dev;
+}
+
+hakchi_usb_device_t *hakchi_usb_open_rndis(uint16_t vid, uint16_t pid, hakchi_usb_error_t *error) {
+    return hakchi_usb_open_rndis_impl(vid, pid, error, NULL);
+}
+
+hakchi_usb_device_t *hakchi_usb_open_rndis_bound(const hakchi_usb_identity_t *expected, hakchi_usb_error_t *error) {
+    if (!bound_identity_valid(expected)) {
+        if (error) *error = HAKCHI_USB_ERROR_INVALID_PARAM;
+        return NULL;
+    }
+    return hakchi_usb_open_rndis_impl(expected->vendor_id, expected->product_id, error, expected);
 }
 
 bool hakchi_usb_device_exists(uint16_t vid, uint16_t pid) {

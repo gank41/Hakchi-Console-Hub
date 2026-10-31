@@ -1,262 +1,167 @@
 import Foundation
 import USBBridge
-import os
 
-private let logger = Logger(subsystem: "com.swifthakchi.app", category: "FELService")
+/// Checked RAM-boot transport only. Firmware install/reset eligibility is separate.
+actor FELService: FELBooting {
+    private let makeSession: @Sendable () -> any FELSessionTransport
+    private var busy = false
 
-/// Swift wrapper for C FEL protocol operations
-actor FELService {
-    /// Verify that a FEL device is connected and return board info
-    func verifyDevice() throws -> UInt32 {
-        guard let dev = fel_open() else {
-            throw FELError.deviceNotFound
-        }
-        defer { fel_close(dev) }
-
-        var resp = aw_fel_verify_response_t()
-        let ret = fel_verify_device(dev, &resp)
-        guard ret == 0 else {
-            throw FELError.communicationError(ret)
-        }
-
-        guard resp.board == EXPECTED_BOARD_ID else {
-            throw FELError.wrongBoard(resp.board)
-        }
-
-        return resp.board
+    init(makeSession: @escaping @Sendable () -> any FELSessionTransport = { IOKitFELSessionTransport() }) {
+        self.makeSession = makeSession
     }
 
-    /// Initialize DRAM on the FEL device using the fes1 SPL binary
-    func initDram(fes1Data: Data) throws {
-        guard let dev = fel_open() else {
-            throw FELError.deviceNotFound
-        }
-        defer { fel_close(dev) }
-
-        let ret = fes1Data.withUnsafeBytes { ptr -> Int32 in
-            guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return HAKCHI_USB_ERROR_INVALID_PARAM.rawValue
-            }
-            return fel_init_dram(dev, baseAddr, UInt32(fes1Data.count))
-        }
-
-        guard ret == 0 else {
-            throw FELError.dramInitFailed(ret)
-        }
+    private func acquire() throws {
+        guard !busy else { throw FELError.busy }
+        busy = true
     }
 
-    /// Write data to device memory and optionally execute
-    func writeAndExec(address: UInt32, data: Data, exec: Bool = false,
-                      progress: (@Sendable (Double) -> Void)? = nil) throws {
-        guard let dev = fel_open() else {
-            throw FELError.deviceNotFound
-        }
-        defer { fel_close(dev) }
-
-        let ret = data.withUnsafeBytes { ptr -> Int32 in
-            guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return HAKCHI_USB_ERROR_INVALID_PARAM.rawValue
-            }
-
-            return fel_write_memory(dev, address, baseAddr, UInt32(data.count),
-                { done, total, ctx in
-                    // Progress callback - we can't easily bridge this to the Swift closure
-                    // in an actor-safe way, so progress is best-effort
-                    _ = ctx
-                }, nil)
-        }
-
-        guard ret == 0 else {
-            throw FELError.writeError(ret)
-        }
-
-        if exec {
-            let execRet = fel_exec(dev, address)
-            guard execRet == 0 else {
-                throw FELError.execError(execRet)
-            }
-        }
+    /// Read the actual FEL response; shared USB identifiers are insufficient proof.
+    func verifyDevice() async throws -> UInt32 {
+        try acquire(); defer { busy = false }
+        try Task.checkCancellation()
+        let session = makeSession()
+        do {
+            try await session.open()
+            try Task.checkCancellation()
+            let board = try await session.verifyBoard()
+            try Task.checkCancellation()
+            guard board == UInt32(EXPECTED_BOARD_ID) else { throw FELError.wrongBoard(board) }
+            await session.close()
+            return board
+        } catch { await session.close(); throw error }
     }
 
-    /// Full memboot sequence: init DRAM, write U-Boot, execute
+    /// Validates and patches all input bytes before USB, then verifies the complete RAM
+    /// copies on one board-verified handle. This requests execution, not a verified USB boot.
     func memboot(fes1Data: Data, ubootData: Data, bootImgData: Data,
-                 progress: (@Sendable (String, Double) -> Void)? = nil) throws {
-        logger.info("memboot: opening FEL device")
-        guard let dev = fel_open() else {
-            logger.error("memboot: FEL device not found")
-            throw FELError.deviceNotFound
-        }
-        defer { fel_close(dev) }
-        logger.info("memboot: FEL device opened")
-
-        // Step 1: Init DRAM
-        logger.info("memboot: initializing DRAM (fes1: \(fes1Data.count) bytes)")
-        let initRet = fes1Data.withUnsafeBytes { ptr -> Int32 in
-            guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return HAKCHI_USB_ERROR_INVALID_PARAM.rawValue
-            }
-            return fel_init_dram(dev, baseAddr, UInt32(fes1Data.count))
-        }
-        guard initRet == 0 else {
-            logger.error("memboot: DRAM init failed (code: \(initRet))")
-            throw FELError.dramInitFailed(initRet)
-        }
-        logger.info("memboot: DRAM initialized")
-
-        // Step 2: Write U-Boot to DRAM
-        logger.info("memboot: writing U-Boot (\(ubootData.count) bytes) to 0x\(String(UInt32(UBOOT_BASE_M), radix: 16))")
-        let ubootRet = ubootData.withUnsafeBytes { ptr -> Int32 in
-            guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return HAKCHI_USB_ERROR_INVALID_PARAM.rawValue
-            }
-            return fel_write_memory(dev, UInt32(UBOOT_BASE_M), baseAddr,
-                                    UInt32(ubootData.count), nil, nil)
-        }
-        guard ubootRet == 0 else {
-            logger.error("memboot: U-Boot write failed (code: \(ubootRet))")
-            throw FELError.writeError(ubootRet)
-        }
-        logger.info("memboot: U-Boot written")
-
-        // Step 3: Patch cmdline in boot.img BEFORE writing to DRAM.
-        // Strip existing hakchi-* flags, add hakchi-shell. This tells the
-        // init scripts to start the RNDIS USB gadget (same as upstream Windows client).
-        // We handle RNDIS in user-space via our network stack.
-        // NOTE: Do NOT include hakchi-memboot here — it causes the boot script
-        // to strip all hakchi-* flags when writing to NAND.
-        var bootImg = Array(bootImgData)
-        Self.patchCmdlineInPlace(&bootImg, flags: "hakchi-shell")
-        let patchedBootImg = Data(bootImg)
-
-        logger.info("memboot: writing boot.img (\(patchedBootImg.count) bytes) to 0x\(String(UInt32(TRANSFER_BASE_M), radix: 16))")
-        let bootRet = patchedBootImg.withUnsafeBytes { ptr -> Int32 in
-            guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return HAKCHI_USB_ERROR_INVALID_PARAM.rawValue
-            }
-            return fel_write_memory(dev, UInt32(TRANSFER_BASE_M), baseAddr,
-                                    UInt32(patchedBootImg.count), nil, nil)
-        }
-        guard bootRet == 0 else {
-            logger.error("memboot: boot.img write failed (code: \(bootRet))")
-            throw FELError.writeError(bootRet)
-        }
-        logger.info("memboot: boot.img written (with patched cmdline)")
-
-        // Step 4: Patch U-Boot's bootcmd to boot from the transfer address
-        // U-Boot has "bootcmd=" embedded in its binary. We overwrite the value
-        // with "boota <transfer_addr>" so U-Boot boots our kernel on startup.
-        let bootCmd = "boota \(String(UInt32(TRANSFER_BASE_M), radix: 16))\0"
-        let cmdOffset = Self.findBootcmdOffset(in: ubootData)
-        guard let cmdOffset else {
-            logger.error("memboot: could not find bootcmd= in U-Boot binary")
-            throw FELError.bootcmdNotFound
-        }
-        logger.info("memboot: patching bootcmd at offset \(cmdOffset) with '\(bootCmd.dropLast())'")
-
-        let patchAddr = UInt32(UBOOT_BASE_M) + UInt32(cmdOffset)
-        let cmdData = Data(bootCmd.utf8)
-        let patchRet = cmdData.withUnsafeBytes { ptr -> Int32 in
-            guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return HAKCHI_USB_ERROR_INVALID_PARAM.rawValue
-            }
-            return fel_write_memory(dev, patchAddr, baseAddr, UInt32(cmdData.count), nil, nil)
-        }
-        guard patchRet == 0 else {
-            logger.error("memboot: bootcmd patch write failed (code: \(patchRet))")
-            throw FELError.writeError(patchRet)
-        }
-        logger.info("memboot: bootcmd patched")
-
-        // Step 5: Execute U-Boot
-        logger.info("memboot: executing U-Boot at 0x\(String(UInt32(UBOOT_BASE_M), radix: 16))")
-        let execRet = fel_exec(dev, UInt32(UBOOT_BASE_M))
-        guard execRet == 0 else {
-            logger.error("memboot: exec failed (code: \(execRet))")
-            throw FELError.execError(execRet)
-        }
-        logger.info("memboot: U-Boot execution started, memboot complete")
+                 progress: (@Sendable (String, Double) -> Void)? = nil) async throws {
+        try acquire(); defer { busy = false }
+        try Task.checkCancellation()
+        let prepared = try PreparedRecoveryBoot(fes1: fes1Data, uboot: ubootData, bootImage: bootImgData)
+        try Task.checkCancellation()
+        try await transfer(fes1: prepared.fes1, uboot: prepared.uboot, image: prepared.bootImage, progress: progress)
     }
 
-    /// Patch the kernel cmdline in-place in the boot.img byte array.
-    /// Matches the .NET macOS port's InPlaceStringEdit approach:
-    /// reads ASCII at offset 64 (512 bytes), strips hakchi-* flags, appends new flags,
-    /// zero-fills the rest, writes back in-place.
-    private static func patchCmdlineInPlace(_ buffer: inout [UInt8], flags: String) {
-        let startOffset = 64
-        let windowSize = 512
-        guard buffer.count > startOffset + windowSize else { return }
-
-        // Read existing cmdline as ASCII (null-terminated)
-        let cmdlineBytes = Array(buffer[startOffset..<(startOffset + windowSize)])
-        let nullIdx = cmdlineBytes.firstIndex(of: 0) ?? windowSize
-        let existing = String(bytes: cmdlineBytes[0..<nullIdx], encoding: .ascii) ?? ""
-
-        logger.info("boot.img original cmdline: '\(existing)'")
-
-        // Strip existing hakchi flags, append new ones
-        var patched = existing
-            .replacingOccurrences(of: "hakchi-shell", with: "")
-            .replacingOccurrences(of: "hakchi-clovershell", with: "")
-            .replacingOccurrences(of: "hakchi-memboot", with: "")
-            .replacingOccurrences(of: "  ", with: " ")
-            .trimmingCharacters(in: .whitespaces)
-        patched += " \(flags)"
-
-        logger.info("boot.img patched cmdline: '\(patched)'")
-
-        // Write back: fill window with zeros, then copy patched string
-        for i in startOffset..<(startOffset + windowSize) {
-            buffer[i] = 0
-        }
-        let patchedBytes = Array(patched.utf8)
-        let copyLen = min(patchedBytes.count, windowSize - 1) // leave room for null terminator
-        for i in 0..<copyLen {
-            buffer[startOffset + i] = patchedBytes[i]
-        }
+    func memboot(probe: PreparedSNESRAMProbe, progress: (@Sendable (String, Double) -> Void)? = nil) async throws {
+        try acquire(); defer { busy = false }
+        try Task.checkCancellation()
+        try probe.validateCurrent()
+        try await transfer(fes1: probe.fes1, uboot: probe.uboot, image: probe.image, progress: progress)
     }
 
-    /// Find the offset of the bootcmd value in the U-Boot binary.
-    /// Searches for "bootcmd=" and returns the offset just past the "=".
-    private static func findBootcmdOffset(in ubootData: Data) -> Int? {
-        let prefix = Array("bootcmd=".utf8)
-        let bytes = Array(ubootData)
-        for i in 0...(bytes.count - prefix.count) {
-            if bytes[i..<(i + prefix.count)].elementsEqual(prefix) {
-                return i + prefix.count
+    func memboot(menu: PreparedSNESTemporaryMenu, progress: (@Sendable (String, Double) -> Void)? = nil) async throws {
+        try acquire(); defer { busy = false }
+        try Task.checkCancellation(); try menu.validateCurrent()
+        try await transfer(fes1: menu.fes1, uboot: menu.uboot, image: menu.image, progress: progress)
+    }
+
+    func memboot(originalMenu: PreparedSNESOriginalMenu, progress: (@Sendable (String, Double) -> Void)? = nil) async throws {
+        try acquire(); defer { busy = false }
+        try Task.checkCancellation(); try originalMenu.validateCurrent()
+        try await transfer(fes1: originalMenu.fes1, uboot: originalMenu.uboot, image: originalMenu.image, progress: progress, validateSource: { try originalMenu.validateCurrent() })
+    }
+
+    func memboot(alienTrial: PreparedSNESAlienTrial, progress: (@Sendable (String, Double) -> Void)? = nil) async throws {
+        try acquire(); defer { busy = false }
+        try Task.checkCancellation(); try alienTrial.validateCurrent()
+        try await transfer(fes1: alienTrial.base.fes1, uboot: alienTrial.base.uboot, image: alienTrial.image, progress: progress,
+                           expectedHWID: alienTrial.expectation.binding.expectedHWID,
+                           validateSource: { try alienTrial.validateCurrent() })
+    }
+
+    func memboot(startupTrial: PreparedSNESStartupTrial, progress: (@Sendable (String, Double) -> Void)? = nil) async throws {
+        try acquire(); defer { busy = false }
+        // Reconstructing historical evidence must remain possible for stock recovery.
+        // Refuse unsupported execution here, before creating or opening a USB session.
+        try SNESColdBootPolicy.requireSupportedImage(startupTrial.image)
+        try startupTrial.validateCurrent()
+        try await transfer(fes1: startupTrial.fes1, uboot: startupTrial.uboot, image: startupTrial.image, progress: progress,
+            expectedHWID: startupTrial.expectedHWID, validateSource: { try startupTrial.validateCurrent() })
+    }
+
+    private func transfer(fes1: Data, uboot: Data, image: Data, progress: (@Sendable (String, Double) -> Void)?,
+                          expectedHWID: String? = nil, validateSource: @Sendable () throws -> Void = {}) async throws {
+        func check() throws { try Task.checkCancellation(); try validateSource(); try Task.checkCancellation() }
+        try check()
+        let session = makeSession()
+        func checkSID() async throws {
+            guard let expectedHWID else { return }
+            progress?("Checking console hardware identity…", 0.10)
+            let bytes = try await session.readHardwareIdentity()
+            try check()
+            let actual: String
+            do { actual = try SNESStartupSID.decode(bytes) }
+            catch { throw RecoveryProbeError.refused("The hardware identity read returned invalid bytes: " + bytes.prefix(16).map { String(format: "%02x", $0) }.joined()) }
+            guard actual == expectedHWID else {
+                throw RecoveryProbeError.refused("The hardware identity read did not match the saved console: " + actual)
             }
         }
-        return nil
+        do {
+            progress?("Opening FEL recovery connection…", 0.05)
+            try check()
+            try await session.open()
+            try check()
+            if expectedHWID != nil { progress?("Checking the recovery board…", 0.08) }
+            let board = try await session.verifyBoard()
+            try check()
+            guard board == UInt32(EXPECTED_BOARD_ID) else { throw FELError.wrongBoard(board) }
+            try await checkSID(); try check()
+
+            progress?("Verifying DRAM loader and initializing memory…", 0.15)
+            try check()
+            try await session.initializeDRAM(fes1: fes1)
+            try check()
+
+            progress?("Uploading prepared U-Boot…", 0.30)
+            try check()
+            try await session.write(address: UInt32(UBOOT_BASE_M), data: uboot)
+            try check()
+            let ubootReadback = try await session.read(address: UInt32(UBOOT_BASE_M), count: uboot.count)
+            try check()
+            guard ubootReadback == uboot else { throw FELError.readbackMismatch("U-Boot") }
+
+            progress?("Uploading prepared recovery kernel…", 0.55)
+            try check()
+            try await session.write(address: UInt32(TRANSFER_BASE_M), data: image)
+            try check()
+            let kernelReadback = try await session.read(address: UInt32(TRANSFER_BASE_M), count: image.count)
+            try check()
+            guard kernelReadback == image else { throw FELError.readbackMismatch("recovery kernel") }
+            try await checkSID(); try check()
+
+            progress?("RAM images verified; requesting recovery boot…", 0.95)
+            try check()
+            try await session.execute(address: UInt32(UBOOT_BASE_M))
+            // Execution may already have started: do not relabel it as an unstarted
+            // operation if cancellation arrives during the final command.
+            await session.close()
+            progress?("Boot execution requested; recovery USB startup still needs verification.", 1.0)
+        } catch { await session.close(); throw error }
     }
 }
 
 enum FELError: Error, LocalizedError {
-    case deviceNotFound
+    case deviceNotFound, busy, invalidTransfer
     case communicationError(Int32)
     case wrongBoard(UInt32)
     case dramInitFailed(Int32)
     case writeError(Int32)
     case readError(Int32)
     case execError(Int32)
-    case bootcmdNotFound
+    case readbackMismatch(String)
 
     var errorDescription: String? {
         switch self {
-        case .deviceNotFound:
-            return "FEL device not found. Make sure the console is connected in FEL mode."
-        case .communicationError(let code):
-            return "USB communication error (code: \(code))"
-        case .wrongBoard(let id):
-            return "Unexpected board ID: 0x\(String(id, radix: 16))"
-        case .dramInitFailed(let code):
-            return "Failed to initialize DRAM (code: \(code))"
-        case .writeError(let code):
-            return "Failed to write to device memory (code: \(code))"
-        case .readError(let code):
-            return "Failed to read from device memory (code: \(code))"
-        case .execError(let code):
-            return "Failed to execute on device (code: \(code))"
-        case .bootcmdNotFound:
-            return "Could not find bootcmd in U-Boot binary — the hakchi.hmod may be corrupt"
+        case .deviceNotFound: return "FEL device not found. Connect the console in FEL mode."
+        case .busy: return "A FEL operation is already running."
+        case .invalidTransfer: return "Invalid or oversized recovery memory transfer."
+        case .communicationError(let code): return "USB communication error (code: \(code))."
+        case .wrongBoard(let board): return "Unexpected board ID: 0x\(String(board, radix: 16))."
+        case .dramInitFailed(let code): return "DRAM loader verification or initialization failed (code: \(code))."
+        case .writeError(let code): return "Memory upload failed (code: \(code))."
+        case .readError(let code): return "Memory readback failed (code: \(code))."
+        case .execError(let code): return "Device execution request failed (code: \(code)); its outcome may be uncertain."
+        case .readbackMismatch(let image): return "\(image) RAM readback differs from the prepared copy. Boot execution was not requested."
         }
     }
 }

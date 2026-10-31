@@ -1,7 +1,7 @@
 import Foundation
 
 /// Console types supported by hakchi
-enum ConsoleType: String, Codable, CaseIterable, Identifiable {
+enum ConsoleType: String, Codable, CaseIterable, Identifiable, Sendable {
     case nes = "nes"
     case famicom = "hvc"
     case snesUsa = "snes-usa"
@@ -21,7 +21,7 @@ enum ConsoleType: String, Codable, CaseIterable, Identifiable {
         case .snesEur: return "SNES Classic (EUR)"
         case .superFamicom: return "Super Famicom Mini"
         case .superFamicomShonenJump: return "Super Famicom (Shonen Jump)"
-        case .megaDrive: return "Mega Drive Mini"
+        case .megaDrive: return "Sega Genesis / Mega Drive Mini"
         case .unknown: return "Unknown Console"
         }
     }

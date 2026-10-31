@@ -1,0 +1,15 @@
+# miniLZO provenance
+
+Official source: https://www.oberhumer.com/opensource/lzo/download/minilzo-2.10.tar.gz
+Archive SHA1 (matches publisher): c7432708d49017a3f0b4f44c99d336f8a1be84f5
+Archive SHA256: eb4ce543aad19533c83550746e0e9d7bcf716b35a42429e3ba17d60fa0f3e47a
+License: GPL-2.0-or-later, see COPYING. Upstream source files are unmodified.
+The local safe_decode.c wrapper exposes only bounded LZO1X decoding. No external runtime library.
+
+## Vendored hashes
+minilzo.c 489430d9a4290082dc5c2b90bb67822586f985a12353e3a1368e633fa4136dd6
+minilzo.h 7a534954bf04e611cd79905ede932c41a2907af461ba532a0f2d2c08463070ee
+lzoconf.h 63bf0574a0df2fa703060282cc5cfa60d86e73d11b1a5f2faf261ffe6809f99d
+lzodefs.h 7cdc24f7d8762f0908b30f4959442798427af8c01c6d925f5594114a45a2a89e
+COPYING 8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643
+README.LZO 97aa7ee7a912016329e1360cd00ab4466b998ccde994f778204380feb10bbbb7

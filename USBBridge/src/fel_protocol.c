@@ -2,122 +2,121 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <stdio.h>
+#include <limits.h>
 
-// ---------- Low-level USB transport ----------
+/* Every handle owns authorization state; no global transport hooks. */
+static int fel_invalidate(fel_device_t *dev, int error) {
+    if (dev) { dev->board_verified = false; dev->dram_initialized = false; }
+    return error;
+}
 
 static int fel_usb_write(fel_device_t *dev, const uint8_t *data, int length) {
-    return hakchi_usb_bulk_write(dev->usb, FEL_EP_OUT, data, length, FEL_WRITE_TIMEOUT);
+    if (!dev || !data || length <= 0 || (!dev->transport.write && !dev->usb))
+        return HAKCHI_USB_ERROR_INVALID_PARAM;
+    int ret = dev->transport.write
+        ? dev->transport.write(dev->transport_context, data, length)
+        : hakchi_usb_bulk_write(dev->usb, FEL_EP_OUT, data, length, FEL_WRITE_TIMEOUT);
+    if (ret < 0) return fel_invalidate(dev, ret);
+    return ret == length ? ret : fel_invalidate(dev, HAKCHI_USB_ERROR_IO);
 }
 
 static int fel_usb_read(fel_device_t *dev, uint8_t *data, int length) {
-    return hakchi_usb_bulk_read(dev->usb, FEL_EP_IN, data, length, FEL_READ_TIMEOUT);
+    if (!dev || !data || length <= 0 || (!dev->transport.read && !dev->usb))
+        return HAKCHI_USB_ERROR_INVALID_PARAM;
+    memset(data, 0, (size_t)length);
+    int ret = dev->transport.read
+        ? dev->transport.read(dev->transport_context, data, length)
+        : hakchi_usb_bulk_read(dev->usb, FEL_EP_IN, data, length, FEL_READ_TIMEOUT);
+    if (ret < 0) return fel_invalidate(dev, ret);
+    return ret == length ? ret : fel_invalidate(dev, HAKCHI_USB_ERROR_IO);
 }
 
-// ---------- AW protocol wrappers ----------
-
-/// Send an AWUC-wrapped write command, then the payload, then read AWUS response
-static int aw_write(fel_device_t *dev, const uint8_t *data, uint32_t length) {
-    aw_usb_request_t req;
-    memset(&req, 0, sizeof(req));
-    req.signature[0] = 'A'; req.signature[1] = 'W';
-    req.signature[2] = 'U'; req.signature[3] = 'C';
-    req.len = length;
-    req.cmd_len = 0x0C;
-    req.cmd = AW_USB_WRITE;
-    req.len2 = length;
-
-    int ret = fel_usb_write(dev, (const uint8_t *)&req, sizeof(req));
+static int aw_ack(fel_device_t *dev) {
+    aw_usb_response_t response = {0};
+    int ret = fel_usb_read(dev, (uint8_t *)&response, sizeof(response));
     if (ret < 0) return ret;
+    if (memcmp(response.signature, "AWUS", 4) != 0 || response.csw_status != 0)
+        return fel_invalidate(dev, HAKCHI_USB_ERROR_IO);
+    return HAKCHI_USB_OK;
+}
 
+static aw_usb_request_t aw_request(uint8_t command, uint32_t length) {
+    aw_usb_request_t request = {0};
+    memcpy(request.signature, "AWUC", 4);
+    request.len = length; request.len2 = length;
+    request.cmd_len = 0x0C; request.cmd = command;
+    return request;
+}
+
+static int aw_write(fel_device_t *dev, const uint8_t *data, uint32_t length) {
+    if (!data || !length || length > FEL_MAX_BULK_SIZE) return HAKCHI_USB_ERROR_INVALID_PARAM;
+    aw_usb_request_t request = aw_request(AW_USB_WRITE, length);
+    int ret = fel_usb_write(dev, (const uint8_t *)&request, sizeof(request));
+    if (ret < 0) return ret;
     ret = fel_usb_write(dev, data, (int)length);
     if (ret < 0) return ret;
-
-    aw_usb_response_t resp;
-    ret = fel_usb_read(dev, (uint8_t *)&resp, sizeof(resp));
-    if (ret < 0) return ret;
-
-    if (memcmp(resp.signature, "AWUS", 4) != 0 || resp.csw_status != 0) {
-        return HAKCHI_USB_ERROR_IO;
-    }
-
-    return HAKCHI_USB_OK;
+    return aw_ack(dev);
 }
 
-/// Send an AWUC-wrapped read command, read payload, then read AWUS response
 static int aw_read(fel_device_t *dev, uint8_t *data, uint32_t length) {
-    aw_usb_request_t req;
-    memset(&req, 0, sizeof(req));
-    req.signature[0] = 'A'; req.signature[1] = 'W';
-    req.signature[2] = 'U'; req.signature[3] = 'C';
-    req.len = length;
-    req.cmd_len = 0x0C;
-    req.cmd = AW_USB_READ;
-    req.len2 = length;
-
-    int ret = fel_usb_write(dev, (const uint8_t *)&req, sizeof(req));
+    if (!data || !length || length > FEL_MAX_BULK_SIZE) return HAKCHI_USB_ERROR_INVALID_PARAM;
+    aw_usb_request_t request = aw_request(AW_USB_READ, length);
+    int ret = fel_usb_write(dev, (const uint8_t *)&request, sizeof(request));
     if (ret < 0) return ret;
-
     ret = fel_usb_read(dev, data, (int)length);
     if (ret < 0) return ret;
-
-    aw_usb_response_t resp;
-    ret = fel_usb_read(dev, (uint8_t *)&resp, sizeof(resp));
-    if (ret < 0) return ret;
-
-    if (memcmp(resp.signature, "AWUS", 4) != 0 || resp.csw_status != 0) {
-        return HAKCHI_USB_ERROR_IO;
-    }
-
-    return HAKCHI_USB_OK;
+    return aw_ack(dev);
 }
 
-// ---------- FEL commands ----------
-
-/// Send a standard FEL request (no address/length)
-static int fel_send_request(fel_device_t *dev, uint16_t cmd) {
-    aw_fel_std_request_t req;
-    memset(&req, 0, sizeof(req));
-    req.cmd = cmd;
-    return aw_write(dev, (const uint8_t *)&req, sizeof(req));
+static int fel_send_request(fel_device_t *dev, uint16_t command) {
+    aw_fel_std_request_t request = {0}; request.cmd = command;
+    return aw_write(dev, (const uint8_t *)&request, sizeof(request));
 }
 
-/// Send a FEL message with address and length
-static int fel_send_message(fel_device_t *dev, uint16_t cmd, uint32_t address, uint32_t length) {
-    aw_fel_message_t msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.cmd = cmd;
-    msg.address = address;
-    msg.len = length;
-    return aw_write(dev, (const uint8_t *)&msg, sizeof(msg));
+static int fel_send_message(fel_device_t *dev, uint16_t command, uint32_t address, uint32_t length) {
+    aw_fel_message_t message = {0};
+    message.cmd = command; message.address = address; message.len = length;
+    return aw_write(dev, (const uint8_t *)&message, sizeof(message));
 }
 
-/// Read and validate FEL status response
 static int fel_read_status(fel_device_t *dev) {
-    aw_fel_status_t status;
+    aw_fel_status_t status = {0};
     int ret = aw_read(dev, (uint8_t *)&status, sizeof(status));
     if (ret < 0) return ret;
-    if (status.state != 0) return HAKCHI_USB_ERROR_IO;
-    return HAKCHI_USB_OK;
+    return status.state == 0 ? HAKCHI_USB_OK : fel_invalidate(dev, HAKCHI_USB_ERROR_IO);
 }
 
-// ---------- Public API ----------
-
-fel_device_t *fel_open(void) {
-    hakchi_usb_error_t err;
-    hakchi_usb_device_t *usb = hakchi_usb_open(FEL_VID, FEL_PID, &err);
+static fel_device_t *fel_open_usb(hakchi_usb_device_t *usb, bool checked) {
     if (!usb) return NULL;
+    int status = hakchi_usb_reset(usb);
+    if (checked && status != HAKCHI_USB_OK) { hakchi_usb_close(usb); return NULL; }
+    status = hakchi_usb_clear_halt(usb, FEL_EP_OUT);
+    if (checked && status != HAKCHI_USB_OK) { hakchi_usb_close(usb); return NULL; }
+    status = hakchi_usb_clear_halt(usb, FEL_EP_IN);
+    if (checked && status != HAKCHI_USB_OK) { hakchi_usb_close(usb); return NULL; }
+    fel_device_t *device = calloc(1, sizeof(*device));
+    if (!device) { hakchi_usb_close(usb); return NULL; }
+    device->usb = usb;
+    return device;
+}
+fel_device_t *fel_open(void) {
+    hakchi_usb_error_t error;
+    return fel_open_usb(hakchi_usb_open(FEL_VID, FEL_PID, &error), false);
+}
+fel_device_t *fel_open_bound(const hakchi_usb_identity_t *e) {
+    if (!e || !e->registry_entry_id || !e->location_id || e->vendor_id != FEL_VID
+        || e->product_id != FEL_PID || e->device_version != 0x02b3 || e->device_class != 0
+        || !e->require_empty_product) return NULL;
+    hakchi_usb_error_t error;
+    return fel_open_usb(hakchi_usb_open_bound(e, &error), true);
+}
 
-    // Reset device and clear halts
-    hakchi_usb_reset(usb);
-    hakchi_usb_clear_halt(usb, FEL_EP_OUT);
-    hakchi_usb_clear_halt(usb, FEL_EP_IN);
-
-    fel_device_t *dev = calloc(1, sizeof(fel_device_t));
-    dev->usb = usb;
-    dev->dram_initialized = false;
-
-    return dev;
+fel_device_t *fel_open_transport(const fel_transport_t *transport, void *context) {
+    if (!transport || !transport->read || !transport->write) return NULL;
+    fel_device_t *device = calloc(1, sizeof(*device));
+    if (!device) return NULL;
+    device->transport = *transport; device->transport_context = context;
+    return device;
 }
 
 void fel_close(fel_device_t *dev) {
@@ -126,133 +125,120 @@ void fel_close(fel_device_t *dev) {
     free(dev);
 }
 
-int fel_verify_device(fel_device_t *dev, aw_fel_verify_response_t *resp) {
+int fel_verify_device(fel_device_t *dev, aw_fel_verify_response_t *response) {
+    if (!dev) return HAKCHI_USB_ERROR_INVALID_PARAM;
+    fel_invalidate(dev, 0);
+    if (!response) return HAKCHI_USB_ERROR_INVALID_PARAM;
+    memset(response, 0, sizeof(*response));
     int ret = fel_send_request(dev, FEL_VERIFY_DEVICE);
     if (ret < 0) return ret;
-
-    ret = aw_read(dev, (uint8_t *)resp, sizeof(*resp));
+    ret = aw_read(dev, (uint8_t *)response, sizeof(*response));
     if (ret < 0) return ret;
-
-    // Discard status response
-    aw_fel_status_t status;
-    aw_read(dev, (uint8_t *)&status, sizeof(status));
-
-    // Validate magic
-    if (memcmp(resp->magic, "AWUSBFEX", 8) != 0) {
-        return HAKCHI_USB_ERROR_IO;
-    }
-
+    if (memcmp(response->magic, "AWUSBFEX", 8) != 0)
+        return fel_invalidate(dev, HAKCHI_USB_ERROR_IO);
+    ret = fel_read_status(dev);
+    if (ret < 0) return ret;
+    dev->board_verified = response->board == EXPECTED_BOARD_ID;
     return HAKCHI_USB_OK;
 }
 
-int fel_write_memory(fel_device_t *dev, uint32_t address,
-                     const uint8_t *data, uint32_t length,
-                     void (*progress)(uint32_t done, uint32_t total, void *ctx),
-                     void *ctx) {
-    // 4-byte align length
-    uint32_t aligned_len = (length + 3) & ~3u;
+static int memory_range(fel_device_t *dev, uint32_t address, uint32_t length, uint32_t *aligned) {
+    if (!dev || !dev->board_verified || !length || length > FEL_MAX_TRANSFER_SIZE || (address & 3u))
+        return HAKCHI_USB_ERROR_INVALID_PARAM;
+    uint64_t padded = ((uint64_t)length + 3u) & ~UINT64_C(3);
+    uint64_t end = (uint64_t)address + padded;
+    if (padded > FEL_MAX_TRANSFER_SIZE || end > UINT64_C(0x100000000) ||
+        (end > DRAM_BASE && !dev->dram_initialized))
+        return HAKCHI_USB_ERROR_INVALID_PARAM;
+    *aligned = (uint32_t)padded;
+    return HAKCHI_USB_OK;
+}
 
-    // If data isn't aligned, we need a padded copy
+int fel_write_memory(fel_device_t *dev, uint32_t address, const uint8_t *data, uint32_t length,
+                     void (*progress)(uint32_t, uint32_t, void *), void *context) {
+    uint32_t aligned = 0;
+    if (!data) return HAKCHI_USB_ERROR_INVALID_PARAM;
+    int ret = memory_range(dev, address, length, &aligned);
+    if (ret < 0) return ret;
     uint8_t *padded = NULL;
-    if (aligned_len != length) {
-        padded = calloc(1, aligned_len);
-        memcpy(padded, data, length);
-        data = padded;
+    if (aligned != length) {
+        padded = calloc(1, aligned);
+        if (!padded) return HAKCHI_USB_ERROR_OTHER;
+        memcpy(padded, data, length); data = padded;
     }
-
-    uint32_t pos = 0;
-    while (pos < aligned_len) {
-        uint32_t chunk = aligned_len - pos;
+    uint32_t position = 0;
+    while (position < aligned) {
+        uint32_t chunk = aligned - position;
         if (chunk > FEL_MAX_BULK_SIZE) chunk = FEL_MAX_BULK_SIZE;
-
-        int ret = fel_send_message(dev, FEL_DOWNLOAD, address + pos, chunk);
-        if (ret < 0) { free(padded); return ret; }
-
-        ret = aw_write(dev, data + pos, chunk);
-        if (ret < 0) { free(padded); return ret; }
-
+        ret = fel_send_message(dev, FEL_DOWNLOAD, address + position, chunk);
+        if (ret < 0) break;
+        ret = aw_write(dev, data + position, chunk);
+        if (ret < 0) break;
         ret = fel_read_status(dev);
-        if (ret < 0) { free(padded); return ret; }
-
-        pos += chunk;
-        if (progress) progress(pos, aligned_len, ctx);
+        if (ret < 0) break;
+        position += chunk;
+        if (progress) progress(position < length ? position : length, length, context);
     }
-
     free(padded);
-    return HAKCHI_USB_OK;
+    return ret;
 }
 
-int fel_read_memory(fel_device_t *dev, uint32_t address,
-                    uint8_t *buffer, uint32_t length,
-                    void (*progress)(uint32_t done, uint32_t total, void *ctx),
-                    void *ctx) {
-    uint32_t aligned_len = (length + 3) & ~3u;
-    uint32_t pos = 0;
-
-    while (pos < aligned_len) {
-        uint32_t chunk = aligned_len - pos;
+int fel_read_memory(fel_device_t *dev, uint32_t address, uint8_t *buffer, uint32_t length,
+                    void (*progress)(uint32_t, uint32_t, void *), void *context) {
+    uint32_t aligned = 0;
+    if (!buffer) return HAKCHI_USB_ERROR_INVALID_PARAM;
+    int ret = memory_range(dev, address, length, &aligned);
+    if (ret < 0) return ret;
+    uint32_t position = 0;
+    while (position < aligned) {
+        uint32_t chunk = aligned - position;
         if (chunk > FEL_MAX_BULK_SIZE) chunk = FEL_MAX_BULK_SIZE;
-
-        int ret = fel_send_message(dev, FEL_UPLOAD, address + pos, chunk);
+        ret = fel_send_message(dev, FEL_UPLOAD, address + position, chunk);
         if (ret < 0) return ret;
-
-        // Read into buffer if within requested range, otherwise temp buffer
-        if (pos + chunk <= length) {
-            ret = aw_read(dev, buffer + pos, chunk);
+        if (position + chunk <= length) {
+            ret = aw_read(dev, buffer + position, chunk);
         } else {
-            uint8_t *tmp = malloc(chunk);
-            ret = aw_read(dev, tmp, chunk);
-            if (ret >= 0) {
-                uint32_t copy_len = length - pos;
-                if (copy_len > 0) memcpy(buffer + pos, tmp, copy_len);
-            }
-            free(tmp);
+            uint8_t *tail = malloc(chunk);
+            if (!tail) return fel_invalidate(dev, HAKCHI_USB_ERROR_OTHER);
+            ret = aw_read(dev, tail, chunk);
+            if (ret == HAKCHI_USB_OK) memcpy(buffer + position, tail, length - position);
+            free(tail);
         }
         if (ret < 0) return ret;
-
         ret = fel_read_status(dev);
         if (ret < 0) return ret;
-
-        pos += chunk;
-        if (progress) progress(pos < length ? pos : length, length, ctx);
+        position += chunk;
+        if (progress) progress(position < length ? position : length, length, context);
     }
-
     return HAKCHI_USB_OK;
 }
 
 int fel_exec(fel_device_t *dev, uint32_t address) {
-    int ret = fel_send_message(dev, FEL_RUN, address, 0);
+    uint32_t ignored;
+    int ret = memory_range(dev, address, 4, &ignored);
+    if (ret < 0) return ret;
+    ret = fel_send_message(dev, FEL_RUN, address, 0);
     if (ret < 0) return ret;
     return fel_read_status(dev);
 }
 
-int fel_init_dram(fel_device_t *dev, const uint8_t *fes1_data, uint32_t fes1_length) {
+int fel_init_dram(fel_device_t *dev, const uint8_t *fes1, uint32_t length) {
+    if (!dev || !dev->board_verified || !fes1 || length < 0x80 || length > FES1_MAX_SIZE)
+        return HAKCHI_USB_ERROR_INVALID_PARAM;
     if (dev->dram_initialized) return HAKCHI_USB_OK;
-    if (!fes1_data || fes1_length < 0x80) return HAKCHI_USB_ERROR_INVALID_PARAM;
-
-    // Check if fes1 is already loaded by reading tail end from SRAM
-    uint32_t test_size = 0x80;
-    uint32_t probe_addr = FES1_BASE_M + fes1_length - test_size;
-
-    uint8_t probe_buf[0x80];
-    int ret = fel_read_memory(dev, probe_addr, probe_buf, test_size, NULL, NULL);
-    if (ret == HAKCHI_USB_OK) {
-        if (memcmp(probe_buf, fes1_data + fes1_length - test_size, test_size) == 0) {
-            dev->dram_initialized = true;
-            return HAKCHI_USB_OK;
-        }
-    }
-
-    // Load fes1 to SRAM and execute
-    ret = fel_write_memory(dev, FES1_BASE_M, fes1_data, fes1_length, NULL, NULL);
+    int ret = fel_write_memory(dev, FES1_BASE_M, fes1, length, NULL, NULL);
     if (ret < 0) return ret;
-
+    uint8_t *readback = malloc(length);
+    if (!readback) return HAKCHI_USB_ERROR_OTHER;
+    ret = fel_read_memory(dev, FES1_BASE_M, readback, length, NULL, NULL);
+    if (ret == HAKCHI_USB_OK && memcmp(readback, fes1, length) != 0)
+        ret = fel_invalidate(dev, HAKCHI_USB_ERROR_IO);
+    free(readback);
+    if (ret < 0) return ret;
     ret = fel_exec(dev, FES1_BASE_M);
     if (ret < 0) return ret;
-
-    // Wait for DRAM initialization
-    usleep(2000000); // 2 seconds
-
+    if (dev->transport.wait_us) dev->transport.wait_us(dev->transport_context, 2000000);
+    else usleep(2000000);
     dev->dram_initialized = true;
     return HAKCHI_USB_OK;
 }

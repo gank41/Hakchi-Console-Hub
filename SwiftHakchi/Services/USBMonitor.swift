@@ -11,6 +11,7 @@ import IOKit.usb
 final class USBMonitor: ObservableObject {
     @Published var felDevicePresent: Bool = false
     @Published var rndisDevicePresent: Bool = false
+    @Published var attachments: [RecoveryProbeUSBDevice] = []
 
     var devicePresent: Bool { felDevicePresent || rndisDevicePresent }
 
@@ -122,11 +123,19 @@ final class USBMonitor: ObservableObject {
     // MARK: - State Updates
 
     private func updateFELState() {
-        felDevicePresent = USBMonitor.devicePresent(vid: Self.felVid, pid: Self.felPid)
+        updateAttachments()
     }
 
     private func updateRNDISState() {
-        rndisDevicePresent = USBMonitor.devicePresent(vid: Self.rndisVid, pid: Self.rndisPid)
+        updateAttachments()
+    }
+
+    private func updateAttachments() {
+        let devices = ((try? RecoveryProbeUSBRegistry.inventory()) ?? [])
+            .sorted { ($0.registryEntryID ?? 0) < ($1.registryEntryID ?? 0) }
+        felDevicePresent = devices.contains(where: \.isFEL)
+        rndisDevicePresent = devices.contains(where: \.isRNDIS)
+        attachments = devices
     }
 
     func stop() {

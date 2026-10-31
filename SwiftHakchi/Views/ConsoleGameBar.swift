@@ -73,9 +73,9 @@ struct ConsoleGameBar: View {
                     Label("Sync", systemImage: "arrow.triangle.2.circlepath")
                 }
                 .buttonStyle(ActionButtonStyle(role: .primary))
-                .disabled(!appState.deviceManager.canSync)
+                .disabled(!appState.deviceManager.canSync || appState.taskRunner.isRunning || appState.isPreparingSync)
                 .opacity(appState.deviceManager.canSync ? 1.0 : 0.5)
-                .help("Upload selected games to the console")
+                .help("Review selected games, back up the console, and synchronize")
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 10)
@@ -255,31 +255,10 @@ private struct ConsoleBarTile: View {
     private let cardSize: CGFloat = 130
 
     var body: some View {
-        Group {
-            // Cover art
-            if let coverImage = game.coverImage {
-                Image(nsImage: coverImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: cardSize)
-                    .cornerRadius(8)
-            } else {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(.quaternary)
-                    .frame(width: cardSize, height: cardSize)
-                    .overlay {
-                        Image(systemName: game.isStock ? "star.fill" : "gamecontroller.fill")
-                            .font(.title2)
-                            .foregroundStyle(.secondary)
-                    }
-            }
-        }
-        .shadow(color: .black.opacity(isActive ? 0.5 : 0.15), radius: isActive ? 8 : 2, y: isActive ? 4 : 1)
-        .scaleEffect(isActive ? 1.06 : 1.0)
-        .animation(.easeInOut(duration: 0.15), value: isActive)
-        .frame(width: cardSize)
-        .contentShape(Rectangle())
-        .opacity(isDisabled ? 0.35 : 1.0)
-        .saturation(isDisabled ? 0.3 : 1.0)
+        GameCardView(game: game, isActive: isActive, isOnBar: game.isSelected, cardSize: 100)
+            .id(game.artworkRevision)
+            .opacity(isDisabled ? 0.35 : 1)
+            .saturation(isDisabled ? 0.3 : 1)
     }
+
 }

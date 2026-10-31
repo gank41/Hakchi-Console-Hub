@@ -696,6 +696,9 @@ int tcp_recv(tcp_conn_t *c, uint8_t *buf, uint32_t len, int timeout_ms) {
     // First, drain any data already in the ring buffer
     uint32_t buffered = ringbuf_read(c, buf, len);
     if (buffered > 0) return (int)buffered;
+    // A peer FIN consumed by tcp_poll is terminal once buffered bytes drain.
+    // In particular, zero-timeout SSH callbacks must not relabel it as EAGAIN.
+    if (c->state == TCP_STATE_CLOSE_WAIT) return TCP_ERROR_CLOSED;
 
     // No buffered data — receive from network until data arrives or timeout
     uint64_t deadline = now_ms() + timeout_ms;

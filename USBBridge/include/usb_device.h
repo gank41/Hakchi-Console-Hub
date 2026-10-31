@@ -12,6 +12,15 @@ extern "C" {
 /// Opaque handle to a USB device
 typedef struct hakchi_usb_device hakchi_usb_device_t;
 
+/// One observed USB attachment. Registry IDs are not persistent hardware IDs.
+typedef struct {
+    uint64_t registry_entry_id;
+    uint32_t location_id;
+    uint16_t vendor_id, product_id, device_version;
+    uint8_t device_class;
+    bool require_empty_product;
+} hakchi_usb_identity_t;
+
 /// Error codes
 typedef enum {
     HAKCHI_USB_OK = 0,
@@ -25,9 +34,19 @@ typedef enum {
     HAKCHI_USB_ERROR_OTHER = -99,
 } hakchi_usb_error_t;
 
+/// Open only this exact observed attachment; never seize or fall back by VID/PID.
+hakchi_usb_device_t *hakchi_usb_open_bound(const hakchi_usb_identity_t *expected,
+                                          hakchi_usb_error_t *error);
+
+/// Exact attachment, passive interface access; never configures, seizes, resets or selects an alternate.
+hakchi_usb_device_t *hakchi_usb_open_passive_bound(const hakchi_usb_identity_t *expected, const char *expected_product, hakchi_usb_error_t *error);
+
 /// Open a USB device by vendor/product ID.
 /// Returns NULL on failure; sets *error if non-NULL.
 hakchi_usb_device_t *hakchi_usb_open(uint16_t vid, uint16_t pid, hakchi_usb_error_t *error);
+
+/// Open exactly one matching device without seize, configuration or alternate-setting changes.
+hakchi_usb_device_t *hakchi_usb_open_passive(uint16_t vid, uint16_t pid, hakchi_usb_error_t *error);
 
 /// Write data to a bulk OUT endpoint.
 /// Returns number of bytes written, or negative error code.
@@ -38,6 +57,9 @@ int hakchi_usb_bulk_write(hakchi_usb_device_t *dev, uint8_t endpoint,
 /// Returns number of bytes read, or negative error code.
 int hakchi_usb_bulk_read(hakchi_usb_device_t *dev, uint8_t endpoint,
                          uint8_t *data, int length, int timeout_ms);
+
+/// Read the selected bulk IN endpoint packet size without changing USB state.
+uint16_t hakchi_usb_get_packet_size_in(hakchi_usb_device_t *dev);
 
 /// Clear halt/stall on an endpoint.
 hakchi_usb_error_t hakchi_usb_clear_halt(hakchi_usb_device_t *dev, uint8_t endpoint);
@@ -64,6 +86,10 @@ int hakchi_usb_control_transfer(hakchi_usb_device_t *dev,
 /// interface 1 (data with bulk endpoints). Returns NULL on failure.
 hakchi_usb_device_t *hakchi_usb_open_rndis(uint16_t vid, uint16_t pid,
                                             hakchi_usb_error_t *error);
+
+/// RNDIS open on one exact observed attachment, with no seize/fallback.
+hakchi_usb_device_t *hakchi_usb_open_rndis_bound(const hakchi_usb_identity_t *expected,
+                                                hakchi_usb_error_t *error);
 
 /// Bulk write on a specific interface pipe (for RNDIS data interface).
 /// pipe_index is the IOKit pipe reference number.

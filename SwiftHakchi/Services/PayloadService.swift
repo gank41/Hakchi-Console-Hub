@@ -1,10 +1,12 @@
 import Foundation
 import SWCompression
 
+private final class PayloadResourceAnchor: NSObject {}
+
 /// Loads and caches binary payloads needed for FEL boot:
 /// fes1.bin (DRAM init SPL), uboot.bin (U-Boot), boot.img (kernel)
 /// These are extracted from hakchi.hmod (a tar.gz archive).
-final class PayloadService {
+actor PayloadService {
     static let shared = PayloadService()
 
     private var cachedFes1: Data?
@@ -14,6 +16,26 @@ final class PayloadService {
     private var cachedHakchiHmod: Data?
 
     private init() {}
+
+    /// Offline recovery validation ignores all caches and uses only pinned bundled bytes.
+    func recoveryEvidence() async throws -> RecoveryPayloadEvidence {
+        try RecoveryPayloadValidator.validate(
+            fes1: loadBundledResource("fes1", ext: "bin", expectedSize: 14048),
+            hmod: loadBundledResource("hakchi", ext: "hmod", expectedSize: 9340382),
+            baseHmods: loadBundledResource("basehmods", ext: "tar", expectedSize: 1740800))
+    }
+
+    /// Raw pinned recovery bytes only; never consult cache/latest or AppConfig.
+    func pinnedRecoveryInputs() throws -> RecoveryBootInputs {
+        let fes1 = try loadBundledResource("fes1", ext: "bin", expectedSize: 14048)
+        let hmod = try loadBundledResource("hakchi", ext: "hmod", expectedSize: 9340382)
+        let base = try loadBundledResource("basehmods", ext: "tar", expectedSize: 1740800)
+        _ = try RecoveryPayloadValidator.validate(fes1: fes1, hmod: hmod, baseHmods: base)
+        let entries = try TarContainer.open(container: GzipArchive.unarchive(archive: hmod))
+        return try RecoveryBootInputs(fes1: fes1,
+            uboot: RecoveryPayloadValidator.member("boot/uboot.bin", entries: entries),
+            bootImage: RecoveryPayloadValidator.member("boot/boot.img", entries: entries))
+    }
 
     /// fes1.bin — Allwinner DRAM init SPL, loaded from bundled resource
     func fes1() throws -> Data {
@@ -33,7 +55,7 @@ final class PayloadService {
         return data
     }
 
-    /// boot.img — Stock kernel image from hakchi.hmod.
+    /// boot.img — Custom recovery kernel image from hakchi.hmod; not an original stock kernel.
     /// FELService patches the cmdline to add "hakchi-shell" which starts the
     /// RNDIS gadget. Same boot.img as the upstream Windows client uses.
     func bootImg() throws -> Data {
@@ -102,13 +124,17 @@ final class PayloadService {
     /// SPM bundles resources via Bundle.module if a resource processing
     /// rule is in Package.swift, but we're using a flat copy, so we
     /// look relative to the executable.
-    private func loadBundledResource(_ name: String, ext: String) throws -> Data {
+    private func loadBundledResource(_ name: String, ext: String, expectedSize: Int? = nil) throws -> Data {
+        func read(_ url: URL) throws -> Data {
+            if let expectedSize { return try RecoveryMaterialReader.readFile(at: url, maximumBytes: expectedSize, exactBytes: expectedSize) }
+            return try Data(contentsOf: url)
+        }
         let filename = "\(name).\(ext)"
 
         // Try Bundle.main first
         if let url = Bundle.main.url(forResource: name, withExtension: ext) {
             print("[Payload] Found \(filename) in Bundle.main")
-            return try Data(contentsOf: url)
+            return try read(url)
         }
 
         // Try the SPM resource bundle inside Bundle.main (app bundle layout)
@@ -116,7 +142,17 @@ final class PayloadService {
            let nested = Bundle(url: resBundle),
            let url = nested.url(forResource: name, withExtension: ext) {
             print("[Payload] Found \(filename) in nested SPM bundle")
-            return try Data(contentsOf: url)
+            return try read(url)
+        }
+
+        // A test runner is not our executable. Resolve resources beside the module's
+        // actual image too, without invoking Bundle.module's fatal missing-bundle fallback.
+        let module = Bundle(for: PayloadResourceAnchor.self)
+        for root in [module.resourceURL, module.bundleURL.deletingLastPathComponent()] {
+            guard let root,
+                  let bundle = Bundle(url: root.appendingPathComponent("SwiftHakchi_SwiftHakchi.bundle")),
+                  let url = bundle.url(forResource: name, withExtension: ext) else { continue }
+            return try read(url)
         }
 
         // Try next to the executable (SPM debug builds via `swift run`)
@@ -125,7 +161,7 @@ final class PayloadService {
             .appendingPathComponent(filename)
         if FileManager.default.fileExists(atPath: spmBundle.path) {
             print("[Payload] Found \(filename) next to executable")
-            return try Data(contentsOf: spmBundle)
+            return try read(spmBundle)
         }
 
         // Try the source Resources directory (development builds)
@@ -136,7 +172,7 @@ final class PayloadService {
             .appendingPathComponent(filename)
         if FileManager.default.fileExists(atPath: sourceRes.path) {
             print("[Payload] Found \(filename) in source Resources")
-            return try Data(contentsOf: sourceRes)
+            return try read(sourceRes)
         }
 
         print("[Payload] ERROR: \(filename) not found in any search path")

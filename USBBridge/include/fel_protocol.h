@@ -21,6 +21,8 @@ extern "C" {
 #define FEL_READ_TIMEOUT    1000
 #define FEL_WRITE_TIMEOUT   1000
 #define FEL_MAX_BULK_SIZE   0x10000  // 64KB
+#define FEL_MAX_TRANSFER_SIZE 0x02000000u  // 32MB; literal is importable by Swift
+#define FES1_MAX_SIZE       (0x8000u - FES1_BASE_M)
 
 // Memory addresses
 #define FES1_BASE_M         0x00002000u
@@ -119,11 +121,25 @@ typedef struct {
 
 #pragma pack(pop)
 
+// ---------- Injectable byte transport ----------
+
+/// Borrowed callback context must outlive the handle. Each handle owns its callback copy.
+/// Callbacks return transferred byte count or a negative hakchi_usb_error_t.
+/// A NULL wait callback uses the production delay. No USB is opened by fel_open_transport.
+typedef struct {
+    int (*write)(void *context, const uint8_t *data, int length);
+    int (*read)(void *context, uint8_t *data, int length);
+    void (*wait_us)(void *context, uint32_t microseconds);
+} fel_transport_t;
+
 // ---------- FEL device handle ----------
 
 typedef struct {
     hakchi_usb_device_t *usb;
     bool dram_initialized;
+    bool board_verified;
+    fel_transport_t transport;
+    void *transport_context;
 } fel_device_t;
 
 // ---------- High-level FEL operations ----------
@@ -132,6 +148,12 @@ typedef struct {
 /// Resets device and clears endpoint halts.
 /// Returns NULL on failure.
 fel_device_t *fel_open(void);
+
+/// Exact observed genuine-FEL attachment; no VID/PID fallback.
+fel_device_t *fel_open_bound(const hakchi_usb_identity_t *expected);
+
+/// Create a handle around a borrowed transport without opening USB.
+fel_device_t *fel_open_transport(const fel_transport_t *transport, void *context);
 
 /// Close FEL device and free resources.
 void fel_close(fel_device_t *dev);

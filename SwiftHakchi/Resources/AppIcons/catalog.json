@@ -1,0 +1,154 @@
+[
+  {
+    "id": "famicom",
+    "title": "Famicom"
+  },
+  {
+    "id": "famicom-control-pad",
+    "title": "Famicom Control Pad"
+  },
+  {
+    "id": "game-boy",
+    "title": "Game Boy"
+  },
+  {
+    "id": "game-boy-advance",
+    "title": "Game Boy Advance"
+  },
+  {
+    "id": "game-boy-color",
+    "title": "Game Boy Color"
+  },
+  {
+    "id": "game-boy-control-pad",
+    "title": "Game Boy Control Pad"
+  },
+  {
+    "id": "gamecube",
+    "title": "GameCube"
+  },
+  {
+    "id": "gamecube-c-stick",
+    "title": "GameCube C-Stick"
+  },
+  {
+    "id": "n64",
+    "title": "N64"
+  },
+  {
+    "id": "n64-control-stick",
+    "title": "N64 Control Stick"
+  },
+  {
+    "id": "nes",
+    "title": "NES"
+  },
+  {
+    "id": "nes-control-pad",
+    "title": "NES Control Pad"
+  },
+  {
+    "id": "playstation",
+    "title": "PlayStation"
+  },
+  {
+    "id": "playstation-2",
+    "title": "Playstation 2"
+  },
+  {
+    "id": "playstation-2-directional-buttons",
+    "title": "Playstation 2 Directional Buttons"
+  },
+  {
+    "id": "playstation-3",
+    "title": "Playstation 3"
+  },
+  {
+    "id": "playstation-3-directional-buttons",
+    "title": "Playstation 3 Directional Buttons"
+  },
+  {
+    "id": "playstation-4",
+    "title": "PlayStation 4"
+  },
+  {
+    "id": "playstation-4-directional-buttons",
+    "title": "PlayStation 4 Directional Buttons"
+  },
+  {
+    "id": "playstation-5",
+    "title": "PlayStation 5"
+  },
+  {
+    "id": "playstation-5-directional-buttons",
+    "title": "PlayStation 5 Directional Buttons"
+  },
+  {
+    "id": "playstation-directional-buttons",
+    "title": "PlayStation Directional Buttons"
+  },
+  {
+    "id": "pow-block",
+    "title": "POW Block"
+  },
+  {
+    "id": "psone",
+    "title": "PSone"
+  },
+  {
+    "id": "psone-directional-buttons",
+    "title": "PSone Directional Buttons"
+  },
+  {
+    "id": "question-block",
+    "title": "Question Block"
+  },
+  {
+    "id": "radiant",
+    "title": "Radiant"
+  },
+  {
+    "id": "retro-question-block",
+    "title": "Retro Question Block"
+  },
+  {
+    "id": "rotating-block",
+    "title": "Rotating Block"
+  },
+  {
+    "id": "snes",
+    "title": "SNES"
+  },
+  {
+    "id": "super-famicom",
+    "title": "Super Famicom"
+  },
+  {
+    "id": "switch",
+    "title": "Switch"
+  },
+  {
+    "id": "switch-2",
+    "title": "Switch 2"
+  },
+  {
+    "id": "switch-control-stick",
+    "title": "Switch Control Stick"
+  },
+  {
+    "id": "virtual-boy",
+    "title": "Virtual Boy"
+  },
+  {
+    "id": "wii",
+    "title": "Wii"
+  },
+  {
+    "id": "wii-classic",
+    "title": "Wii Classic"
+  },
+  {
+    "id": "wii-nunchuck",
+    "title": "Wii Nunchuck"
+  }
+]

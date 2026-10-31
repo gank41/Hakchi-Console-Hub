@@ -1,0 +1,8 @@
+miniLZO 2.10
+Copyright (C) 1996-2017 Markus Franz Xaver Johannes Oberhumer
+GPL-2.0-or-later; complete license: miniLZO-COPYING.txt
+Source: https://www.oberhumer.com/opensource/lzo/download/minilzo-2.10.tar.gz
+Upstream source and provenance are retained in vendor/minilzo in this project.
+
+LZO1X-999 encoder, LZO 2.10, Copyright (C) 1996-2017 Markus Franz Xaver Johannes Oberhumer. GPL-2.0-or-later. Source: https://www.oberhumer.com/opensource/lzo/download/lzo-2.10.tar.gz
+Minimal unmodified encoder sources and per-file provenance are retained in vendor/minilzo/lzo999.
