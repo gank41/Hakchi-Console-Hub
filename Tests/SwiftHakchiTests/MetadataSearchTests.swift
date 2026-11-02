@@ -23,6 +23,24 @@ struct MetadataSearchTests {
 }
 
 extension MetadataSearchTests {
+    @Test func applyingMetadataKeepsCheatCopyClearlyNamed() {
+        let copy = Game(code: "CLV-P-ABCDE", desktopContent: "Code=CLV-P-ABCDE\nName=Sonic [Cheat Code]\n", consoleType: .megaDrive, source: .local)
+        let candidate = MetadataCandidate(title: "Sonic The Hedgehog", region: nil, releaseDate: "1991", players: 1, publisher: "SEGA", genre: nil, overview: nil, platform: "genesis")
+        let updated = candidate.applying(to: copy)
+        #expect(updated.name == "Sonic The Hedgehog [Cheat Code]")
+        #expect(updated.defaultName == copy.defaultName && updated.code == copy.code)
+        #expect(copy.name == "Sonic [Cheat Code]")
+        let original = Game(code: "CLV-P-FGHIJ", desktopContent: "Code=CLV-P-FGHIJ\nName=Sonic\n", consoleType: .megaDrive, source: .local)
+        #expect(candidate.applying(to: original).name == "Sonic The Hedgehog")
+    }
+    @Test func genesisSearchFindsMovedArticlesAndIgnoresKnownCopyAndRegionLabels() {
+        let batman = GameDatabase.shared.search(name: "The Adventures of Batman & Robin", consoleType: .megaDrive)
+        #expect(batman.contains { $0.title == "Adventures of Batman & Robin, The" })
+        let sonic = GameDatabase.shared.search(name: "Sonic The Hedgehog (USA) [Cheat Code]", consoleType: .megaDrive)
+        #expect(sonic.contains { $0.title == "Sonic The Hedgehog" })
+        #expect(sonic.allSatisfy { $0.platform == "genesis" })
+        #expect(GameDatabase.shared.search(name: "[Cheat Code]", consoleType: .megaDrive).isEmpty)
+    }
     @Test func genesisBundledResultsHaveTheirOwnMetadataAndNeverNintendoGames() throws {
         let results = GameDatabase.shared.search(name: "Sonic The Hedgehog", consoleType: .megaDrive)
         let sonic = try #require(results.first { $0.title == "Sonic The Hedgehog" && $0.releaseDate == "1991" && $0.publisher == "SEGA" })

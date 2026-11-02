@@ -1,7 +1,7 @@
 import Foundation
 
 enum LibraryOrder: String, Codable, CaseIterable, Identifiable {
-    case nameAscending, nameDescending, dateAdded, dateModified
+    case nameAscending, nameDescending, dateAdded, dateModified, cheatCodesFirst
     var id: Self { self }
     var label: String {
         switch self {
@@ -9,10 +9,12 @@ enum LibraryOrder: String, Codable, CaseIterable, Identifiable {
         case .nameDescending: return "Name Z–A"
         case .dateAdded: return "Date Added (newest)"
         case .dateModified: return "Date Modified (newest)"
+        case .cheatCodesFirst: return "Cheat Codes First"
         }
     }
     func ordered(_ games: [Game]) -> [Game] {
         games.sorted { a, b in
+            if self == .cheatCodesFirst, a.isCheatCodeCopy != b.isCheatCodeCopy { return a.isCheatCodeCopy }
             if self == .dateAdded || self == .dateModified {
                 let x = self == .dateAdded ? a.addedAt : a.modifiedAt
                 let y = self == .dateAdded ? b.addedAt : b.modifiedAt

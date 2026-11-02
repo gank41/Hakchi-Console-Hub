@@ -1,5 +1,17 @@
 import Foundation
 
+/// Normalizes search input only; it does not change game names or choose a region.
+enum GameTitleSearch {
+    static func title(_ value: String) -> String {
+        var text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        text = text.replacingOccurrences(of: #"(?i)\s*\[(?:cheat codes?|game genie)\]\s*$"#, with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"(?i)\s*\((?:usa|us|europe|japan|world|uk|australia|canada|france|germany|spain|italy)(?:\s*,\s*(?:usa|us|europe|japan|world|uk|australia|canada|france|germany|spain|italy))*\)\s*$"#, with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"(?i),\s*(?:the|a)\s*$"#, with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"(?i)^\s*(?:the|a)\s+"#, with: "", options: .regularExpression)
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 struct ArtworkHTTPResponse: Sendable {
     let data: Data
     let status: Int
@@ -91,7 +103,7 @@ actor ArtworkCatalogService {
     }
 
     func search(query: String, platform: ArtworkPlatform) async throws -> [ArtworkCandidate] {
-        let words = Self.normalized(query).split(separator: " ").map(String.init)
+        let words = Self.normalized(GameTitleSearch.title(query)).split(separator: " ").map(String.init)
         guard !words.isEmpty else { return [] }
         return try await catalog(platform: platform).filter { candidate in
             let title = Self.normalized(candidate.title)

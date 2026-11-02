@@ -27,9 +27,14 @@ Firmware installation, memboot, and some recovery and module operations are disa
 
 ## Requirements
 
-- macOS 14 or later and a compatible USB connection to the console.
-- Xcode with a recent Swift toolchain; Swift 6 / Xcode 16 or newer is recommended for the test suite.
-- Internet access to resolve Swift Package Manager dependencies when building for the first time.
+- Apple silicon Mac running macOS 14 or later, and a compatible USB connection to the console. The current downloadable preview is Apple silicon only.
+- To build from source: Xcode with a recent Swift toolchain; Swift 6 / Xcode 16 or newer is recommended for the test suite. Internet access is needed to resolve Swift Package Manager dependencies on the first build.
+
+## Download
+
+Download the DMG from the [0.2.1 preview release](https://github.com/gank41/Hakchi-Console-Hub/releases/tag/v0.2.1-preview), open it, and drag Hakchi Console Hub into Applications. The preview is experimental: read the console status above before connecting or changing a console.
+
+This preview is not signed with a Developer ID and has not been notarized by Apple. macOS may block it or display an unidentified-developer warning. See [Apple's guidance for opening apps safely](https://support.apple.com/102445) before deciding whether to open it. The preview does not contain game ROMs or personal cheat-code catalogs.
 
 ## Build from source
 
@@ -39,7 +44,7 @@ swift test
 ./scripts/build-app.sh release
 ```
 
-Open `Package.swift` in Xcode if you prefer. The packaging script creates an ad-hoc-signed local app under `Builds/` and prints its path. It does not create an installer, publish a release or connect to a console. The app is a development build and is not notarized.
+Open `Package.swift` in Xcode if you prefer. The packaging script creates an ad-hoc-signed local app under `Builds/` and prints its path. It does not publish a release or connect to a console. Locally built apps are not automatically notarized.
 
 For a fresh configuration, the default workspace is `~/Library/Application Support/Hakchi Console Hub/`. Games and backups are kept in its subfolders; choose another location in Settings if desired. Existing configurations retain their chosen paths. A build may download the open-source Swift dependencies listed in `Package.resolved`.
 

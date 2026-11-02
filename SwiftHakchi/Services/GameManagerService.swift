@@ -13,6 +13,7 @@ final class GameManagerService: ObservableObject {
     @Published var isLoading: Bool = false
     @Published private var includedCatalogs: [ConsoleType: [Game]] = [:]
     var knownIncludedGames: [Game] { games.filter(\.isStock) + includedCatalogs.values.flatMap { $0 } }
+    func includedCatalog(for console: ConsoleType) -> [Game] { includedCatalogs[console] ?? [] }
     /// Metadata cache for duplicate hints only; never a console write/selection authority.
     func rememberSNESOriginalGames(_ frame: SNESOriginalGamesFrame) throws {
         let originals = try frame.entries.map { entry -> Game in
@@ -553,7 +554,45 @@ final class GameManagerService: ObservableObject {
 
     // MARK: - Import ROMs
 
-    private typealias ROMImportCandidate = (url: URL, desktop: DesktopFile, match: IncludedGameDuplicate?)
+    private struct ROMImportCandidate: Sendable {
+        let url: URL, desktopData: Data, match: IncludedGameDuplicate?
+        let sourceDigest: String?
+        var desktop: DesktopFile { DesktopFile(data: desktopData) }
+    }
+    private struct ROMImportPlan: Sendable {
+        let candidates: [ROMImportCandidate], skippedLocal: Int
+    }
+
+    private nonisolated static func prepareImport(_ sourceURLs: [URL], consoleType: ConsoleType,
+                                                   stock: [Game], seen initial: Set<String>, verifySource: Bool = false) throws -> ROMImportPlan {
+        var seen = initial, skippedLocal = 0, candidates: [ROMImportCandidate] = []
+        for url in sourceURLs {
+            try Task.checkCancellation()
+            let sourceDigest = verifySource ? BackupManifest.digest(try Data(contentsOf: url, options: .mappedIfSafe)) : nil
+            let code = generateCode(for: consoleType, crc32: CRC32.romChecksum(file: url))
+            guard seen.insert(code).inserted else { skippedLocal += 1; continue }
+            let desktop = DesktopFile(); desktop.code = code
+            if let dbEntry = GameDatabase.shared.lookup(romURL: url, consoleType: consoleType), !dbEntry.name.isEmpty {
+                desktop.name = dbEntry.name; desktop.publisher = dbEntry.publisher ?? "UNKNOWN"
+                desktop.releaseDate = dbEntry.releaseDate ?? ""; desktop.players = dbEntry.players ?? 1
+            } else {
+                desktop.name = cleanTitle(url.deletingPathExtension().lastPathComponent)
+                desktop.releaseDate = ""; desktop.publisher = "UNKNOWN"; desktop.players = 1
+            }
+            desktop.displayPublisher = desktop.publisher; desktop.addedAt = Date(); desktop.modifiedAt = desktop.addedAt
+            desktop.defaultName = desktop.name
+            desktop.exec = defaultExec(for: consoleType, rom: url.lastPathComponent, code: code)
+            desktop.profilePath = "/var/saves"; desktop.iconPath = "/var/games"
+            desktop.iconFilename = "\(code).png"; desktop.snesExtraFields = consoleType.isSNES
+            let included = IncludedGameDuplicates.titleHint(title: desktop.name, console: consoleType, stock: stock)
+            let match = included.map { IncludedGameDuplicate(importCode: code, importedTitle: desktop.name, builtInTitle: $0) }
+            if let sourceDigest, BackupManifest.digest(try Data(contentsOf: url, options: .mappedIfSafe)) != sourceDigest {
+                throw SyncPlanError.invalidInput("\(url.lastPathComponent) changed while it was being checked. Add it again when it is no longer changing.")
+            }
+            candidates.append(.init(url: url, desktopData: desktop.toData(), match: match, sourceDigest: sourceDigest))
+        }
+        return .init(candidates: candidates, skippedLocal: skippedLocal)
+    }
 
     /// Review the complete source set while the current library and choices still exist.
     private func withReviewedROMImport<T>(urls: [URL], consoleType: ConsoleType, replacing: Bool,
@@ -568,43 +607,16 @@ final class GameManagerService: ObservableObject {
         let gamesDir = config.gamesDirectory
         let stock = knownIncludedGames.filter { $0.consoleType == consoleType }
         let existingCodes = Set(games.map(\.code))
-        var seen = replacing ? Set(games.filter { $0.source != .local }.map(\.code)) : existingCodes
-        var skippedLocal = 0
-        var candidates: [ROMImportCandidate] = []
-        for url in sourceURLs {
-            let code = generateCode(for: consoleType, crc32: CRC32.romChecksum(file: url))
-            guard seen.insert(code).inserted else { skippedLocal += 1; continue }
-            let desktop = DesktopFile()
-            desktop.code = code
-            if let dbEntry = GameDatabase.shared.lookup(romURL: url, consoleType: consoleType), !dbEntry.name.isEmpty {
-                desktop.name = dbEntry.name
-                desktop.publisher = dbEntry.publisher ?? "UNKNOWN"
-                desktop.releaseDate = dbEntry.releaseDate ?? ""
-                desktop.players = dbEntry.players ?? 1
-            } else {
-                desktop.name = cleanTitle(url.deletingPathExtension().lastPathComponent)
-                desktop.releaseDate = ""
-                desktop.publisher = "UNKNOWN"
-                desktop.players = 1
-            }
-            desktop.displayPublisher = desktop.publisher
-            desktop.addedAt = Date(); desktop.modifiedAt = desktop.addedAt
-            desktop.defaultName = desktop.name
-            desktop.exec = defaultExec(for: consoleType, rom: url.lastPathComponent, code: code)
-            desktop.profilePath = "/var/saves"; desktop.iconPath = "/var/games"
-            desktop.iconFilename = "\(code).png"; desktop.snesExtraFields = consoleType.isSNES
-            let included = IncludedGameDuplicates.match(title: desktop.name, console: consoleType, stock: stock)
-            candidates.append((url, desktop, included.map {
-                IncludedGameDuplicate(importCode: code, importedTitle: desktop.name, builtInTitle: $0.name)
-            }))
-        }
+        let seen = replacing ? Set(games.filter { $0.source != .local }.map(\.code)) : existingCodes
+        let plan = try Self.prepareImport(sourceURLs, consoleType: consoleType, stock: stock, seen: seen)
+        let candidates = plan.candidates
         let matches = candidates.compactMap(\.match)
         let choice = matches.isEmpty ? .keepCopies : reviewIncluded(matches)
         guard choice != .cancel else { throw CancellationError() }
         // A modal review can run the event loop. Never commit into a switched library.
         guard !isInspectingLegacy, gamesDir == config.gamesDirectory,
               Set(games.map(\.code)) == existingCodes else { throw LegacyInspectionError.busy }
-        return try perform(candidates, choice, skippedLocal, gamesDir)
+        return try perform(candidates, choice, plan.skippedLocal, gamesDir)
     }
 
     private func commitROMImport(_ candidates: [ROMImportCandidate], choice: IncludedGameImportChoice,
@@ -612,12 +624,12 @@ final class GameManagerService: ObservableObject {
         var added = 0, skippedIncluded = 0, keptIncluded = 0
         for candidate in candidates {
             if candidate.match != nil && choice == .skipMatches { skippedIncluded += 1; continue }
-            let code = candidate.desktop.code
+            let desktop = candidate.desktop, code = desktop.code
             let gameDir = gamesDir.appendingPathComponent(code)
             try FileManager.default.createDirectory(at: gameDir, withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: candidate.url, to: gameDir.appendingPathComponent(candidate.url.lastPathComponent))
-            try candidate.desktop.toData().write(to: gameDir.appendingPathComponent(code + ".desktop"))
-            var game = Game(desktopFile: candidate.desktop, consoleType: consoleType, basePath: gamesDir.path, source: .local)
+            try candidate.desktopData.write(to: gameDir.appendingPathComponent(code + ".desktop"))
+            var game = Game(desktopFile: desktop, consoleType: consoleType, basePath: gamesDir.path, source: .local)
             if candidate.match != nil { game.isSelected = false; keptIncluded += 1 }
             games.append(game); added += 1
         }
@@ -631,6 +643,91 @@ final class GameManagerService: ObservableObject {
         try withReviewedROMImport(urls: urls, consoleType: consoleType, replacing: false, reviewIncluded: reviewIncluded) {
             try commitROMImport($0, choice: $1, skippedLocal: $2, gamesDir: $3, consoleType: consoleType)
         }
+    }
+
+    /// Extract, inspect and copy on a worker. The duplicate choice and final
+    /// same-volume moves happen on the main actor after rechecking the library.
+    /// A failed or cancelled preparation never commits a game to the library.
+    func importROMsResponsive(urls: [URL], consoleType: ConsoleType,
+                              reviewIncluded: @MainActor ([IncludedGameDuplicate]) -> IncludedGameImportChoice,
+                              progress: @escaping @Sendable (String, Double?) async -> Void) async throws -> ROMImportSummary {
+        guard !isInspectingLegacy, !isLoading, consoleType == config.lastConsoleType else { throw LegacyInspectionError.busy }
+        let gamesDir = config.gamesDirectory, existingCodes = Set(games.map(\.code))
+        let stock = knownIncludedGames.filter { $0.consoleType == consoleType }
+        let temporaryDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("SwiftHakchiImport-" + UUID().uuidString, isDirectory: true)
+        isLoading = true
+        defer { isLoading = false; try? FileManager.default.removeItem(at: temporaryDirectory) }
+        await progress("Checking your game files…", nil)
+        let preparation = Task.detached(priority: .userInitiated) {
+            let sources = try ROMArchiveImporter.materialize(urls, for: consoleType, in: temporaryDirectory)
+            return try Self.prepareImport(sources, consoleType: consoleType, stock: stock, seen: existingCodes, verifySource: true)
+        }
+        let plan = try await withTaskCancellationHandler(operation: { try await preparation.value }, onCancel: { preparation.cancel() })
+        try Task.checkCancellation()
+        guard !isInspectingLegacy, gamesDir == config.gamesDirectory, consoleType == config.lastConsoleType,
+              Set(games.map(\.code)) == existingCodes else { throw LegacyInspectionError.busy }
+        let matches = plan.candidates.compactMap(\.match)
+        let choice = matches.isEmpty ? IncludedGameImportChoice.keepCopies : reviewIncluded(matches)
+        guard choice != .cancel else { throw CancellationError() }
+        try Task.checkCancellation()
+        guard !isInspectingLegacy, gamesDir == config.gamesDirectory, consoleType == config.lastConsoleType,
+              Set(games.map(\.code)) == existingCodes else { throw LegacyInspectionError.busy }
+        let chosen = plan.candidates.filter { $0.match == nil || choice == .keepCopies }
+        let skippedIncluded = plan.candidates.count - chosen.count
+        let keptIncluded = chosen.filter { $0.match != nil }.count
+        guard !chosen.isEmpty else {
+            return ROMImportSummary(added: 0, skippedLocal: plan.skippedLocal, skippedIncluded: skippedIncluded, keptIncluded: 0)
+        }
+        try FileManager.default.createDirectory(at: gamesDir, withIntermediateDirectories: true)
+        let parent = try RestoreDirectory(gamesDir)
+        let stagingURL = gamesDir.appendingPathComponent(".import-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: false)
+        let staging = try RestoreDirectory(stagingURL)
+        defer {
+            if (try? parent.check()) != nil && (try? staging.check()) != nil {
+                try? FileManager.default.removeItem(at: stagingURL)
+            }
+        }
+        await progress("Copying game files to your Mac…", 0)
+        let worker = Task.detached(priority: .userInitiated) {
+            for (index, candidate) in chosen.enumerated() {
+                try Task.checkCancellation()
+                let code = candidate.desktop.code
+                let directory = stagingURL.appendingPathComponent(code, isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+                let copied = directory.appendingPathComponent(candidate.url.lastPathComponent)
+                try FileManager.default.copyItem(at: candidate.url, to: copied)
+                guard let expected = candidate.sourceDigest,
+                      BackupManifest.digest(try Data(contentsOf: copied, options: .mappedIfSafe)) == expected else {
+                    throw SyncPlanError.invalidInput("\(candidate.url.lastPathComponent) changed while it was being added. Your original file is unchanged by this app; try again when it is no longer changing.")
+                }
+                try candidate.desktopData.write(to: directory.appendingPathComponent(code + ".desktop"))
+                await progress("Copying game files to your Mac…", Double(index + 1) / Double(chosen.count))
+            }
+        }
+        try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+        try Task.checkCancellation(); try parent.check(); try staging.check()
+        guard !isInspectingLegacy, gamesDir == config.gamesDirectory, consoleType == config.lastConsoleType,
+              Set(games.map(\.code)) == existingCodes else { throw LegacyInspectionError.busy }
+        var added: [Game] = []
+        do {
+            for candidate in chosen {
+                let desktop = candidate.desktop, code = desktop.code
+                try FileManager.default.moveItem(at: stagingURL.appendingPathComponent(code), to: gamesDir.appendingPathComponent(code))
+                var game = Game(desktopFile: desktop, consoleType: consoleType, basePath: gamesDir.path, source: .local)
+                if candidate.match != nil { game.isSelected = false }
+                added.append(game)
+            }
+        } catch {
+            games.append(contentsOf: added)
+            if !added.isEmpty {
+                throw SyncPlanError.invalidInput("\(added.count) games were added before the import stopped. Review your Mac library before trying again. " + error.localizedDescription)
+            }
+            throw error
+        }
+        games.append(contentsOf: added)
+        games.sort { $0.name.localizedCompare($1.name) == .orderedAscending }
+        return ROMImportSummary(added: added.count, skippedLocal: plan.skippedLocal, skippedIncluded: skippedIncluded, keptIncluded: keptIncluded)
     }
 
     /// Replace imports while retaining an untouched, recoverable Mac library.
@@ -859,7 +956,7 @@ final class GameManagerService: ObservableObject {
     // MARK: - Title Cleanup
 
     /// Clean a ROM filename into a presentable game title
-    private func cleanTitle(_ filename: String) -> String {
+    private nonisolated static func cleanTitle(_ filename: String) -> String {
         var title = filename
 
         // 1. Remove bracketed/parenthesized tags: [USA], [!], (Rev A), (U), etc.
@@ -902,7 +999,7 @@ final class GameManagerService: ObservableObject {
 
     /// Generate a deterministic CLV code from a CRC32, matching Hakchi2-CE's algorithm.
     /// Falls back to random if no CRC is available.
-    private func generateCode(for consoleType: ConsoleType, crc32: UInt32? = nil) -> String {
+    private nonisolated static func generateCode(for consoleType: ConsoleType, crc32: UInt32? = nil) -> String {
         let prefixChar: Character
         switch consoleType {
         case .nes, .famicom: prefixChar = "H"
@@ -928,7 +1025,7 @@ final class GameManagerService: ObservableObject {
         return "CLV-\(prefixChar)-\(suffix)"
     }
 
-    private func defaultExec(for consoleType: ConsoleType, rom: String, code: String) -> String {
+    private nonisolated static func defaultExec(for consoleType: ConsoleType, rom: String, code: String) -> String {
         let path = LaunchCommand.shellQuote("/var/games/\(code)/\(rom)")
         switch consoleType {
         case .nes, .famicom:
@@ -936,7 +1033,7 @@ final class GameManagerService: ObservableObject {
         case .snesUsa, .snesEur, .superFamicom, .superFamicomShonenJump:
             return "/bin/clover-canoe-shvc-wr -rom \(path) --volume 75 --rollback-snapshot-period 720"
         case .megaDrive:
-            return "/bin/retroarch-clover -L /bin/genesis_plus_gx_libretro.so \(path)"
+            return "/bin/m2engage \(path)"
         default:
             return "/bin/\(rom)"
         }

@@ -94,7 +94,9 @@ struct ScraperView: View {
             guard let platform = ScraperService.platformId(for: game.consoleType) else {
                 errorMessage = "Choose a supported console before searching metadata."; return
             }
-            request = SearchRequest(query: query, platform: platform, console: game.consoleType, gameCode: game.code)
+            let searchText = GameTitleSearch.title(query)
+            guard !searchText.isEmpty else { errorMessage = "Enter a game title to search."; return }
+            request = SearchRequest(query: searchText, platform: platform, console: game.consoleType, gameCode: game.code)
         } else {
             results = GameDatabase.shared.search(name: query, consoleType: game.consoleType)
             if results.isEmpty { errorMessage = "No bundled matches. Try a shorter title or edit the details manually." }
@@ -104,13 +106,7 @@ struct ScraperView: View {
         guard let selected, let target, game.code == target.code else { return }
         do { try appState.gameManager.validateArtworkTarget(target) }
         catch { errorMessage = error.localizedDescription; return }
-        var updated = game
-        updated.name = selected.title
-        if let date = selected.releaseDate { updated.releaseDate = date }
-        if let players = selected.players { updated.players = players }
-        if let publisher = selected.publisher { updated.publisher = publisher }
-        if let genre = selected.genre { updated.genre = genre }
-        if let overview = selected.overview { updated.description = overview }
+        let updated = selected.applying(to: game)
         guard appState.gameManager.saveGame(updated) else { errorMessage = "Could not save metadata. Your previous file is unchanged."; return }
         dismiss()
     }

@@ -13,7 +13,9 @@ struct StatusBarView: View {
                     .frame(width: 8, height: 8)
                 Text(statusText)
                     .font(.caption)
+                    .foregroundStyle(statusColor)
             }
+            .help(appState.deviceManager.lastConnectionError ?? statusText)
 
             Divider()
                 .frame(height: 12)
@@ -55,20 +57,22 @@ struct StatusBarView: View {
                     Text(stage.title).font(.caption).foregroundStyle(.secondary)
                 }
                 Divider().frame(height: 12)
-            } else if let message = appState.statusMessage {
+            } else if appState.taskRunner.isRunning || appState.gameManager.isLoading || appState.isPreparingSync {
                 HStack(spacing: 4) {
-                    if appState.gameManager.isLoading || appState.isPreparingSync || appState.taskRunner.isRunning {
-                        ProgressView().controlSize(.mini)
-                    } else {
-                        Image(systemName: "info.circle").font(.caption)
-                    }
-                    Text(message)
+                    ProgressView().controlSize(.mini)
+                    Text(appState.taskRunner.isRunning
+                         ? (appState.taskRunner.cancelRequested ? "Stopping…" : appState.taskRunner.currentTask)
+                         : (appState.statusMessage ?? "Getting things ready…"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-
-                Divider()
-                    .frame(height: 12)
+                Divider().frame(height: 12)
+            } else if let message = appState.statusMessage {
+                HStack(spacing: 4) {
+                    Image(systemName: "info.circle").font(.caption)
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                }
+                Divider().frame(height: 12)
             }
 
             if let report = appState.deviceManager.legacyReport {
@@ -111,7 +115,7 @@ struct StatusBarView: View {
                         .frame(height: 12)
                 }
 
-                Text("\(selectedCustom)/\(customCount) custom games selected")
+                Text("\(selectedCustom)/\(customCount) added games selected")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -121,23 +125,19 @@ struct StatusBarView: View {
         .background(.bar)
     }
 
+    private var connectionStatus: ConsoleConnectionStatus {
+        let device = appState.deviceManager
+        return .resolve(connected: device.isConnected, legacy: device.legacyReport != nil,
+                        console: device.consoleType, stage: device.connectionStage,
+                        recoveryUSB: device.felDevicePresent, hasError: device.lastConnectionError != nil)
+    }
     private var statusColor: Color {
-        if appState.deviceManager.isConnected {
-            return .green
-        } else if appState.deviceManager.felDevicePresent {
-            return .orange
+        switch connectionStatus {
+        case .connected, .connectedLegacy: return .green
+        case .connecting, .recoveryOrLegacyUSB: return .orange
+        case .failed: return .red
+        case .disconnected: return .secondary
         }
-        return .red
     }
-
-    private var statusText: String {
-        if appState.deviceManager.legacyReport != nil { return "Connected — legacy Clovershell" }
-        if appState.deviceManager.isConnected {
-            let name = appState.deviceManager.consoleType.displayName
-            return "Connected — \(name)"
-        } else if appState.deviceManager.felDevicePresent {
-            return "Legacy USB / FEL detected"
-        }
-        return "Disconnected"
-    }
+    private var statusText: String { connectionStatus.title }
 }

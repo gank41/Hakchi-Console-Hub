@@ -15,6 +15,26 @@ import SwiftHakchiCore
     func originals() throws -> SNESOriginalGamesFrame {
         try .init(originalGamesFrameFixture(), binding: originalGamesBinding(), challenge: originalGamesChallenge)
     }
+    @Test func libraryAttentionGroupsOnlyLocalSNESGamesThatNeedReview() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ready = try fixture(root, code: "CLV-U-AAAAA")
+        let invalid = try fixture(root, code: "CLV-U-BBBBB", rom: Data([0, 1]))
+        var palROM = oneGameSyntheticROM(); palROM[0x7fd9] = 2
+        palROM[0x7fdc] = 255; palROM[0x7fdd] = 255; palROM[0x7fde] = 0; palROM[0x7fdf] = 0
+        let checksum = palROM.reduce(0) { $0 + Int($1) } & 65535
+        palROM[0x7fdc] = UInt8((checksum ^ 65535) & 255); palROM[0x7fdd] = UInt8((checksum ^ 65535) >> 8)
+        palROM[0x7fde] = UInt8(checksum & 255); palROM[0x7fdf] = UInt8(checksum >> 8)
+        let pal = try fixture(root, code: "CLV-U-CCCCC", rom: palROM)
+        var nes = invalid; nes.consoleType = .nes
+        let stock = Game(code: "CLV-P-DDDDD", desktopContent: "Name=Built in\n", consoleType: .snesUsa, source: .stock)
+        let attention = SNESLibraryCompatibility.libraryAttention(games: [ready, invalid, pal, nes, stock])
+        #expect(attention[ready.id] == nil)
+        #expect(attention[invalid.id] == .fileCheck)
+        #expect(attention[pal.id] == .appSupportNeeded)
+        #expect(attention.count == 2)
+        #expect(ready.isSelected && invalid.isSelected && pal.isSelected)
+    }
     @Test(arguments: ["PAL", "checksum", "adapter"])
     func reviewSeparatesMissingAppSupportFromFileChecks(_ kind: String) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

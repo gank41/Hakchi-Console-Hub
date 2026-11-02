@@ -324,12 +324,12 @@ final class AppState: ObservableObject {
         guard console != .unknown, !taskRunner.isRunning, !isPreparingSync, !gameManager.isLoading else { return }
         deviceManager.manualDisconnect()
         gameManager.clearConsoleGames()
-        if AppConfig.shared.lastConsoleType != console {
-            AppConfig.shared.lastDeviceId = ""
-            AppConfig.shared.installedGameCodes = []
+        if connectionConfig.lastConsoleType != console {
+            connectionConfig.lastDeviceId = ""
+            connectionConfig.installedGameCodes = []
         }
-        AppConfig.shared.lastConsoleType = console
-        AppConfig.shared.save()
+        connectionConfig.lastConsoleType = console
+        saveConnectionConfiguration()
         selectedGame = nil; searchText = ""
         gameManager.loadGames()
         statusMessage = console.displayName + " library selected. Choose Connect when its console is attached."
@@ -997,12 +997,7 @@ final class AppState: ObservableObject {
         ROMImportPanel.present(panel) { [weak self] response in
             guard let self else { return }
             guard response == .OK, let folder = panel.url else { return }
-            do {
-                let urls = try ROMImportPolicy.collectFolder(folder, for: console)
-                let result = try gameManager.importROMs(urls: urls, consoleType: console, reviewIncluded: reviewIncludedImports)
-                statusMessage = result.message
-            } catch is CancellationError { statusMessage = "Import canceled. Your library is unchanged." }
-            catch { reportOperationError(error.localizedDescription) }
+            startGameFileImport(console: console, folder: folder)
         }
     }
 
@@ -1011,6 +1006,7 @@ final class AppState: ObservableObject {
             reportOperationError("Disconnect legacy inspection to edit the local library or change its workspace.")
             return
         }
+        guard !taskRunner.isRunning, !isPreparingSync, !gameManager.isLoading else { return }
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
@@ -1027,11 +1023,25 @@ final class AppState: ObservableObject {
         ROMImportPanel.present(panel) { [weak self] response in
             guard let self else { return }
             guard response == .OK else { return }
-            do {
-                let result = try gameManager.importROMs(urls: panel.urls, consoleType: console, reviewIncluded: reviewIncludedImports)
-                statusMessage = result.message
-            } catch is CancellationError { statusMessage = "Import canceled. Your library is unchanged." }
-            catch { statusMessage = error.localizedDescription }
+            startGameFileImport(console: console, urls: panel.urls)
+        }
+    }
+
+    func startGameFileImport(console: ConsoleType, urls: [URL] = [], folder: URL? = nil) {
+        guard !taskRunner.isRunning, !isPreparingSync, !gameManager.isLoading, !gameManager.isInspectingLegacy else { return }
+        showTaskProgress = true
+        taskRunner.run(name: "Adding Game Files", cancellable: false) { [weak self] reporter in
+            guard let self else { throw CancellationError() }
+            let selected: [URL]
+            if let folder {
+                await reporter.report(status: "Finding game files…")
+                selected = try await Task.detached(priority: .userInitiated) { try ROMImportPolicy.collectFolder(folder, for: console) }.value
+            } else { selected = urls }
+            let result = try await self.gameManager.importROMsResponsive(urls: selected, consoleType: console,
+                reviewIncluded: { [weak self] matches in self?.reviewIncludedImports(matches) ?? .cancel },
+                progress: { status, fraction in await reporter.report(status: status, fraction: fraction) })
+            await MainActor.run { self.statusMessage = result.message }
+            await reporter.report(status: result.message, fraction: 1)
         }
     }
 

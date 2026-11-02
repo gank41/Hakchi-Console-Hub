@@ -3,6 +3,8 @@ import os
 
 private let logger = Logger(subsystem:"com.swifthakchi.app",category:"TaskRunner")
 
+enum TaskDisplayState { case idle, working, stopping, cancelled, failed, completed }
+
 @MainActor
 final class TaskRunner: ObservableObject {
     @Published private(set) var isRunning = false
@@ -19,6 +21,13 @@ final class TaskRunner: ObservableObject {
     @Published private(set) var activity = OperationActivity()
     private var currentTaskHandle: Task<Void,Never>?
     private var operationID: UUID?
+
+    var displayState: TaskDisplayState {
+        if isRunning { return cancelRequested ? .stopping : .working }
+        if wasCancelled { return .cancelled }
+        if error != nil { return .failed }
+        return endedAt == nil ? .idle : .completed
+    }
 
     func run(name: String, cancellable: Bool = true,
              operation: @escaping @Sendable (TaskProgressReporter) async throws -> Void) {

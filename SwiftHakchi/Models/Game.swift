@@ -8,6 +8,14 @@ enum GameSource: Hashable, Sendable {
     case local          // Imported locally, not yet on console
 }
 
+/// Counts known optional-emulator launchers without modifying saved commands.
+enum GenesisLauncherReadiness {
+    static func optionalEmulatorCount(_ games: [Game]) -> Int {
+        games.filter { $0.consoleType == .megaDrive && $0.source == .local &&
+            $0.commandLine.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/bin/retroarch-clover ") }.count
+    }
+}
+
 /// Represents a game loaded from a .desktop file
 struct Game: Identifiable, Hashable, Sendable {
     let id: String  // CLV-P-XXXXX code
@@ -35,6 +43,12 @@ struct Game: Identifiable, Hashable, Sendable {
     var source: GameSource
 
     var isStock: Bool { source == .stock }
+    /// Copies created by Cheat Codes keep this marker in their default name even if renamed.
+    var isCheatCodeCopy: Bool {
+        [name, defaultName].contains { title in
+            [" [Cheat Code]", " [Cheat Codes]", " [Game Genie]"].contains { title.hasSuffix($0) }
+        }
+    }
 
     // Derived
     var code: String { id }

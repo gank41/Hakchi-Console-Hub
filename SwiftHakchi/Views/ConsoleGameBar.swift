@@ -2,8 +2,8 @@ import SwiftUI
 
 /// Which category the console bar is showing
 enum BarMode: String, CaseIterable {
-    case customGames = "Custom Games"
-    case defaultGames = "Default Games"
+    case customGames = "Added Games"
+    case defaultGames = "Included Games"
 }
 
 /// Bottom bar showing games selected for install — horizontal scrolling timeline
@@ -180,7 +180,7 @@ struct ConsoleGameBar: View {
                 .foregroundStyle(.tertiary)
             Text(barMode == .customGames
                  ? "Drag games here from the explorer above"
-                 : "No default games loaded")
+                 : "No included games loaded")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)

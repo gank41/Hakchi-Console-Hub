@@ -4,6 +4,18 @@ import SwiftHakchiCore
 @testable import SwiftHakchi
 
 @MainActor struct AutomaticLibrarySwitchTests {
+    @Test(.timeLimit(.minutes(1))) func recognizedConnectionUpdatesSelectedLibraryWithoutManualRefresh() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let config = AppConfig(); config.workspacePath = root.path; config.lastConsoleType = .snesUsa
+        let manager = DeviceManager(connectRuntime: { _ in ConnectedConsoleInfo(consoleType: .nes) })
+        let app = AppState(startDeviceMonitoring: false, deviceManager: manager,
+            gameManager: GameManagerService(config: config), config: config, saveConfiguration: {})
+        await manager.inspectAttachments([ConsoleAttachmentTests.legacy()])
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while config.lastConsoleType != .nes && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(manager.isConnected && config.lastConsoleType == .nes)
+        _ = app
+    }
     @Test func inventorySuppliesAuthoritativeIdentityWhenTheOptionalUIDFileIsAbsent() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
