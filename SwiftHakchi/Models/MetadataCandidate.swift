@@ -16,4 +16,15 @@ struct MetadataCandidate: Identifiable, Hashable, Sendable {
         let bytes = try! JSONEncoder().encode(fields)
         return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
+
+    func applying(to game: Game) -> Game {
+        var updated = game
+        updated.name = game.isCheatCodeCopy && !title.hasSuffix(" [Cheat Code]") ? title + " [Cheat Code]" : title
+        if let releaseDate { updated.releaseDate = releaseDate }
+        if let players { updated.players = players }
+        if let publisher { updated.publisher = publisher }
+        if let genre { updated.genre = genre }
+        if let overview { updated.description = overview }
+        return updated
+    }
 }

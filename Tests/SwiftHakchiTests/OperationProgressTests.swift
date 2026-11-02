@@ -14,6 +14,18 @@ private actor ReporterBox {
 }
 @MainActor
 struct OperationProgressTests {
+    @Test(.timeLimit(.minutes(1))) func statusShowsWorkingStoppingAndCompletedOnlyAfterTheTaskEnds() async {
+        let runner = TaskRunner(), gate = ProgressGate()
+        #expect(runner.displayState == .idle)
+        runner.run(name: "Working") { _ in await gate.pause() }
+        while !(await gate.entered) { await Task.yield() }
+        #expect(runner.displayState == .working)
+        runner.cancel()
+        #expect(runner.displayState == .stopping)
+        await gate.release()
+        while runner.isRunning { await Task.yield() }
+        #expect(runner.displayState == .completed)
+    }
     @Test(.timeLimit(.minutes(1))) func cancellationWaitsForActualExit() async {
         let runner = TaskRunner(), gate = ProgressGate()
         runner.run(name:"Uploading") { _ in await gate.pause(); try Task.checkCancellation() }
@@ -80,6 +92,6 @@ struct OperationProgressTests {
         let runner = TaskRunner()
         runner.run(name:"Reading") { _ in throw RecoveryProbeError.refused("Unplugged") }
         while runner.isRunning { await Task.yield() }
-        #expect(runner.error != nil && runner.activity.details.contains("Unplugged"))
+        #expect(runner.error != nil && runner.activity.details.contains("Unplugged") && runner.displayState == .failed)
     }
 }

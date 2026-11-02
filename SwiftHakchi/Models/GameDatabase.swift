@@ -216,10 +216,10 @@ final class GameDatabase {
             value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
                 .unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(String.init).joined()
         }
-        let query = key(name)
+        let query = key(GameTitleSearch.title(name))
         guard !query.isEmpty, let family = ArtworkPlatform(console: consoleType) else { return [] }
         let platform = family.rawValue
-        return metadataCandidates.filter { $0.platform == platform && key($0.title).contains(query) }.sorted {
+        return metadataCandidates.filter { $0.platform == platform && key(GameTitleSearch.title($0.title)).contains(query) }.sorted {
             let left = [$0.title, $0.region ?? "", $0.releaseDate ?? "", $0.id]
             let right = [$1.title, $1.region ?? "", $1.releaseDate ?? "", $1.id]
             return left.lexicographicallyPrecedes(right)

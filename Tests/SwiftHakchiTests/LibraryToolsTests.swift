@@ -20,6 +20,15 @@ struct LibraryToolsTests {
         b.modifiedAt = a.modifiedAt
         #expect(LibraryOrder.dateModified.ordered([b,a]).map(\.code) == [a.code,b.code])
     }
+    @Test func cheatCopiesCanBeSortedFirstEvenAfterRenaming() throws {
+        let plain = game("CLV-H-AAAAA", "A game")
+        var copy = game("CLV-H-BBBBB", "Z game [Cheat Code]")
+        copy.name = "Renamed copy"
+        let other = game("CLV-H-CCCCC", "Another game")
+        #expect(copy.isCheatCodeCopy && !plain.isCheatCodeCopy)
+        #expect(LibraryOrder.cheatCodesFirst.ordered([plain, other, copy]).map(\.code) == [copy.code, plain.code, other.code])
+        #expect(try JSONDecoder().decode(LibraryOrder.self, from: JSONEncoder().encode(LibraryOrder.cheatCodesFirst)) == .cheatCodesFirst)
+    }
     @Test func timestampsPersistWithoutLeakingIntoConsoleMetadata() throws {
         let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
         let config = AppConfig.shared; let old = config.workspacePath

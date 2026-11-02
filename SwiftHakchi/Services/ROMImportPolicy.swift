@@ -11,6 +11,14 @@ enum ROMImportPolicy {
         return []
     }
     static let guidance = "Add game files or ZIP/7z archives. Only extracted games are copied into the library; your original files stay on your Mac. NES: .nes/.fds. SNES: .sfc/.smc/.sfrom. Genesis: .md/.bin/.gen. Importing does not change a console. Sync Library checks compatibility for a supported connected console; Genesis console sync is not available yet."
+    static func libraryGuidance(for console: ConsoleType) -> String {
+        if console == .megaDrive {
+            return "Genesis: .md/.bin/.gen · ZIP/7z accepted · Console sync is not available yet."
+        }
+        if console.isSNES { return "SNES: .sfc/.smc/.sfrom · ZIP/7z archives accepted." }
+        if console.isNES { return "NES: .nes/.fds · ZIP/7z archives accepted." }
+        return "Choose a console to see supported game files."
+    }
     static func pickerMessage(for console:ConsoleType)->String {
         let types=extensions(for:console).map{"."+$0}.joined(separator:", ")
         return "Choose \(types) files or ZIP/7z archives.\nGames are copied to this Mac; your original files stay unchanged."

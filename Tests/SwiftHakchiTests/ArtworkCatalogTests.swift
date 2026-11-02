@@ -66,6 +66,14 @@ private actor ArtworkCounter {
 }
 
 extension ArtworkCatalogTests {
+    @Test func genesisCoverSearchIgnoresCopyAndRegionLabelsWithoutCrossingPlatforms() async throws {
+        let service = ArtworkCatalogService(fetch: { url in
+            .init(data: Data("<a href=\"Sonic%20The%20Hedgehog%20(USA,%20Europe).png\">Sonic</a>".utf8), status: 200, url: url)
+        })
+        let found = try await service.search(query: "Sonic The Hedgehog (USA) [Cheat Code]", platform: .genesis)
+        #expect(found.contains { $0.filename == "Sonic The Hedgehog (USA, Europe).png" && $0.platform == .genesis })
+        #expect(try await service.search(query: "[Cheat Code]", platform: .genesis).isEmpty)
+    }
     static var image: Data {
         // A real small image, independent of commercial box art.
         let colorSpace = CGColorSpaceCreateDeviceRGB()

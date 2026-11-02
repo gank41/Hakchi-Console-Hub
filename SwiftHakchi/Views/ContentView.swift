@@ -366,6 +366,8 @@ struct ActionBarView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var config = AppConfig.shared
     @State private var isReconnecting = false
+    @State private var reconnectStopRequested = false
+    @State private var reconnectTask: Task<Void, Never>?
     @State private var showReconnectFailed = false
 
     var body: some View {
@@ -403,16 +405,26 @@ struct ActionBarView: View {
 
             // Connect / Disconnect
             Button {
-                if appState.deviceManager.isConnected {
+                if isReconnecting {
+                    reconnectStopRequested = true
+                    reconnectTask?.cancel()
+                    appState.deviceManager.manualDisconnect()
+                } else if appState.deviceManager.isConnected {
                     appState.deviceManager.manualDisconnect()
                 } else {
                     attemptReconnect()
                 }
             } label: {
-                if isReconnecting || appState.deviceManager.isConnecting {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(width: 16, height: 16)
+                if isReconnecting {
+                    HStack(spacing: 5) {
+                        ProgressView().controlSize(.small).frame(width: 16, height: 16)
+                        Text(reconnectStopRequested ? "Stopping…" : "Stop Connecting")
+                    }
+                } else if appState.deviceManager.isConnecting {
+                    HStack(spacing: 5) {
+                        ProgressView().controlSize(.small).frame(width: 16, height: 16)
+                        Text("Connecting…")
+                    }
                 } else if appState.deviceManager.isConnected {
                     Label("Disconnect", systemImage: "cable.connector.slash")
                 } else {
@@ -420,10 +432,8 @@ struct ActionBarView: View {
                 }
             }
             .buttonStyle(ActionButtonStyle(role: appState.deviceManager.isConnected ? .connected : .normal, compact: true))
-            .disabled(isReconnecting || appState.deviceManager.isConnecting || appState.taskRunner.isRunning || appState.isPreparingSync)
-            .help(appState.deviceManager.isConnected
-                  ? "Disconnect from console"
-                  : "Connect to console")
+            .disabled(reconnectStopRequested || (!isReconnecting && appState.deviceManager.isConnecting) || appState.taskRunner.isRunning || appState.isPreparingSync)
+            .help(isReconnecting ? "Stop the connection attempt" : appState.deviceManager.isConnected ? "Disconnect from console" : "Connect to console")
             .alert("Connection Failed", isPresented: $showReconnectFailed) {
                 Button("OK") {}
             } message: {
@@ -435,18 +445,6 @@ struct ActionBarView: View {
                     Text("Could not connect to the console.\n\n\u{2022} If a game or demo is playing, return to the game-selection menu.\n\u{2022} Check the USB cable and reconnect it if needed.\n\u{2022} If another app or virtual machine is using the console's USB connection, disconnect it there first.\n\u{2022} If the console is unresponsive, switch it off, wait a few seconds, then switch it on.\n\nChoose Connect to try again.")
                 }
             }
-
-            Button {
-                appState.requestFlash(.memboot)
-            } label: {
-                Label("Memboot", systemImage: "bolt")
-            }
-            .buttonStyle(ActionButtonStyle(compact: true))
-            .disabled(true)
-            .help("Temporarily boots a system from memory; currently unavailable. Select the info button for details.")
-
-            FirmwareActionInfo(title: "Memboot", explanation:
-                "Starts a temporary system sent from the Mac while the console is in FEL mode. It can support inspection or recovery without installing that system in internal storage. The temporary system disappears when power is removed. This guided action is unavailable while its hardware workflow is being validated.")
 
             Button {
                 Task { await appState.rebootConsole() }
@@ -504,11 +502,12 @@ struct ActionBarView: View {
 
     private func attemptReconnect() {
         guard !isReconnecting else { return }
-        isReconnecting = true
-        Task {
+        isReconnecting = true; reconnectStopRequested = false
+        reconnectTask = Task {
             let success = await appState.deviceManager.reconnect()
-            isReconnecting = false
-            if !success {
+            let cancelled = Task.isCancelled
+            isReconnecting = false; reconnectStopRequested = false; reconnectTask = nil
+            if !success && !cancelled {
                 showReconnectFailed = true
             }
         }

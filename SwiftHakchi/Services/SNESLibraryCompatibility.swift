@@ -84,6 +84,9 @@ struct SNESLibraryCompatibility: Sendable {
             case .notStandalone:
                 return "Super Game Boy is software for a Game Boy cartridge adapter. It cannot be played as a standalone SNES game."
             case .fileCheck:
+                if preparationError == .checksumNeedsReview {
+                    return "The game's internal checksum doesn't match this file. The file may be modified or incomplete; check its source or try another verified copy. Your original file is unchanged."
+                }
                 if preparationError != nil { return "The app could not verify this ROM file. Keep the original on your Mac; choose another copy you own, or leave this game out of this sync." }
                 return issue
             case .ready: return nil
@@ -93,6 +96,34 @@ struct SNESLibraryCompatibility: Sendable {
     }
     let rows: [Row], stockCodes: Set<String>
     static func failure(_ message: String) -> SyncPlanError { .invalidInput(message) }
+    /// Local library classification uses the same ROM checks as sync review.
+    /// It does not change selection or establish that a game will play.
+    static func libraryAttention(games: [Game]) -> [String: Readiness] {
+        var result: [String: Readiness] = [:]
+        for game in games where game.source == .local && game.consoleType == .snesUsa {
+            if Task.isCancelled { break }
+            let inspection = inspect(game)
+            let row = Row(game: game, source: inspection.source, prepared: inspection.prepared,
+                          issue: inspection.issue, matches: [], evidence: .distinct,
+                          preparationError: inspection.preparationError)
+            if row.readiness != .ready { result[game.id] = row.readiness }
+        }
+        return result
+    }
+    private static func inspect(_ game: Game) -> (source: SNESLibraryROMSource?, prepared: SNESCanoeImage.Result?, issue: String?, preparationError: SNESCanoeImage.PreparationError?) {
+        do {
+            let directory = URL(fileURLWithPath: game.romPath, isDirectory: true).standardizedFileURL
+            guard directory.lastPathComponent == game.code else { throw RestoreDirectory.failure() }
+            let parent = try RestoreDirectory(directory)
+            let names = try parent.names().filter { ["sfc", "smc"].contains(URL(fileURLWithPath: $0).pathExtension.lowercased()) }
+            guard names.count == 1, let name = names.first else { throw RestoreDirectory.failure() }
+            let captured = try SNESLibraryROMSource.capture(directory: directory, filename: name)
+            do { return (captured.0, try SNESCanoeImage.prepare(rom: captured.1), nil, nil) }
+            catch let error as SNESCanoeImage.PreparationError { return (captured.0, nil, error.localizedDescription, error) }
+        } catch {
+            return (nil, nil, "The ROM file needs review. Keep one ordinary, uncompressed .sfc or .smc file and prepare again.", nil)
+        }
+    }
     @MainActor static func review(games: [Game], originals: SNESOriginalGamesFrame,
                                   stockPayloadSHA256: [String: String] = [:]) throws -> Self {
         let stock = Set(originals.entries.map(\.code))
@@ -115,19 +146,9 @@ struct SNESLibraryCompatibility: Sendable {
         var rows: [Row] = [], total = 0
         for game in games {
             try Task.checkCancellation()
-            var source: SNESLibraryROMSource?, prepared: SNESCanoeImage.Result?, issue: String?
-            var preparationError: SNESCanoeImage.PreparationError?
-            do {
-                let directory = URL(fileURLWithPath: game.romPath, isDirectory: true).standardizedFileURL
-                guard directory.lastPathComponent == game.code else { throw RestoreDirectory.failure() }
-                let parent = try RestoreDirectory(directory)
-                let names = try parent.names().filter { ["sfc", "smc"].contains(URL(fileURLWithPath: $0).pathExtension.lowercased()) }
-                guard names.count == 1, let name = names.first else { throw RestoreDirectory.failure() }
-                let captured = try SNESLibraryROMSource.capture(directory: directory, filename: name)
-                source = captured.0; prepared = try SNESCanoeImage.prepare(rom: captured.1)
-            } catch is CancellationError { throw CancellationError() }
-              catch let error as SNESCanoeImage.PreparationError { preparationError = error; issue = error.localizedDescription }
-              catch { issue = "The ROM file needs review. Keep one ordinary, uncompressed .sfc or .smc file and prepare again." }
+            let inspection = inspect(game)
+            let source = inspection.source, prepared = inspection.prepared, preparationError = inspection.preparationError
+            var issue = inspection.issue
             total += prepared?.data.count ?? 0
             guard total <= 128 * 1024 * 1024 else { throw failure("Prepare a smaller game selection for this review.") }
             var matches: [String] = [], evidence: Evidence = .distinct

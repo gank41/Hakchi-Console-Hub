@@ -13,25 +13,30 @@ struct TaskProgressContent: View {
     var body: some View {
         VStack(alignment:.leading,spacing:16) {
             Text(runner.operationName).font(.title2.bold())
-            if runner.isRunning {
-                Label(runner.cancelRequested ? "Stopping…" : runner.currentTask,systemImage:"gearshape.2")
-                    .fixedSize(horizontal:false,vertical:true)
+            if runner.displayState == .working || runner.displayState == .stopping {
+                HStack(alignment:.center,spacing:8) {
+                    ProgressView().controlSize(.small)
+                    Text(runner.displayState == .stopping ? "Stopping…" : "Working…").font(.headline)
+                }
+                Text(runner.currentTask).fixedSize(horizontal:false,vertical:true)
                 if runner.hasMeasuredProgress {
                     ProgressView(value:runner.progress)
                     Text(runner.progress,format:.percent.precision(.fractionLength(0))).font(.caption).foregroundStyle(.secondary)
-                } else { ProgressView().controlSize(.small) }
+                }
                 Text(runner.cancelRequested ? "Waiting for the operation to stop. Leave any connected console powered and plugged in." : "Keep this window open while the operation is working. If a console is connected, leave it powered and plugged in.")
                     .font(.callout).foregroundStyle(.secondary)
-            } else if runner.wasCancelled {
+            } else if runner.displayState == .cancelled {
                 Label("Cancelled",systemImage:"stop.circle").font(.headline)
                 Text("The operation stopped. Review the details before trying again.")
             } else if let error = runner.error {
                 Label("Needs attention",systemImage:"exclamationmark.triangle.fill").font(.headline).foregroundStyle(.orange)
                 Text(OperationActivity.safe(error.localizedDescription)).textSelection(.enabled).fixedSize(horizontal:false,vertical:true)
-            } else {
+            } else if runner.displayState == .completed {
                 Label("Complete",systemImage:"checkmark.circle.fill").font(.headline).foregroundStyle(.green)
                 Text(runner.currentTask).foregroundStyle(.secondary).textSelection(.enabled)
                 Text("You can close this window to return to your library.").font(.callout)
+            } else {
+                Text("Getting ready…").foregroundStyle(.secondary)
             }
             if let start = runner.startedAt {
                 TimelineView(.periodic(from:.now,by:1)) { context in

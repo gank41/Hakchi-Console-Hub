@@ -4,6 +4,29 @@ import Testing
 import SwiftHakchiCore
 
 @MainActor struct IncludedGameDuplicateTests {
+    @Test(arguments: [(ConsoleType.nes, "Super Mario Bros.", "nes"), (.snesUsa, "Super Mario World", "sfc")])
+    func firstImportWarnsAboutBuiltInGamesWithoutAConnectedConsole(_ sample: (ConsoleType, String, String)) throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let config = AppConfig(); config.workspacePath = root.path; config.lastConsoleType = sample.0
+        let file = root.appendingPathComponent(sample.1 + " (USA)." + sample.2)
+        try Data([78, 69, 83, 26] + Array(repeating: UInt8(7), count: 128)).write(to: file)
+        let manager = GameManagerService(config: config)
+        var reviewed = false
+        try manager.importROMs(urls: [file], consoleType: sample.0) { matches in
+            reviewed = true
+            #expect(matches.first?.builtInTitle == sample.1)
+            return .keepCopies
+        }
+        #expect(reviewed)
+        #expect(manager.games.count == 1 && !manager.games[0].isSelected)
+    }
+    @Test func offlineHintsStayWithinTheCorrectConsoleAndKeepCheatCopiesDistinct() {
+        #expect(IncludedGameDuplicates.titleHint(title: "Super Mario World", console: .snesUsa, stock: []) == "Super Mario World")
+        #expect(IncludedGameDuplicates.titleHint(title: "Super Mario World", console: .nes, stock: []) == nil)
+        #expect(IncludedGameDuplicates.titleHint(title: "Super Mario World", console: .snesEur, stock: []) == nil)
+        #expect(IncludedGameDuplicates.titleHint(title: "Super Mario World [Cheat Code]", console: .snesUsa, stock: []) == nil)
+        #expect(IncludedGameDuplicates.titleHint(title: "Super Mario World 2 - Yoshi's Island", console: .snesUsa, stock: []) == "Yoshi's Island")
+    }
     private func stock(_ title: String, console: ConsoleType = .nes) -> Game {
         Game(code: "CLV-P-AAAAA", desktopContent: "Code=CLV-P-AAAAA\nName=\(title)", consoleType: console, source: .stock)
     }
@@ -120,6 +143,8 @@ import SwiftHakchiCore
         let frame=try SNESOriginalGamesFrame(originalGamesFrameFixture(),binding:originalGamesBinding(),challenge:originalGamesChallenge)
         try manager.rememberSNESOriginalGames(frame)
         #expect(manager.games.isEmpty)
+        #expect(manager.includedCatalog(for: .snesUsa).map(\.name).contains("Été"))
+        #expect(manager.includedCatalog(for: .nes).isEmpty)
         let source=root.appendingPathComponent("Été.sfc");try Data(repeating:7,count:128).write(to:source)
         var count=0
         try manager.importROMs(urls:[source],consoleType:.snesUsa) { matches in
