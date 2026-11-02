@@ -1,19 +1,21 @@
 # Hakchi Console Hub
 
-A work-in-progress macOS app for managing classic mini-console libraries, built with Swift and SwiftUI. This project continues [Swift Hakchi2](https://github.com/mattackerman808/swift-hakchi2), a native macOS rewrite inspired by [Hakchi2 CE](https://github.com/TeamShinkansen/Hakchi2-CE).
+This is a work-in-progress Apple Silicon macOS app for managing classic mini-consoles & libraries, built with Swift and SwiftUI. This project continues [Swift Hakchi2](https://github.com/mattackerman808/swift-hakchi2), a native macOS rewrite inspired by [Hakchi2 CE](https://github.com/TeamShinkansen/Hakchi2-CE).
 
-> **Development preview:** Some functions require a console that has already been modified. First-time console setup and recovery are not generally available in this preview. Read the status below before making changes to a device.
+> **Development preview:** The project has prepared an originally unmodified US SNES Classic and added games to it during supervised development. This downloadable preview can prepare a backup and sync a compatible, prepared SNES, but the complete first-time installation workflow is not yet available as a one-click app feature. See the model-specific status below.
 
 ## Supported consoles and status
 
 | Console | Current status |
 | --- | --- |
-| NES Classic (USA) | Library management and synchronization have been exercised on one already-modified console. Other devices, layouts and first-time installation need further testing. |
-| SNES Classic (USA) | Native game synchronization has been exercised on one prepared console. General first-time setup, other devices and restoration still need independent validation. |
+| NES Classic (USA) | Library management and synchronization have been exercised on an already-modified console. This preview does not yet provide a validated first-time installation workflow. |
+| SNES Classic (USA) | An originally unmodified console was prepared during supervised development; added games, folders, artwork and native sync were tested on that console. This preview can prepare a backup and sync a compatible, prepared console. Its complete first-time installation and restoration workflows are not yet available as general app features. |
 | Famicom Mini, Super Famicom Mini, European models | Library and console choices exist, but hardware operations are not generally verified. |
 | Sega Genesis / Mega Drive Mini | Library support is experimental; console setup and synchronization are not ready. |
 
 Games requiring an additional SNES compatibility emulator **cannot yet be synced through the app**. Temporary gameplay and save tests have been performed, but the launcher, persistent save recovery and normal synchronization are not complete. No per-game compatibility is guaranteed.
+
+Consoles of the same model generally follow the same basic process, but the app still needs to recognize the connected device and its current software and backup. Regional models, software changes and previously modified consoles can require different handling. The testing above describes what has actually been exercised so far; it is not a separate procedure invented for each individual console.
 
 ## Features
 
