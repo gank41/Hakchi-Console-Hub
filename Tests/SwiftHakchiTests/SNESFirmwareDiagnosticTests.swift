@@ -4,6 +4,276 @@ import os
 @testable import SwiftHakchi
 
 struct SNESFirmwareDiagnosticTests {
+    @Test func preparedReviewMustStillMatchTheSavedReceipt() throws {
+        let folder=URL(fileURLWithPath:"/tmp/SNES-First-Install-Review-11111111-1111-1111-1111-111111111111")
+        let digest=String(repeating:"a",count:64)
+        let summary=SNESFirstInstallReviewSummary(reviewDirectory:folder,dataDirectory:folder,reviewSHA256:digest,changedUnits:1)
+        try summary.requireReceipt(.init(directory:folder,sha256:digest))
+        #expect(throws:(any Error).self) {try summary.requireReceipt(.init(directory:folder,sha256:String(repeating:"b",count:64)))}
+        #expect(throws:(any Error).self) {try summary.requireReceipt(.init(directory:folder.deletingLastPathComponent(),sha256:digest))}
+    }
+    @Test func interruptedInstallationStatusWarnsAgainstRetrying() {
+        for phase: SNESFirmwareJournal.Phase in [.writeIntent, .uncertain] {
+            let status = SNESInstallationProgress(phase: phase)
+            #expect(status.needsAttention)
+            #expect(status.detail.localizedCaseInsensitiveContains("do not try"))
+        }
+        for phase: SNESFirmwareJournal.Phase in [.readbackVerified, .startupVerified] {
+            #expect(SNESInstallationProgress(phase: phase).needsAttention)
+        }
+        let completed = SNESInstallationProgress(phase: .menuAccepted)
+        #expect(!completed.needsAttention)
+        #expect(completed.detail.localizedCaseInsensitiveContains("saved"))
+    }
+    @Test func resumedUpgradeIdentifiesItsParentAndRejectsSubstitution() throws {
+        let root=try testDirectory();defer {try? FileManager.default.removeItem(at:root)}
+        func operation()->URL {root.appendingPathComponent("SNESFirmware-"+UUID().uuidString)}
+        let initial=operation(),menu=SNESFirmwareJournal.Prepared(operation:operation(),reviewSHA256:String(repeating:"a",count:64))
+        let check=SNESReviewedConsoleCheck(operation:initial,planSHA256:String(repeating:"b",count:64),review:.init(directory:root,sha256:String(repeating:"c",count:64)))
+        let direct=SNESFirmwareJournal.Prepared(operation:initial,reviewSHA256:check.planSHA256)
+        #expect(try AppState.resolveSNESUpgradeParent(direct, after:check, supplied:nil, root:root) == nil)
+        let candidate = try AppState.resolveSNESUpgradeParent(menu, after:check, supplied:nil, root:root)
+        let resolved = try #require(candidate)
+        #expect(resolved.operation.path==menu.operation.path && resolved.reviewSHA256==menu.reviewSHA256)
+        let wrong=SNESFirmwareJournal.Prepared(operation:menu.operation,reviewSHA256:String(repeating:"0",count:64))
+        #expect(throws:(any Error).self) {try AppState.resolveSNESUpgradeParent(menu, after:check, supplied:wrong, root:root)}
+        let outside=SNESFirmwareJournal.Prepared(operation:root.deletingLastPathComponent().appendingPathComponent("SNESFirmware-"+UUID().uuidString),reviewSHA256:menu.reviewSHA256)
+        #expect(throws:(any Error).self) {try AppState.resolveSNESUpgradeParent(outside, after:check, supplied:nil, root:root)}
+    }
+    @Test @MainActor func appFirstInstallRequiresReadinessAndApprovalBeforeAnyAccess() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let config = AppConfig(); config.lastConsoleType = .snesUsa
+        let app = AppState(startDeviceMonitoring: false, config: config, saveConfiguration: {},
+            checkRecoveryHost: { calls.withLock { $0 += 1 } },
+            firmwareJournalRoot: { calls.withLock { $0 += 1 }; return root },
+            makeSNESFirmwareIO: { _, _ in calls.withLock { $0 += 1 }; throw SNESRuntimeBinding.failure() })
+        app.isPreparingSync = true
+        let check = SNESReviewedConsoleCheck(operation: root, planSHA256: String(repeating: "0", count: 64),
+            review: .init(directory: root, sha256: String(repeating: "0", count: 64)))
+        await #expect(throws: (any Error).self) { try await app.runSNESReviewedInstallation(check, ready: false, approved: true, progress: { _ in }) }
+        await #expect(throws: (any Error).self) { try await app.runSNESReviewedInstallation(check, ready: true, approved: false, progress: { _ in }) }
+        app.isPreparingSync = false
+        await #expect(throws: (any Error).self) { try await app.reopenSNESReviewedInstallation(operation: root, review: check.review) }
+        app.isPreparingSync = true
+        await #expect(throws: (any Error).self) { try await app.checkSNESReviewedInstallation(check, ready: false) }
+        await #expect(throws: (any Error).self) { try await app.acceptSNESReviewedInstallation(check, confirmed: false) }
+        await #expect(throws: (any Error).self) { try await app.inspectSNESUncertainInstallation(after: check, ready: false, progress: { _ in }) }
+        await #expect(throws: (any Error).self) { try await app.backupSNESReviewedCurrentData(after: check, ready: false, progress: { _ in }) }
+        let candidate = SNESSetupRecordReceipt(kind: .candidate, directory: root, manifestSHA256: String(repeating: "0", count: 64))
+        await #expect(throws: (any Error).self) { try await app.checkSNESMenuStartup(after: check, candidate: candidate, ready: false, progress: { _ in }) }
+        let preflight = SNESStartupPreflightReceipt(record: .init(kind: .preflight, directory: root, manifestSHA256: String(repeating: "0", count: 64)), backupMatches: true)
+        await #expect(throws: (any Error).self) { try await app.runSNESMenuStartupTrial(after: check, candidate: candidate, preflight: preflight, ready: false, progress: { _ in }) }
+        let started = SNESSetupRecordReceipt(kind: .trialStarted, directory: root, manifestSHA256: String(repeating: "0", count: 64))
+        let played = SNESSetupRecordReceipt(kind: .trialPlayed, directory: root, manifestSHA256: String(repeating: "0", count: 64))
+        let outdated = SNESStartupPreflightReceipt(record: preflight.record, backupMatches: false)
+        do {
+            _ = try await app.runSNESMenuStartupTrial(after: check, candidate: candidate, preflight: outdated, ready: true, progress: { _ in })
+            Issue.record("An outdated backup was accepted")
+        } catch {
+            #expect(error.localizedDescription.contains("new backup"))
+        }
+        do {
+            _ = try await app.prepareSNESMenuUpgrade(after: check, candidate: candidate, preflight: outdated, started: started, played: played, confirmed: true)
+            Issue.record("An outdated backup was accepted")
+        } catch {
+            #expect(error.localizedDescription.contains("new backup"))
+        }
+        await #expect(throws: (any Error).self) { try await app.prepareSNESMenuUpgrade(after: check, candidate: candidate, preflight: preflight, started: started, played: played, confirmed: false) }
+        let upgrade = SNESFirmwareJournal.Prepared(operation: root, reviewSHA256: String(repeating: "0", count: 64))
+        await #expect(throws: (any Error).self) { try await app.captureSNESReviewedOriginalGames(upgrade, after: check, menu: upgrade, ready: false) }
+        app.isPreparingSync = false
+        await #expect(throws: (any Error).self) { try await app.reopenSNESMenuUpgrade(operation: root, after: check) }
+        app.isPreparingSync = true
+        await #expect(throws: (any Error).self) { try await app.prepareSNESLibraryStartup(after: check, menu: upgrade, confirmed: false) }
+        await #expect(throws: (any Error).self) { try await app.checkSNESMenuStartup(after: check, menu: upgrade, candidate: candidate, ready: false, progress: { _ in }) }
+        await #expect(throws: (any Error).self) { try await app.runSNESMenuStartupTrial(after: check, menu: upgrade, candidate: candidate, preflight: preflight, ready: false, progress: { _ in }) }
+        await #expect(throws: (any Error).self) { try await app.runSNESMenuUpgrade(upgrade, after: check, menu: upgrade, mode: .write, ready: true, progress: { _ in }) }
+        await #expect(throws: (any Error).self) { try await app.runSNESMenuUpgrade(upgrade, after: check, mode: .preflight, ready: false, progress: { _ in }) }
+        await #expect(throws: (any Error).self) { try await app.runSNESMenuUpgrade(upgrade, after: check, mode: .write, ready: true, progress: { _ in }) }
+        await #expect(throws: (any Error).self) { try await app.checkSNESMenuUpgrade(upgrade, after: check, ready: false) }
+        await #expect(throws: (any Error).self) { try await app.acceptSNESMenuUpgrade(upgrade, after: check, confirmed: false) }
+        app.isPreparingSync = false
+        await #expect(throws: (any Error).self) { try await app.prepareSNESMenuStartup(after: check) }
+        #expect(calls.withLock { $0 } == 0)
+    }
+    @Test func failedRestoreNeverTreatsAnAmbiguousWriteAsSafeToRetry() {
+        let cause = SNESRuntimeBinding.failure()
+        for phase: SNESFirmwareJournal.Phase? in [nil, .writeIntent, .uncertain, .readbackVerified] {
+            let reported = SNESFirmwareOutcomeFailure.classify(cause, mode: .write, transactionStarted: true, phase: phase)
+            #expect(reported is SNESFirmwareTransactionError)
+        }
+        let beforeWrite = SNESFirmwareOutcomeFailure.classify(cause, mode: .write, transactionStarted: true, phase: .stoppedBeforeWrite)
+        #expect(!(beforeWrite is SNESFirmwareTransactionError))
+        let neverStarted = SNESFirmwareOutcomeFailure.classify(cause, mode: .write, transactionStarted: false, phase: nil)
+        #expect(!(neverStarted is SNESFirmwareTransactionError))
+        let checkOnly = SNESFirmwareOutcomeFailure.classify(cause, mode: .preflight, transactionStarted: true, phase: nil)
+        #expect(!(checkOnly is SNESFirmwareTransactionError))
+    }
+    @Test @MainActor func appRestorePreparationRequiresOpenGuide() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let config = AppConfig(); config.lastConsoleType = .snesUsa
+        let app = AppState(startDeviceMonitoring: false, config: config, saveConfiguration: {},
+            checkRecoveryHost: { calls.withLock { $0 += 1 } },
+            firmwareJournalRoot: { calls.withLock { $0 += 1 }; return root },
+            makeSNESFirmwareIO: { _, _ in calls.withLock { $0 += 1 }; throw SNESRuntimeBinding.failure() })
+        await #expect(throws: (any Error).self) { try await app.prepareSNESStartupRestore(operation: root.appendingPathComponent("invalid")) }
+        #expect(calls.withLock { $0 } == 0)
+        app.isPreparingSync = true
+        await #expect(throws: (any Error).self) { try await app.prepareSNESStartupRestore(operation: root.appendingPathComponent("invalid")) }
+        #expect(calls.withLock { $0 } == 1)
+    }
+
+    @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_ACTIVE_PREIMAGE"] != nil))
+    @MainActor func appPreparesSavedOriginalStartupWithoutConsoleAccess() async throws {
+        let material = try await SNESFirmwareFixtureCache.shared.value()
+        let checked = try await SNESFirmwareGuardFixtureCache.shared.value()
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let parent = try SNESFirmwareJournal.prepare(material: material, root: root, guard: checked)
+        let journal = try SNESFirmwareJournal(operation: parent.operation, reviewSHA256: parent.reviewSHA256, material: material, guard: checked)
+        try await journal.preflightVerified(); _ = try await journal.beginWrite(); try await journal.readbackVerified(); try await journal.close()
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let config = AppConfig(); config.lastConsoleType = .snesUsa
+        let app = AppState(startDeviceMonitoring: false, config: config, saveConfiguration: {},
+            checkRecoveryHost: { calls.withLock { $0 += 1 } }, firmwareJournalRoot: { root },
+            makeSNESFirmwareIO: { _, _ in calls.withLock { $0 += 1 }; throw SNESRuntimeBinding.failure() })
+        app.isPreparingSync = true
+        let result = try await app.prepareSNESStartupRestore(operation: parent.operation)
+        #expect(calls.withLock { $0 } == 0)
+        let pins = try PinnedFELInputs.load(), inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        let restored = try await SNESFirmwareJournal.reopen(operation: result.operation, reviewSHA256: result.reviewSHA256, recovery: inputs)
+        let restoration = try await restored.verifiedMaterial()
+        #expect(restoration.direction == .restore && restoration.target == material.original.active && restoration.preimage == material.target)
+        #expect(try await restored.phase() == .prepared)
+        try await restored.close()
+    }
+
+    @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_ACTIVE_PREIMAGE"] != nil))
+    @MainActor func appChecksAndRestoresOnlyAfterReadiness() async throws {
+        let material = try await SNESFirmwareFixtureCache.shared.value()
+        let checked = try await SNESFirmwareGuardFixtureCache.shared.value()
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let parent = try SNESFirmwareJournal.prepare(material: material, root: root, guard: checked)
+        let journal = try SNESFirmwareJournal(operation: parent.operation, reviewSHA256: parent.reviewSHA256, material: material, guard: checked)
+        try await journal.preflightVerified(); _ = try await journal.beginWrite(); try await journal.readbackVerified(); try await journal.close()
+        let hostCalls = OSAllocatedUnfairLock(initialState: 0)
+        let devices = OSAllocatedUnfairLock(initialState: [SNESFirmwareFakeIO]())
+        let config = AppConfig(); config.lastConsoleType = .snesUsa
+        let app = AppState(startDeviceMonitoring: false, config: config, saveConfiguration: {},
+            checkRecoveryHost: { hostCalls.withLock { $0 += 1 } }, firmwareJournalRoot: { root },
+            makeSNESFirmwareIO: { material, _ in
+                let io = SNESFirmwareFakeIO(material: material, fault: "none")
+                devices.withLock { $0.append(io) }; return io
+            })
+        app.isPreparingSync = true
+        let restore = try await app.prepareSNESStartupRestore(operation: parent.operation)
+        let opened = try await app.openSNESStartupRestore(operation: restore.operation)
+        #expect(opened.restore.reviewSHA256 == restore.reviewSHA256 && opened.phase == .prepared)
+        await #expect(throws: (any Error).self) {
+            try await app.runSNESStartupRestore(restore, mode: .preflight, ready: false, progress: { _ in })
+        }
+        #expect(hostCalls.withLock { $0 } == 0 && devices.withLock { $0.isEmpty })
+        try await app.runSNESStartupRestore(restore, mode: .preflight, ready: true, progress: { _ in })
+        #expect(try await app.openSNESStartupRestore(operation: restore.operation).phase == .preflightVerified)
+        let first = try #require(devices.withLock { $0.first })
+        #expect(await first.writes == 0)
+        await #expect(throws: (any Error).self) {
+            try await app.runSNESStartupRestore(restore, mode: .write, ready: true, progress: { _ in })
+        }
+        #expect(hostCalls.withLock { $0 } == 1 && devices.withLock { $0.count } == 1)
+        try await app.runSNESStartupRestore(restore, mode: .write, ready: true, approved: true, progress: { _ in })
+        let second = try #require(devices.withLock { $0.last })
+        #expect(await second.writes == 1)
+        #expect(await second.active == material.original.active)
+        let pins = try PinnedFELInputs.load(), inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        let result = try await SNESFirmwareJournal.reopen(operation: restore.operation, reviewSHA256: restore.reviewSHA256, recovery: inputs)
+        #expect(try await result.phase() == .readbackVerified)
+        try await result.close()
+        #expect(try await app.openSNESStartupRestore(operation: restore.operation).phase == .readbackVerified)
+        await #expect(throws: (any Error).self) { try await app.acceptSNESStartupRestore(restore, confirmed: false) }
+        try await app.acceptSNESStartupRestore(restore, confirmed: true)
+        #expect(try await app.openSNESStartupRestore(operation: restore.operation).phase == .menuAccepted)
+    }
+    @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_PORTABLE_POSITIVE"] != nil))
+    func portableRequestPreparesAndReopensOfflineWithExactHelpers() async throws {
+        let existing=try await SNESFirmwareFixtureCache.shared.value(),root=try testDirectory()
+        defer{try? FileManager.default.removeItem(at:root)}
+        let helpers=try await RecoveryBootSnapshotStore(root:root).saveSNESPortableHelpers()
+        let request=SNESPortableFirmwareRequest(candidate:existing.paths.candidate,preflight:existing.paths.preflight,
+            started:existing.paths.started,played:existing.paths.played,original:existing.paths.original,helpers:helpers.path)
+        let path=root.appendingPathComponent("request.json");try JSONEncoder().encode(request).write(to:path)
+        let journals=root.appendingPathComponent("journals")
+        try FileManager.default.createDirectory(at:journals,withIntermediateDirectories:false)
+        let pins=try PinnedFELInputs.load(),inputs=RecoveryBootInputs(fes1:pins.fes1,uboot:pins.uboot,bootImage:pins.bootImage)
+        let calls=OSAllocatedUnfairLock(initialState:0)
+        let output=try #require(try await SNESFirmwareDiagnostic.runIfPresent(["--prepare-snes-firmware",path.path],
+            loadInputs:{inputs},root:{journals},checkHost:{calls.withLock{$0+=1}},
+            makeIO:{_,_ in calls.withLock{$0+=1};throw SNESRuntimeBinding.failure()}))
+        let result=try #require(JSONSerialization.jsonObject(with:Data(output.utf8)) as? [String:Any])
+        #expect(result["USBOpened"] as? Bool == false && result["firmwareWritten"] as? Bool == false)
+        #expect(calls.withLock{$0}==0)
+        let operation=URL(fileURLWithPath:try #require(result["operation"] as? String))
+        let review=try #require(result["reviewSHA256"] as? String)
+        let journal=try await SNESFirmwareJournal.reopen(operation:operation,reviewSHA256:review,recovery:inputs)
+        let material=try await journal.verifiedMaterial()
+        #expect(material.reader.digest==SNESPortableHelpers.Version.v1.reader.sha256)
+        #expect(material.writer.digest==SNESPortableHelpers.Version.v1.writer.sha256)
+        #expect(material.paths.reader==helpers.appendingPathComponent("reader").path)
+        #expect(material.paths.writer==helpers.appendingPathComponent("writer").path)
+        try await journal.close()
+        let legacyRequest=root.appendingPathComponent("legacy-request.json")
+        try JSONEncoder().encode(existing.paths).write(to:legacyRequest)
+        let legacyJournals=root.appendingPathComponent("legacy-journals")
+        try FileManager.default.createDirectory(at:legacyJournals,withIntermediateDirectories:false)
+        let legacyOutput=try #require(try await SNESFirmwareDiagnostic.runIfPresent(["--prepare-snes-firmware",legacyRequest.path],
+            loadInputs:{inputs},root:{legacyJournals},checkHost:{calls.withLock{$0+=1}},
+            makeIO:{_,_ in calls.withLock{$0+=1};throw SNESRuntimeBinding.failure()}))
+        let legacyResult=try #require(JSONSerialization.jsonObject(with:Data(legacyOutput.utf8)) as? [String:Any])
+        #expect(legacyResult["USBOpened"] as? Bool == false && legacyResult["firmwareWritten"] as? Bool == false)
+        #expect(calls.withLock{$0}==0)
+        let legacyOperation=URL(fileURLWithPath:try #require(legacyResult["operation"] as? String))
+        let legacyReview=try #require(legacyResult["reviewSHA256"] as? String)
+        let legacyJournal=try await SNESFirmwareJournal.reopen(operation:legacyOperation,reviewSHA256:legacyReview,recovery:inputs)
+        let legacyMaterial=try await legacyJournal.verifiedMaterial()
+        #expect(legacyMaterial.reader.digest==existing.reader.digest && legacyMaterial.writer.digest==existing.writer.digest)
+        try await legacyJournal.close()
+    }
+    @Test func validSavedHelperRequestReachesOfflineInputCheckingWithoutOpeningConsole() async throws {
+        let root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}
+        let directory=try await RecoveryBootSnapshotStore(root:root).saveSNESPortableHelpers()
+        let request=SNESPortableFirmwareRequest(candidate:root.appendingPathComponent("candidate").path,
+            preflight:root.appendingPathComponent("preflight").path,started:root.appendingPathComponent("started").path,
+            played:root.appendingPathComponent("played").path,original:root.appendingPathComponent("original").path,
+            helpers:directory.path)
+        let path=root.appendingPathComponent("request.json");try JSONEncoder().encode(request).write(to:path)
+        let calls=OSAllocatedUnfairLock(initialState:0),host=OSAllocatedUnfairLock(initialState:0)
+        await #expect(throws:(any Error).self) {
+            try await SNESFirmwareDiagnostic.runIfPresent(["--prepare-snes-firmware",path.path],
+                loadInputs:{calls.withLock{$0+=1};throw SNESRuntimeBinding.failure()},
+                checkHost:{host.withLock{$0+=1}},makeIO:{_,_ in host.withLock{$0+=1};throw SNESRuntimeBinding.failure()})
+        }
+        #expect(calls.withLock{$0}==1 && host.withLock{$0}==0)
+    }
+    @Test func changedSavedHelpersStopPreparationBeforeRecoveryInputsOrConsoleAccess() async throws {
+        let root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}
+        let directory=try await RecoveryBootSnapshotStore(root:root).saveSNESPortableHelpers()
+        let portable=SNESPortableFirmwareRequest(candidate:root.appendingPathComponent("candidate").path,
+            preflight:root.appendingPathComponent("preflight").path,started:root.appendingPathComponent("started").path,
+            played:root.appendingPathComponent("played").path,original:root.appendingPathComponent("original").path,
+            helpers:directory.path)
+        let request=root.appendingPathComponent("request.json")
+        try JSONEncoder().encode(portable).write(to:request)
+        try Data([0]).write(to:directory.appendingPathComponent("writer"))
+        let calls=OSAllocatedUnfairLock(initialState:0)
+        await #expect(throws:(any Error).self) {
+            try await SNESFirmwareDiagnostic.runIfPresent(["--prepare-snes-firmware",request.path],
+                loadInputs:{calls.withLock{$0+=1};throw SNESRuntimeBinding.failure()},
+                root:{calls.withLock{$0+=1};throw SNESRuntimeBinding.failure()},
+                checkHost:{calls.withLock{$0+=1}},makeIO:{_,_ in calls.withLock{$0+=1};throw SNESRuntimeBinding.failure()})
+        }
+        #expect(calls.withLock{$0}==0)
+    }
     @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_ACTIVE_PREIMAGE"] != nil),arguments:["none","early","write"])
     func writeRequiresReviewTokenAndPreservesUncertainState(_ fault:String) async throws {
         let m=try await SNESFirmwareFixtureCache.shared.value(),g=try await SNESFirmwareGuardFixtureCache.shared.value(),root=try testDirectory()
@@ -65,7 +335,13 @@ struct SNESFirmwareDiagnosticTests {
         let path=request.appendingPathComponent("request.json");try JSONEncoder().encode(m.paths).write(to:path)
         let pins=try PinnedFELInputs.load(),inputs=RecoveryBootInputs(fes1:pins.fes1,uboot:pins.uboot,bootImage:pins.bootImage)
         let calls=OSAllocatedUnfairLock(initialState:0)
-        await #expect(throws:(any Error).self) {try await SNESFirmwareDiagnostic.runIfPresent(["--prepare-snes-firmware",path.path],loadInputs:{inputs},root:{root},checkHost:{calls.withLock{$0+=1}},makeIO:{_,_ in calls.withLock{$0+=1};throw SNESRuntimeBinding.failure()})}
+        if m.trial.image.count > 4*1024*1024 {
+            await #expect(throws:(any Error).self) {try await SNESFirmwareDiagnostic.runIfPresent(["--prepare-snes-firmware",path.path],loadInputs:{inputs},root:{root},checkHost:{calls.withLock{$0+=1}},makeIO:{_,_ in calls.withLock{$0+=1};throw SNESRuntimeBinding.failure()})}
+        } else {
+            // This private fixture can be a normal-size historical image; still
+            // exercise the size boundary without treating it as oversized.
+            #expect(throws:(any Error).self) {try SNESColdBootPolicy.require(boot1:m.source.boot1,imageByteCount:4*1024*1024+1)}
+        }
         #expect(calls.withLock{$0}==0)
         #expect(try FileManager.default.contentsOfDirectory(atPath:root.path).isEmpty)
         // A historically installed oversized image must still be restorable to its original bytes.

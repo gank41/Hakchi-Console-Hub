@@ -82,6 +82,42 @@ struct ConsoleRestoreChoiceTests {
 }
 
 extension SNESRecoveryMaterialTests {
+    @Test @MainActor func appBuildsAndVerifiesRecoveryPackageWithoutChangingTheSavedSetup() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        guard let setup = try snapshot(root, hwid: String(repeating: "7", count: 32)) else { return }
+        let manifest = try Data(contentsOf: setup.appendingPathComponent("manifest.json"))
+        let config = AppConfig(); config.workspacePath = root.path; config.lastConsoleType = .snesUsa
+        try FileManager.default.createDirectory(at: config.workspace.backups, withIntermediateDirectories: true)
+        let app = AppState(startDeviceMonitoring: false, deviceManager: DeviceManager(),
+                           gameManager: GameManagerService(config: config), config: config, saveConfiguration: {})
+        let before = try FileManager.default.contentsOfDirectory(atPath: config.workspace.backups.path)
+        await #expect(throws: (any Error).self) {
+            try await app.prepareSNESRecoveryPackage(from: SNESSetupRecordReceipt(kind: .backup, directory: setup, manifestSHA256: String(repeating: "0", count: 64)))
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: config.workspace.backups.path) == before)
+        let destination = try await app.prepareSNESRecoveryPackage(from: SNESSetupRecordReceipt(kind: .backup, directory: setup, manifestSHA256: BackupManifest.digest(manifest)))
+        #expect(try SNESRecoveryMaterial.loadPackage(directory: destination).expectedHWID == String(repeating: "7", count: 32))
+        #expect(try Data(contentsOf: setup.appendingPathComponent("manifest.json")) == manifest)
+        #expect(FileManager.default.fileExists(atPath: setup.appendingPathComponent("boot1.bin").path))
+    }
+
+    @Test func failedFinalPackageVerificationCannotLeaveACompletedRecoveryPackage() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        guard let setup = try snapshot(root, hwid: String(repeating: "8", count: 32)) else { return }
+        let material = try SNESRecoveryMaterial.load(setup: setup)
+        let store = try RecoveryBootSnapshotStore(root: root)
+        await #expect(throws: (any Error).self) {
+            try await store.saveSNESRecoveryMaterial(material, verify: { _ in
+                throw RecoveryProbeError.refused("Verification failed")
+            })
+        }
+        let packages = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("SNES-Recovery-Material-") }
+        #expect(packages.count == 1)
+        #expect(packages.allSatisfy { !FileManager.default.fileExists(atPath: $0.appendingPathComponent("manifest.json").path) })
+        #expect(try SNESRecoveryMaterial.load(setup: setup).expectedHWID == String(repeating: "8", count: 32))
+    }
+
     @Test func recoveryPreparationCannotFallThroughToHardware() async throws {
         for args in [["--prepare-snes-recovery"], ["--prepare-snes-recovery", "relative", "/Backups"],
                      ["--prepare-snes-recovery", "/missing", "/Backups", "extra"],

@@ -95,6 +95,32 @@ actor LegacyInspectionClient: LegacyRequestExecuting {
         let command = "B=/mnt/swifthakchi/busybox; s=$(\"$B\" head -c " + String(input.count) + "); h=$(printf '%s' \"$s\" | \"$B\" sha256sum); [ \"${h%% *}\" = '" + hash + "' ] || exit 1; eval \"$s\" </dev/null"
         return try await executeCommand(command, maximumBytes: 1024, binary: false, timeoutMilliseconds: 30000, input: input)
     }
+    /// A fixed, passive snapshot; it neither writes to the console nor controls a process.
+    func readSNESNativeProcessSnapshot() async throws -> SSHResult {
+        try await executeSNESLibraryRead(SNESNativeProcessSnapshot.command, maximumBytes: 65536, timeoutMilliseconds: 30000)
+    }
+    func readSNESNativeLaunchOptionNames() async throws -> SSHResult {
+        try await executeSNESLibraryRead(SNESNativeProcessSnapshot.commandWithOptionNames, maximumBytes: 65536, timeoutMilliseconds: 30000)
+    }
+    /// Bounded, read-only time-file samples; no save path or game title leaves the console.
+    func readSNESNativeTimeInventory() async throws -> SSHResult {
+        try await executeSNESLibraryRead(SNESNativeTimeInventory.command, maximumBytes: 1024, timeoutMilliseconds: 30000)
+    }
+    func readSNESRAMTrialProcesses() async throws -> SSHResult {
+        try await executeSNESRAMTrialRead(SNESNativeProcessSnapshot.commandForTemporaryTrial, maximumBytes: 65536)
+    }
+    func readSNESRAMLaunchObservation() async throws -> SSHResult {
+        try await executeSNESRAMTrialRead(SNESRAMLaunchObservation.command, maximumBytes: 4096)
+    }
+    func readSNESRAMLifecycle() async throws -> SSHResult {
+        try await executeSNESRAMTrialRead(SNESRAMLifecycleObservation.command, maximumBytes: 4096)
+    }
+    private func executeSNESRAMTrialRead(_ script: String, maximumBytes: Int) async throws -> SSHResult {
+        guard leaseID == nil else { throw LegacyInspectionError.busy }
+        let envelope = try SNESRAMLaunchObservation.envelope(script)
+        return try await executeCommand(envelope.command, maximumBytes: maximumBytes, binary: false,
+                                        timeoutMilliseconds: 30000, input: envelope.input)
+    }
     /// Fixed read-only startup report, streamed to avoid the old daemon's small exec buffer.
     func readSNESStartupTrial(_ trial: PreparedSNESStartupTrial, challenge: UUID) async throws -> SSHResult {
         guard leaseID == nil else { throw LegacyInspectionError.busy }
@@ -112,12 +138,84 @@ actor LegacyInspectionClient: LegacyRequestExecuting {
             runtimeSHA256: context.installation.expected.runtimeSHA256, librarySupport: context.supportsLibrarySync, challenge: challenge),
             maximumBytes: SNESLibraryInventory.maximumFrameBytes)
     }
+    /// Fixed read-only inspection; it cannot stage, publish, or retry a copy.
+    func inspectSNESReplacementSaveStage(_ context: SNESLibraryContext,
+                                         request: SNESReplacementSaveStageInspection.Request) async throws -> SNESReplacementSaveStageInspectionReceipt.Outcome {
+        guard leaseID == nil else { throw LegacyInspectionError.busy }
+        try request.require(context)
+        let outcome = try await SNESReplacementSaveStageInspection.dispatch(request, contextSHA256: context.sha256,
+            hwid: context.installation.expected.hwid, runtimeSHA256: context.installation.expected.runtimeSHA256) { checked in
+                let stream = try checked.stream()
+                let result = try await self.executeCommand(stream.command, maximumBytes: 4096, binary: false,
+                                                           timeoutMilliseconds: 120000, input: stream.input)
+                try checked.require(context)
+                guard result.succeeded, result.stderr.isEmpty else { throw SNESLibraryInventory.failure() }
+                return result.stdoutData
+            }
+        try request.require(context)
+        return outcome
+    }
+    /// One inactive staging attempt under an already-durable, single-use permit.
+    func stageSNESReplacementSave(_ context: SNESLibraryContext, request: SNESReplacementSaveStageCommands.Request,
+                                  before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.StagePermit) async throws -> SNESReplacementSaveStageReceipt {
+        guard leaseID == nil else { throw LegacyInspectionError.busy }
+        try permit.requireOwner(context); try permit.require(request: request, before: before)
+        return try await SNESReplacementSaveStageCommands.dispatch(request: request, before: before, permit: permit) { checked in
+            try permit.requireOwner(context)
+            let stream = try checked.stream()
+            let result = try await self.executeCommand(stream.command, maximumBytes: 4096, binary: false,
+                                                       timeoutMilliseconds: 600000, input: stream.input)
+            try permit.requireOwner(context)
+            guard result.succeeded, result.stderr.isEmpty else { throw SNESLibraryInventory.failure() }
+            return result.stdoutData
+        }
+    }
+    /// Temporary runtime helper only, guarded by a single-use permit.
+    func deliverSNESReplacementSaveHelper(_ context: SNESLibraryContext, request: SNESReplacementSaveHelperDelivery.Request,
+                                          before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.HelperDeliveryPermit) async throws {
+        guard leaseID == nil else { throw LegacyInspectionError.busy }
+        try permit.requireOwner(context); try permit.require(request: request, before: before)
+        try await SNESReplacementSaveHelperDelivery.dispatch(request: request, before: before, permit: permit) { checked in
+            try permit.requireOwner(context)
+            let stream = try checked.stream()
+            let result = try await self.executeCommand(stream.command, maximumBytes: 4096, binary: false,
+                                                      timeoutMilliseconds: 120000, input: stream.input)
+            try permit.requireOwner(context)
+            guard result.succeeded, result.stderr.isEmpty else { throw SNESLibraryInventory.failure() }
+            return result.stdoutData
+        }
+    }
+    /// Publish only the exact request recorded by the one-use permit.
+    func publishSNESReplacementSave(_ context: SNESLibraryContext, request: SNESReplacementSaveProfilePublication.Request,
+                                    before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.PublicationPermit) async throws {
+        guard leaseID == nil else { throw LegacyInspectionError.busy }
+        try permit.requireOwner(context); try permit.require(request: request, before: before)
+        try await SNESReplacementSaveProfilePublication.dispatch(request: request, before: before, permit: permit) { checked in
+            try permit.requireOwner(context)
+            let stream = try checked.stream()
+            let result = try await self.executeCommand(stream.command, maximumBytes: 4096, binary: false,
+                                                      timeoutMilliseconds: 600000, input: stream.input)
+            try permit.requireOwner(context)
+            guard result.succeeded, result.stderr.isEmpty else { throw SNESLibraryInventory.failure() }
+            return result.stdoutData
+        }
+    }
     func readSNESLibraryRecoveryInventory(_ context: SNESLibraryContext, permit: SNESLibraryReconciliationPermit, challenge: UUID) async throws -> SSHResult {
         try SNESLibraryJournalPolicy.requireOperation(permit.operation); try permit.requireOwner(context)
         return try await executeSNESLibraryRead(SNESLibraryInventoryCommands.script(contextSHA256: context.sha256,
             hwid: context.installation.expected.hwid, catalogSHA256: context.installation.catalogContentSHA256,
             runtimeSHA256: context.installation.expected.runtimeSHA256, librarySupport: context.supportsLibrarySync,
             challenge: challenge, excludingIncompleteMenu: permit.excludedMenuID, allowIncompleteNamespace: permit.allowsIncompleteNamespace), maximumBytes: SNESLibraryInventory.maximumFrameBytes)
+    }
+    /// Read-only support-file observation; a matching receipt does not authorize launch.
+    func checkSNESCompatibilityInstalledSupport(_ context: SNESLibraryContext, helperSHA256: String) async throws -> SSHResult {
+        guard leaseID == nil else { throw LegacyInspectionError.busy }
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        let check = try SNESCompatibilityInstalledSupportCommand.prepare(helperSHA256: helperSHA256)
+        let result = try await executeCommand(check.command, maximumBytes: 256, binary: true, timeoutMilliseconds: 30000)
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        guard result.succeeded, result.stderr.isEmpty, try check.validateReceipt(result.stdoutData) else { throw SNESLibraryMenu.failure() }
+        return result
     }
     /// Read-only compatibility preflight. The helper and game object must
     /// already be installed and independently verified by the calling workflow.
@@ -142,7 +240,7 @@ actor LegacyInspectionClient: LegacyRequestExecuting {
         guard leaseID == nil else { throw LegacyInspectionError.busy }
         try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
         let command = try SNESCompatibilityManagerInventory.prepare(game: game, source: source, helperSHA256: helperSHA256)
-        let result = try await executeCommand(command, maximumBytes: 10+16*(2+2165), binary: true, timeoutMilliseconds: 30000)
+        let result = try await executeCommand(command, maximumBytes: 10+16*(2+SNESRecoveryBinding.maximumManagerRecordBytes), binary: true, timeoutMilliseconds: 30000)
         try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
         guard result.succeeded, result.stderr.isEmpty else { throw SNESLibraryMenu.failure() }
         let observations = try SNESCompatibilityManagerInventory.parse(result.stdoutData, game: game, source: source)
@@ -194,16 +292,43 @@ actor LegacyInspectionClient: LegacyRequestExecuting {
     /// Raw read-only image evidence; callers must validate its binding and
     /// independently reviewed digest before considering any recovery action.
     func readSNESCompatibilityRetainedImage(_ context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest,
-                                            helperSHA256: String, paired: Bool) async throws -> SSHResult {
+                                            helperSHA256: String, paired: Bool, retired: Bool = false) async throws -> SSHResult {
         guard leaseID == nil else { throw LegacyInspectionError.busy }
         try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
-        let prepared = try SNESCompatibilityRecoveryCommand.prepareRetainedImage(request: request, helperSHA256: helperSHA256, paired: paired)
+        let prepared = try SNESCompatibilityRecoveryCommand.prepareRetainedImage(request: request, helperSHA256: helperSHA256, paired: paired, retired: retired)
         let limit = 8 * 1024 * 1024 + 24576
         let result = try await executeCommand(prepared.command, maximumBytes: limit, binary: true,
                                               timeoutMilliseconds: 30000, input: prepared.input)
         try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
         try request.verifySource()
         guard result.succeeded, result.stderr.isEmpty, result.stdoutData.count <= limit else { throw SNESLibraryMenu.failure() }
+        return result
+    }
+    /// Read-only archived-state evidence; callers independently validate its digest and session.
+    func readSNESCompatibilityStateArchive(_ context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest,
+                                           helperSHA256: String) async throws -> SSHResult {
+        guard leaseID == nil else { throw LegacyInspectionError.busy }
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        let prepared = try SNESCompatibilityRecoveryCommand.prepareStateArchive(request: request, helperSHA256: helperSHA256)
+        let limit = 16 * 1024 * 1024 + 24576
+        let result = try await executeCommand(prepared.command, maximumBytes: limit, binary: true,
+                                              timeoutMilliseconds: 30000, input: prepared.input)
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        try request.verifySource()
+        guard result.succeeded, result.stderr.isEmpty, result.stdoutData.count <= limit else { throw SNESLibraryMenu.failure() }
+        return result
+    }
+    /// Read-only prior-time evidence; the caller validates the frame and an independent digest.
+    func readSNESCompatibilityRetainedTime(_ context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest,
+                                           helperSHA256: String) async throws -> SSHResult {
+        guard leaseID == nil else { throw LegacyInspectionError.busy }
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        let prepared = try SNESCompatibilityRecoveryCommand.prepareRetainedTime(request: request, helperSHA256: helperSHA256)
+        let result = try await executeCommand(prepared.command, maximumBytes: 24576, binary: true,
+                                              timeoutMilliseconds: 30000, input: prepared.input)
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        try request.verifySource()
+        guard result.succeeded, result.stderr.isEmpty, result.stdoutData.count <= 24576 else { throw SNESLibraryMenu.failure() }
         return result
     }
     /// Inspect the selected clock workspace only. No restore is performed.

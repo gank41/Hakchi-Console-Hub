@@ -13,7 +13,7 @@ public enum SNESCanoeImage {
    case .ambiguousHeader:return "More than one cartridge mapping matches. Choose a verified ROM revision."
    case .unsupportedCartridge:return "This cartridge or save-memory layout needs additional compatibility support."
    case .unsupportedRegion:return "This ROM's region needs a tested conversion profile."
-   case .checksumNeedsReview:return "The ROM checksum needs review before native conversion."
+   case .checksumNeedsReview:return "The game's internal checksum doesn't match the file. It may be modified or incomplete; check the source or try another verified copy. The original file hasn't been changed."
    case .knownCompatibilityReview:return "The reference lists this game for compatibility review. A tested game profile is needed."
    }
   }

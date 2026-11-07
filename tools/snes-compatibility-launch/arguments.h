@@ -19,7 +19,9 @@ int hc_launch_arguments(int argc,const char *const argv[],const char *game_code,
 typedef struct {char sram[HC_ARGUMENT_BYTES],rtc[HC_ARGUMENT_BYTES];} HCGameSavePaths;
 /* Exact manager-selected paths, as metadata only. Volatile paths do not imply
  * durable storage, ownership, completion or authorization to open them. */
-typedef struct {int have_save,have_image;char save[HC_ARGUMENT_BYTES],image[HC_ARGUMENT_BYTES];} HCManagerCheckpointPaths;
+typedef struct {int have_save,have_image,have_load;char save[HC_ARGUMENT_BYTES],image[HC_ARGUMENT_BYTES],load[HC_ARGUMENT_BYTES];} HCManagerCheckpointPaths;
+/* Normalized menu time paths are metadata, not authority to read or write. */
+typedef struct {int have_load,have_save;char load[HC_ARGUMENT_BYTES],save[HC_ARGUMENT_BYTES];} HCManagerTimePaths;
 int hc_launch_save_paths(int argc,const char *const argv[],const char *game_code,HCGameSavePaths *output);
 /* Independent compatibility-emulator SRAM/RTC names, keyed by game and exact
  * ROM digest. Names alone neither create nor authenticate any directory. */
@@ -33,6 +35,7 @@ typedef struct {
  char game[12], rom_name[69], digest[65];
  HCGameSavePaths saves;
  HCManagerCheckpointPaths checkpoint;
+ HCManagerTimePaths time;
  HCLaunchArguments manager;
 } HCCompatibilityMenuCommand;
 int hc_parse_compatibility_menu_command(int argc,const char *const argv[],HCCompatibilityMenuCommand *output);

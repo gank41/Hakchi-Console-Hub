@@ -12,7 +12,7 @@ static const unsigned char valid[] = {137,80,78,71,13,10,26,10,0,0,0,13,73,72,68
 static int success_marker,fail_marker;
 bool hakchi_screenshot_completion_ok(const void *p){return p==&success_marker;}
 static const uint8_t session[16]={1};
-static void start_image(HCCheckpoint *c){uint8_t save[32];assert(hc_checkpoint_init(c,session,7)==0);assert(hc_checkpoint_encode(save,session,7,HC_CP_SAVE,1)==0);assert(hc_checkpoint_receipt(c,save,32)==0);assert(hc_checkpoint_verified(c,HC_CP_SAVE,1)==0);}
+static void start_image(HCCheckpoint *c){assert(hc_checkpoint_init_image(c,session,7)==0);}
 int main(void){struct sigaction ignore={0};ignore.sa_handler=SIG_IGN;sigemptyset(&ignore.sa_mask);assert(sigaction(SIGPIPE,&ignore,NULL)==0);
  int p[2];assert(hc_control_pipe(p)==0);HCScreenshotCompletion x;HCCheckpoint c;uint8_t frame[32];
  assert(hc_screenshot_completion_init(&x,p[1],session,7)==0);start_image(&c);

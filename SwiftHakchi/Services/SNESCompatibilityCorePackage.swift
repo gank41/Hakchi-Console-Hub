@@ -33,6 +33,17 @@ struct SNESCompatibilityCorePackage: Sendable {
         let requiredGLIBCVersions:[String]
     }
 
+    /// Load bundled, reviewed data for Mac-side preparation only.
+    /// This does not authorize installing or launching the core.
+    static func loadBundled() throws -> Self {
+        guard let root = Bundle.module.url(forResource: "SNESCompatibilityCore", withExtension: nil) else {
+            throw RecoveryProbeError.refused("The optional emulator core resources are missing. Nothing was installed.")
+        }
+        return try Self(core: Data(contentsOf: root.appendingPathComponent("core.so")),
+                        sourceArchive: Data(contentsOf: root.appendingPathComponent("source.tar.gz")),
+                        notice: Data(contentsOf: root.appendingPathComponent("LICENSE.txt")))
+    }
+
     init(core:Data,sourceArchive:Data,notice:Data) throws {
         // Pins come from the separately recorded unchanged-source and byte-identical
         // rebuild audit. A caller-supplied manifest cannot authorize a different build.

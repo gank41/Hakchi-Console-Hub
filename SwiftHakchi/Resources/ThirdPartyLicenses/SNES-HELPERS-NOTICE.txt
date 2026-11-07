@@ -1,0 +1,12 @@
+SNES setup helper components
+
+The bounded NAND reader and writer are built from source under tools/ in this
+project. The static ARM writer uses musl libc and Mbed TLS SHA-256 code. Zig
+provides the compiler and its bundled musl sources. The accompanying files
+musl-COPYRIGHT.txt, Zig-LICENSE.txt and MbedTLS-LICENSE.txt contain their
+respective notices. Source for Mbed TLS is under vendor/mbedtls; consult the
+project source and its notices for other bundled components.
+
+The reproducible-build script scripts/build-portable-snes-helpers.sh documents
+the compiler arguments and checks the resulting binary identities. These files
+are setup components, not authorization to write console firmware.

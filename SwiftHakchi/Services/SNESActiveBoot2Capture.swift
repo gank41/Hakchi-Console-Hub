@@ -29,7 +29,7 @@ struct SNESActiveBoot2Snapshot:Sendable {
         }
         let files=["active-range.bin":active,"geometry.bin":geometry.raw,"data-header.bin":header]
         let m=Manifest(binding:source.source.runtimeBinding,context:.init(context),sourcePath:source.source.directoryURL.path,
-            sourceManifestSHA256:source.source.manifestSHA256,helperSHA256:SNESBoundedReadHelper.sha256,
+            sourceManifestSHA256:source.source.manifestSHA256,helperSHA256:helper.digest,
             stockImageSHA256:BackupManifest.digest(source.stock),boot1SHA256:BackupManifest.digest(source.boot1),partitionsSHA256:BackupManifest.digest(source.partitions),
             offsetBytes:0x600000,byteCount:active.count,unitBytes:131072,pageSize:geometry.pageSize,pagesPerBlock:geometry.pagesPerBlock,blockCount:geometry.blockCount,
             challenges:challenges,files:files.mapValues(BackupManifest.digest))

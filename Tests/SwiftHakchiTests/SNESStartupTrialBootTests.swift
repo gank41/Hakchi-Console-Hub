@@ -43,6 +43,18 @@ private actor StartupTrialFELSpy:FELSessionTransport {
 }
 @Suite(.serialized)
 struct SNESStartupTrialBootTests {
+    @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_STARTUP_PREFLIGHT"] != nil))
+    func invalidatedAppEvidenceStopsBeforeRAMExecution() async throws {
+        let trial = try await SNESStartupTrialFixtureCache.shared.trial(), spy = StartupTrialFELSpy(trial: trial, fault: "none")
+        let flag = TrialValidationFlag(), service = FELService(makeSession: { spy })
+        await #expect(throws: (any Error).self) {
+            try await service.memboot(startupTrial: trial, progress: { status, _ in
+                if status == "RAM images verified; requesting recovery boot…" { flag.invalidate() }
+            }, validateInputs: { try flag.check() })
+        }
+        let events = await spy.events
+        #expect(events.contains("dram")); #expect(!events.contains("execute")); #expect(events.last == "close")
+    }
     @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_STARTUP_PREFLIGHT"] != nil),arguments:["none","chip","late-chip","readback","read-error","board","execute"])
     func checksChipBeforeUploadAndBeforeOneRAMExecution(_ fault:String) async throws {
         let trial=try await SNESStartupTrialFixtureCache.shared.trial(),spy=StartupTrialFELSpy(trial:trial,fault:fault)
@@ -56,4 +68,10 @@ struct SNESStartupTrialBootTests {
         if fault=="chip" || fault=="board" {#expect(await spy.uploads.isEmpty);#expect(events.contains("dram")==false)}
         if fault=="none" {#expect(await spy.sidReads==2);#expect(await spy.uploads[UInt32(TRANSFER_BASE_M)]==trial.image)}
     }
+}
+private final class TrialValidationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var invalid = false
+    func invalidate() { lock.lock(); defer { lock.unlock() }; invalid = true }
+    func check() throws { lock.lock(); defer { lock.unlock() }; if invalid { throw SNESRuntimeBinding.failure() } }
 }

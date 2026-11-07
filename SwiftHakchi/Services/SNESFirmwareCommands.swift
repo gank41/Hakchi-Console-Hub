@@ -38,10 +38,10 @@ enum SNESFirmwareCommands {
     }
     private static func hashes(_ m:SNESFirmwareMaterial)->String {
         #"""
-        test "$("$B" wc -c < "$H" | "$B" tr -d '[:space:]')" = 1594072 || exit 65
+        test "$("$B" wc -c < "$H" | "$B" tr -d '[:space:]')" = \#(m.writer.bytes.count) || exit 65
         test "$("$B" wc -c < "$P" | "$B" tr -d '[:space:]')" = 14680088 || exit 65
         value=$("$B" sha256sum "$H") || exit 65
-        test "${value%% *}" = '\#(SNESBoundedWriteHelper.sha256)' || exit 65
+        test "${value%% *}" = '\#(m.writer.digest)' || exit 65
         value=$("$B" sha256sum "$P") || exit 66
         test "${value%% *}" = '\#(BackupManifest.digest(m.geometry+m.preimage+m.target))' || exit 66
         """# + "\n"

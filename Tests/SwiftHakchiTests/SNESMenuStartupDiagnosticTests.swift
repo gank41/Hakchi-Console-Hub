@@ -12,7 +12,7 @@ actor MenuStartupTrialFake:SNESStartupTrialIO {
   device = .init(vendorID:0x1f3a,productID:0xefe8,deviceVersion:expected.deviceVersion,deviceClass:0,locationID:42,product:SNESStartupTrialUSBPolicy.product,registryEntryID:2)
  }
  func inventory()->[RecoveryProbeUSBDevice] {[booted ? device:startupTrialFEL]}
- func boot(expected:RecoveryProbeUSBDevice) {events.append("boot");booted=true}
+ func boot(expected:RecoveryProbeUSBDevice,validateInputs:@escaping @Sendable () throws -> Void) throws {try validateInputs();events.append("boot");booted=true;try validateInputs()}
  func connect(expected:RecoveryProbeUSBDevice) {#expect(expected==device);events.append("connect")}
  func report(challenge:UUID)->Data {
   Data(String(decoding:startupTrialReportFixture(challenge:challenge,hwid:expected.hwid,runtime:expected.runtimeSHA256,wrapper:expected.wrapperSHA256),as:UTF8.self).replacingOccurrences(of:"MOUNTS_END",with:"tmpfs /etc/init.d/S81clover-mcp tmpfs rw 0 0\nMOUNTS_END").utf8)

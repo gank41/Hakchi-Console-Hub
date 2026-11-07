@@ -54,6 +54,21 @@ struct SNESRecoveryMaterial: Sendable {
             throw RecoveryProbeError.refused("This backup belongs to a different console. Choose this console’s own recovery backup.")
         }
     }
+    /// A console can have several backups with the same hardware ID. Match
+    /// the captured evidence and all recovery bytes, not just that identity.
+    func requireExactSource(_ original: SNESRecoveryMaterial) throws {
+        guard try matchesExactSource(original) else { throw SNESOfflineSource.failure() }
+    }
+    func matchesExactSource(_ original: SNESRecoveryMaterial) throws -> Bool {
+        try revalidate(); try original.revalidate()
+        guard isPackage, !original.isPackage, expectedHWID == original.expectedHWID,
+              files == original.files,
+              let saved = try JSONSerialization.jsonObject(with: sourceManifest) as? [String: Any],
+              let source = try JSONSerialization.jsonObject(with: original.sourceManifest) as? [String: Any],
+              let savedCapture = saved["capture"] as? NSDictionary,
+              let sourceCapture = source["capture"] as? [String: Any] else { return false }
+        return savedCapture.isEqual(to: sourceCapture)
+    }
     func revalidate() throws {
         try source.revalidate()
         if isPackage { _ = try Self.loadPackage(directory: source.directoryURL) }

@@ -1,8 +1,23 @@
 import Foundation
 import Testing
+import SwiftHakchiCore
 @testable import SwiftHakchi
 
 struct SNESFirmwareSourceSealTests {
+    @Test func pinsDigestToTheSealedDirectoryAndHelperIdentities() throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("source"), helperDirectory = root.appendingPathComponent("helpers")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: helperDirectory, withIntermediateDirectories: false)
+        let manifest = directory.appendingPathComponent("manifest.json"), helper = helperDirectory.appendingPathComponent("reader")
+        let bytes = Data([1, 2, 3]), tool = Data([4, 5]); try bytes.write(to: manifest); try tool.write(to: helper)
+        let seal = try SNESFirmwareSourceSeal.capture(directories: [directory], files: [helper])
+        try seal.requireFileDigest(manifest, sha256: BackupManifest.digest(bytes), maximum: 65536)
+        try seal.requireFileDigest(helper, sha256: BackupManifest.digest(tool), maximum: 65536)
+        #expect(throws: (any Error).self) { try seal.requireFileDigest(manifest, sha256: String(repeating: "0", count: 64), maximum: 65536) }
+        try FileManager.default.removeItem(at: manifest); try bytes.write(to: manifest)
+        #expect(throws: (any Error).self) { try seal.requireFileDigest(manifest, sha256: BackupManifest.digest(bytes), maximum: 65536) }
+    }
     @Test(arguments:["none","content","mtime-restored","replace","link","extra","directory-link","parent-extra"])
     func tracksSourceIdentityAndChangesWithoutHashingWholeBackups(_ fault:String)throws {
         let root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}

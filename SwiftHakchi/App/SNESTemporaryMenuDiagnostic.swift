@@ -60,6 +60,7 @@ enum SNESTemporaryMenuDiagnostic {
                 captured = result
                 destination = try await store.saveSNESTemporaryMenuResult(result, menu: menu)
             } catch {
+                if error is RecoverySnapshotCleanupError { throw error }
                 if error is CancellationError || Task.isCancelled { throw CancellationError() }
                 let failure: SNESTemporaryMenuFailure
                 if let existing = error as? SNESTemporaryMenuFailure { failure = existing }

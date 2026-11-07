@@ -2,14 +2,16 @@
 
 This is a work-in-progress Apple Silicon macOS app for managing classic mini-consoles & libraries, built with Swift and SwiftUI. This project continues [Swift Hakchi2](https://github.com/mattackerman808/swift-hakchi2), a native macOS rewrite inspired by [Hakchi2 CE](https://github.com/TeamShinkansen/Hakchi2-CE).
 
-> **Development preview:** The project has prepared an originally unmodified US SNES Classic and added games to it during supervised development. This downloadable preview can prepare a backup and sync a compatible, prepared SNES, but the complete first-time installation workflow is not yet available as a one-click app feature. See the model-specific status below.
+Hakchi Console Hub is a GitHub fork of Swift Hakchi2. Hakchi2 CE is a community fork of [ClusterM's original Hakchi2](https://github.com/ClusterM/hakchi2). These are separate GitHub fork networks, and we credit both the original project and the projects that continued its work.
+
+> **Development preview — use at your own risk:** An originally unmodified US SNES Classic was prepared and games were added during supervised development. This preview includes newer setup and recovery tools, but the complete first-time app workflow has not yet been independently verified on a fresh console. Keep backups in a safe place and review the limitations below before making changes.
 
 ## Supported consoles and status
 
 | Console | Current status |
 | --- | --- |
-| NES Classic (USA) | Library management and synchronization have been exercised on an already-modified console. This preview does not yet provide a validated first-time installation workflow. |
-| SNES Classic (USA) | An originally unmodified console was prepared during supervised development; added games, folders, artwork and native sync were tested on that console. This preview can prepare a backup and sync a compatible, prepared console. Its complete first-time installation and restoration workflows are not yet available as general app features. |
+| NES Classic (USA) | Library management and synchronization were exercised on an already-modified console during development. Some older device-specific operations are unavailable in this public preview; first-time setup is not validated. |
+| SNES Classic (USA) | A stock console was prepared during supervised development; added games, folders, artwork and native sync worked on that console. The app includes guided setup, backup and recovery steps, but the complete first-time and replacement-console workflows have not been verified end to end on separate stock hardware. |
 | Famicom Mini, Super Famicom Mini, European models | Library and console choices exist, but hardware operations are not generally verified. |
 | Sega Genesis / Mega Drive Mini | Library support is experimental; console setup and synchronization are not ready. |
 
@@ -24,8 +26,18 @@ Consoles of the same model generally follow the same basic process, but the app 
 - Search for game metadata and artwork using supported providers.
 - Manage cheat codes and create a separate patched game copy where supported. Cheat availability and patching vary by platform and game.
 - Review available console restore options. Their availability depends on the console, its setup and verified recovery files.
+- Copy and verify a library backup to another folder or drive, including added game files and saved data captured in that backup. Review the experimental replacement-console options separately; copying a backup does not itself restore a console.
+- Choose simpler instructions or show more detail, check for app updates, and export diagnostic logs for troubleshooting.
 
 Firmware installation, memboot, and some recovery and module operations are disabled or limited in this preview. Third-party downloaded cheat-code catalogs are not bundled in this source snapshot; users can supply their own catalog where supported. The app does not include personal game files, console backups, or save data. Obtain your own games and keep your own backups.
+
+## Current limitations
+
+- **First-time setup:** SNES setup steps are available for review, but the full app-led process still needs end-to-end testing on another stock console. A startup backup is not necessarily original stock software if the console was previously modified. First-time NES setup has not been validated.
+- **Backups and recovery:** A verified library backup can be copied to another Mac. Restoring games and progress to a replacement SNES remains experimental and has not been tested between two physical consoles; not all save layouts are supported. Startup-software recovery is separate from library and save restoration. Preserve each console's own recovery files.
+- **NES device-specific operations:** Some legacy operations were tied to the development console and remain unavailable in this public preview. Do not treat the earlier NES hardware test as validation of those operations in this build.
+- **Other console models:** Genesis / Mega Drive setup and synchronization are not ready; Famicom, Super Famicom and European hardware operations need further verification.
+- **Additional emulators:** Games requiring the experimental SNES compatibility emulator cannot yet be synced through the app. Module management and some other advanced tools are incomplete.
 
 ## Requirements
 
@@ -34,7 +46,7 @@ Firmware installation, memboot, and some recovery and module operations are disa
 
 ## Download
 
-Download the DMG from the [0.2.1 preview release](https://github.com/gank41/Hakchi-Console-Hub/releases/tag/v0.2.1-preview), open it, and drag Hakchi Console Hub into Applications. The preview is experimental: read the console status above before connecting or changing a console.
+Download the DMG from the [0.2.2 preview release](https://github.com/gank41/Hakchi-Console-Hub/releases/tag/v0.2.2-preview), open it, and drag Hakchi Console Hub into Applications. The preview is experimental: read the console status above before connecting or changing a console.
 
 This preview is not signed with a Developer ID and has not been notarized by Apple. macOS may block it or display an unidentified-developer warning. See [Apple's guidance for opening apps safely](https://support.apple.com/102445) before deciding whether to open it. The preview does not contain game ROMs or personal cheat-code catalogs.
 
@@ -57,7 +69,9 @@ For a fresh configuration, the default workspace is `~/Library/Application Suppo
 3. Review the proposed games, folder structure, compatibility messages and backup before proceeding. Follow the app's staged instructions and test the updated menu before finishing a sync.
 4. Keep recovery files in a safe location. Do not assume that a backup from a different console or region is suitable for yours.
 
-Some screens and tools remain experimental. Do not use the app to install firmware on an untested device or assume that every game, save format, accessory or console revision is supported.
+See the [quick-start guide](docs/QUICK-START.md) and the [replacement-console notes](docs/SNES-REPLACEMENT-CONSOLE-MIGRATION.md) for more detail about backups and current limitations.
+
+Some screens and tools remain experimental. Use the preview at your own risk, keep your backups, and check the current status for your console and the features you want to try.
 
 ## How it works
 

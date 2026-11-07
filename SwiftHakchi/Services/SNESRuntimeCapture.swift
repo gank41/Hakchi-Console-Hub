@@ -65,6 +65,10 @@ struct SNESRuntimeMaterial: Sendable {
     let observation: RecoveryProbeObservation
     let directoryURL: URL?
     private let manifestSHA256: String?
+    func requireReceipt(_ receipt: SNESSetupRecordReceipt) throws {
+        guard receipt.kind == .runtime, receipt.directory == directoryURL,
+              receipt.manifestSHA256 == manifestSHA256 else { throw SNESRuntimeBinding.failure() }
+    }
     init(binding: SNESRuntimeBinding, frame: SNESRuntimeFrame, before: RecoveryProbeUSBDevice,
          after: RecoveryProbeUSBDevice, observation: RecoveryProbeObservation,
          directoryURL: URL? = nil, manifestSHA256: String? = nil) {

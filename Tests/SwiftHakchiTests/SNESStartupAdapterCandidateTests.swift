@@ -12,6 +12,76 @@ func privateStartupAdapter() throws -> SNESStartupAdapterCandidate? {
 }
 @Suite(.serialized)
 struct SNESStartupAdapterCandidateTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_STARTUP_CANDIDATE"] != nil))
+    func firstInstallRejectsBackupFromDifferentSetupWithoutBreakingLegacyReopen() throws {
+        let env = ProcessInfo.processInfo.environment
+        let candidatePath = try #require(env["SWIFTHAKCHI_SNES_STARTUP_CANDIDATE"])
+        let dataPath = try #require(env["SWIFTHAKCHI_SNES_CURRENT_DATA"])
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let candidate = root.appendingPathComponent("SNES-Startup-Candidate-" + UUID().uuidString)
+        let data = root.appendingPathComponent("SNES-Current-Data-" + UUID().uuidString)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: candidatePath), to: candidate)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: dataPath), to: data)
+        let dataManifest = data.appendingPathComponent("manifest.json")
+        var dataObject = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: dataManifest)) as? [String: Any])
+        var binding = try #require(dataObject["binding"] as? [String: Any])
+        binding["sourceSnapshot"] = "SNES-US-Setup-11111111-1111-1111-1111-111111111111"
+        dataObject["binding"] = binding
+        try JSONSerialization.data(withJSONObject: dataObject, options: [.sortedKeys]).write(to: dataManifest)
+        let candidateManifest = candidate.appendingPathComponent("manifest.json")
+        var candidateObject = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: candidateManifest)) as? [String: Any])
+        candidateObject["currentDataPath"] = data.path
+        try JSONSerialization.data(withJSONObject: candidateObject, options: [.sortedKeys]).write(to: candidateManifest)
+        let legacy = try SNESStartupAdapterCandidate.load(directory: candidate)
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireFirstInstallBackup(candidate: legacy) }
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_CURRENT_DATA"] != nil))
+    @MainActor func appPreparesFirstInstallCandidateFromMatchedSavedFilesWithoutConsole() async throws {
+        let env = ProcessInfo.processInfo.environment
+        func path(_ suffix: String) throws -> URL { URL(fileURLWithPath: try #require(env["SWIFTHAKCHI_SNES_" + suffix])) }
+        func receipt(_ kind: SNESSetupRecordReceipt.Kind, _ url: URL) throws -> SNESSetupRecordReceipt {
+            SNESSetupRecordReceipt(kind: kind, directory: url, manifestSHA256: BackupManifest.digest(try Data(contentsOf: url.appendingPathComponent("manifest.json"))))
+        }
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let backup = try path("SETUP"), startup = try path("PREPARATION"), support = try path("MENU_SUPPORT")
+        let components = try path("COMPONENTS"), runtime = try path("RUNTIME"), data = try path("CURRENT_DATA")
+        let chain = try SNESSetupRecordChain(startup: receipt(.startup, startup), support: receipt(.menuSupport, support), components: receipt(.components, components))
+        let store = try RecoveryBootSnapshotStore(root: root)
+        let recovery = try await store.saveSNESRecoveryMaterial(SNESRecoveryMaterial.load(setup: backup))
+        let helpers = try await store.saveSNESPortableHelpers()
+        let config = AppConfig(); config.workspacePath = root.path; config.backupDirectoryPath = root.path; config.lastConsoleType = .snesUsa
+        let app = AppState(startDeviceMonitoring: false, config: config, saveConfiguration: {},
+            checkRecoveryHost: { Issue.record("Offline preparation accessed the console") })
+        app.isPreparingSync = true
+        let dataReceipt = SNESDataSnapshotReceipt(directory: data, manifestSHA256: BackupManifest.digest(try Data(contentsOf: data.appendingPathComponent("manifest.json"))))
+        let hmod = try Data(contentsOf: path("CLOVERSHELL")), busybox = try Data(contentsOf: path("BUSYBOX"))
+        let result = try await app.prepareSNESStartupCandidate(backup: receipt(.backup, backup), recovery: recovery, helpers: helpers, chain: chain,
+            data: dataReceipt, runtime: receipt(.runtime, runtime), progress: { _ in }, loadTools: {
+                try await SNESStartupToolInputs.acquire(fetch: { url, _ in url.lastPathComponent == "busybox" ? busybox : hmod })
+            })
+        #expect(result.kind == .candidate)
+        let candidate = try SNESStartupAdapterCandidate.load(directory: result.directory)
+        #expect(!candidate.hasMenuSupport)
+        _ = try NativeSNESStartupPreflightIO(candidate: candidate)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_CURRENT_DATA"] != nil))
+    func candidateExportReturnsVerifiedReceiptAndRemovesCompletionOnFailure() async throws {
+        let candidate = try #require(try privateStartupAdapter())
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = try RecoveryBootSnapshotStore(root: root)
+        let receipt = try await store.saveSNESStartupCandidateWithReceipt(candidate)
+        #expect(receipt.kind == .candidate)
+        #expect(receipt.manifestSHA256 == BackupManifest.digest(try Data(contentsOf: receipt.directory.appendingPathComponent("manifest.json"))))
+        #expect(try SNESStartupAdapterCandidate.load(directory: receipt.directory).image == candidate.image)
+        do {
+            _ = try await store.saveSNESStartupCandidateWithReceipt(candidate, verify: { _ in throw SNESRuntimeBinding.failure() })
+            Issue.record("A failing final verifier must not return a completed candidate")
+        } catch { }
+        let directories = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        #expect(directories.count == 2)
+        let incomplete = try #require(directories.first(where: { $0 != receipt.directory }))
+        #expect(!FileManager.default.fileExists(atPath: incomplete.appendingPathComponent("manifest.json").path))
+    }
     @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_XZ_CANDIDATE"] != nil))
     func preservesHistoricalXZForRecoveryEvidenceReconstruction() throws {
         let env=ProcessInfo.processInfo.environment
@@ -73,6 +143,15 @@ struct SNESStartupAdapterCandidateTests {
             try bytes.write(to:folder.appendingPathComponent(name));try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:folder.appendingPathComponent(name).path)
         }
         #expect(try SNESStartupAdapterCandidate.load(directory:folder).image==candidate.image)
+        #expect(try SNESStartupAdapterCandidate.load(directory:folder, expectedManifestSHA256:BackupManifest.digest(exported.manifest)).image==candidate.image)
+        #expect(throws:(any Error).self) { try SNESStartupAdapterCandidate.load(directory:folder, expectedManifestSHA256:String(repeating:"0",count:64)) }
+        let receipt=SNESSetupRecordReceipt(kind:.candidate,directory:folder,manifestSHA256:BackupManifest.digest(exported.manifest))
+        try AppState.requireSavedSNESCandidate(receipt,image:candidate.image)
+        let wrong=SNESSetupRecordReceipt(kind:.candidate,directory:folder,manifestSHA256:String(repeating:"0",count:64))
+        #expect(throws:(any Error).self) { try AppState.requireSavedSNESCandidate(wrong,image:candidate.image) }
+        let imageURL=folder.appendingPathComponent("startup.img");var changed=candidate.image;changed[2048]^=1;try changed.write(to:imageURL)
+        #expect(throws:(any Error).self) { try AppState.requireSavedSNESCandidate(receipt,image:candidate.image) }
+        try candidate.image.write(to:imageURL)
         let manifest=folder.appendingPathComponent("manifest.json")
         var object=try #require(JSONSerialization.jsonObject(with:exported.manifest) as? [String:Any]);object["bootEligible"]=true
         try JSONSerialization.data(withJSONObject:object).write(to:manifest)

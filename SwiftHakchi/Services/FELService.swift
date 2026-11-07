@@ -69,14 +69,15 @@ actor FELService: FELBooting {
                            validateSource: { try alienTrial.validateCurrent() })
     }
 
-    func memboot(startupTrial: PreparedSNESStartupTrial, progress: (@Sendable (String, Double) -> Void)? = nil) async throws {
+    func memboot(startupTrial: PreparedSNESStartupTrial, progress: (@Sendable (String, Double) -> Void)? = nil,
+                 validateInputs: @escaping @Sendable () throws -> Void = {}) async throws {
         try acquire(); defer { busy = false }
         // Reconstructing historical evidence must remain possible for stock recovery.
         // Refuse unsupported execution here, before creating or opening a USB session.
         try SNESColdBootPolicy.requireSupportedImage(startupTrial.image)
-        try startupTrial.validateCurrent()
+        try startupTrial.validateCurrent(); try validateInputs()
         try await transfer(fes1: startupTrial.fes1, uboot: startupTrial.uboot, image: startupTrial.image, progress: progress,
-            expectedHWID: startupTrial.expectedHWID, validateSource: { try startupTrial.validateCurrent() })
+            expectedHWID: startupTrial.expectedHWID, validateSource: { try startupTrial.validateCurrent(); try validateInputs() })
     }
 
     private func transfer(fes1: Data, uboot: Data, image: Data, progress: (@Sendable (String, Double) -> Void)?,

@@ -17,7 +17,7 @@ struct SNESCompatibilityManagerInventory {
         return command
     }
     static func parse(_ data:Data,game:Game,source:SNESLibraryROMSource) throws -> Observation {
-        guard (10...(10+16*(2+2165))).contains(data.count) else {throw SNESLibraryMenu.failure()}
+        guard (10...(10+16*(2+SNESRecoveryBinding.maximumManagerRecordBytes))).contains(data.count) else {throw SNESLibraryMenu.failure()}
         _ = try SNESCompatibilityLaunchRequest.prepare(game:game,source:source,session:Data([1]+Array(repeating:0,count:15)),epoch:1)
         let bytes=[UInt8](data)
         guard bytes.starts(with:Array("HCMINV2\0".utf8)) else {throw SNESLibraryMenu.failure()}
@@ -35,8 +35,18 @@ struct SNESCompatibilityManagerInventory {
                       sessions.insert(String(workspace.dropFirst(11))).inserted else {throw SNESLibraryMenu.failure()}
                 incomplete.append(workspace);offset+=length;continue
             }
-            guard (119...2165).contains(length) else {throw SNESLibraryMenu.failure()}
-            let item=try SNESRecoveryBinding.observeConsoleManagerScreenshotRecord(Data(bytes[offset..<(offset+length)]),game:game,source:source)
+            guard (119...SNESRecoveryBinding.maximumManagerRecordBytes).contains(length) else {throw SNESLibraryMenu.failure()}
+            let record=Data(bytes[offset..<(offset+length)])
+            let item:SNESRecoveryBinding.ObservedManagerScreenshotSession
+            if record.starts(with:Data("HCSESS1\0".utf8)) {
+                guard record.count==119,record.suffix(4)==Data(repeating:0,count:4) else {throw SNESLibraryMenu.failure()}
+                let request=try SNESCompatibilityLaunchRequest.observeConsoleFrame(Data(record[8..<115]),game:game,source:source)
+                item = .init(request:request,paths:.init(savePath:nil,imagePath:nil))
+            } else if record.starts(with:Data("HCMGR2\0\0".utf8)) || record.starts(with:Data("HCMGR3\0\0".utf8)) {
+                item=try SNESRecoveryBinding.observeConsoleManagerTimeRecord(record,game:game,source:source)
+            } else {
+                item=try SNESRecoveryBinding.observeConsoleManagerScreenshotRecord(record,game:game,source:source)
+            }
             let session=item.request.frame[83..<99].map{String(format:"%02x",$0)}.joined()
             guard sessions.insert(session).inserted else {throw SNESLibraryMenu.failure()}
             result.append(item);offset+=length
@@ -51,6 +61,7 @@ struct SNESCompatibilityManagerInventory {
 /// Descriptor contents and hashes cannot authenticate the caller or a console.
 /// This does not establish stopped writers or authorize restore or deletion.
 struct SNESRecoveryBinding {
+    static let maximumManagerRecordBytes = 125 + 5 * 1023
     struct Region: Equatable {
         let path:String
         let type:UInt32
@@ -104,10 +115,60 @@ struct SNESRecoveryBinding {
         return !path.hasSuffix("/")
     }
     struct ManagerScreenshotPaths:Equatable,Sendable {
-        let savePath:String?, imagePath:String?
+        let savePath:String?, imagePath:String?, loadPath:String?
+        init(savePath:String?,imagePath:String?,loadPath:String? = nil) {
+            self.savePath=savePath;self.imagePath=imagePath;self.loadPath=loadPath
+        }
+    }
+    struct ManagerTimePaths:Equatable,Sendable {
+        let loadPath:String?, savePath:String?
     }
     struct ObservedManagerScreenshotSession:Sendable {
-        let request:SNESCompatibilityLaunchRequest, paths:ManagerScreenshotPaths
+        let request:SNESCompatibilityLaunchRequest, paths:ManagerScreenshotPaths, time:ManagerTimePaths
+        init(request:SNESCompatibilityLaunchRequest,paths:ManagerScreenshotPaths,time:ManagerTimePaths = .init(loadPath:nil,savePath:nil)) {
+            self.request=request;self.paths=paths;self.time=time
+        }
+    }
+    /// Play-time and checkpoint paths are untrusted session correlation data.
+    /// This neither opens a path nor authorizes screenshot or time publication.
+    static func observeConsoleManagerTimeRecord(_ raw:Data,game:Game,source:SNESLibraryROMSource) throws -> ObservedManagerScreenshotSession {
+        let bytes=[UInt8](raw)
+        guard (123...maximumManagerRecordBytes).contains(bytes.count),
+              bytes.starts(with:Array("HCMGR2\0\0".utf8)) || bytes.starts(with:Array("HCMGR3\0\0".utf8)) else {throw failure()}
+        let request=try SNESCompatibilityLaunchRequest.observeConsoleFrame(Data(bytes[8..<115]),game:game,source:source)
+        let (paths,time)=try observeManagerTimeRecord(raw,request:request)
+        return .init(request:request,paths:paths,time:time)
+    }
+    /// The selected request supplies the independently checked game, ROM and
+    /// exact session. Time paths remain observations, not write authorization.
+    private static func observeManagerTimeRecord(_ raw:Data,request:SNESCompatibilityLaunchRequest) throws -> (ManagerScreenshotPaths,ManagerTimePaths) {
+        let bytes=[UInt8](raw),frame=try SNESCompatibilityPreflightCommand.prepare(request:request,helperSHA256:String(repeating:"0",count:64)).input
+        let selected=bytes.starts(with:Array("HCMGR3\0\0".utf8)), header=selected ? 125 : 123
+        guard (header...maximumManagerRecordBytes).contains(bytes.count),
+              selected || bytes.starts(with:Array("HCMGR2\0\0".utf8)),Data(bytes[8..<115])==frame else {throw failure()}
+        let game=String(decoding:frame[8..<19],as:UTF8.self)
+        let sizes=(0..<(selected ? 5 : 4)).map { Int(bytes[115+2*$0]) | (Int(bytes[116+2*$0]) << 8) }
+        guard sizes.allSatisfy({$0<1024}),(selected ? sizes[4]>0 : (sizes[2]>0 || sizes[3]>0)),header+sizes.reduce(0,+)==bytes.count else {throw failure()}
+        var offset=header,fields=[String]()
+        for size in sizes {
+            guard let value=String(bytes:bytes[offset..<(offset+size)],encoding:.ascii) else {throw failure()}
+            guard value.isEmpty || managerPath(value,game:game) else {throw failure()}
+            fields.append(value);offset+=size
+        }
+        let checkpoints=fields[0...1].filter{!$0.isEmpty}.map{$0.lowercased()}
+        guard Set(checkpoints).count==checkpoints.count else {throw failure()}
+        let base="/var/lib/clover/profiles/0/\(game)/hakchi/\(SNESCompatibilityCorePackage.engineID)/\(request.source.sha256)"
+        let protected=[base+"/battery.srm",base+"/battery.rtc"].map{$0.lowercased()}
+        let stateInput=selected ? fields[4] : ""
+        if !stateInput.isEmpty {
+            guard stateInput.lowercased() != fields[1].lowercased(),!protected.contains(stateInput.lowercased()) else {throw failure()}
+        }
+        for time in fields[2...3] where !time.isEmpty {
+            guard !checkpoints.contains(time.lowercased()),!protected.contains(time.lowercased()),time.lowercased() != stateInput.lowercased() else {throw failure()}
+        }
+        try request.verifySource()
+        return (.init(savePath:fields[0].isEmpty ? nil:fields[0],imagePath:fields[1].isEmpty ? nil:fields[1],loadPath:stateInput.isEmpty ? nil:stateInput),
+                .init(loadPath:fields[2].isEmpty ? nil:fields[2],savePath:fields[3].isEmpty ? nil:fields[3]))
     }
     /// Correlates a discovered record to a local game and ROM. The session
     /// and paths remain untrusted observations; this never authorizes writes.
@@ -139,10 +200,16 @@ struct SNESRecoveryBinding {
     /// Compares a console manager record to paths reviewed independently by
     /// the caller. This does not authenticate the console or authorize writes.
     static func validateManagerScreenshotRecord(_ raw:Data,request:SNESCompatibilityLaunchRequest,
-                                                expectedSavePath:String?,expectedImagePath:String) throws -> Bool {
-        let observed=try observeManagerScreenshotRecord(raw,request:request)
-        guard observed.savePath==expectedSavePath,observed.imagePath==expectedImagePath else {throw failure()}
+                                                expectedSavePath:String?,expectedImagePath:String,
+                                                expectedLoadPath:String? = nil) throws -> Bool {
+        let observed=try observeManagerCheckpointPaths(raw,request:request)
+        guard observed.savePath==expectedSavePath,observed.imagePath==expectedImagePath,
+              observed.loadPath==expectedLoadPath else {throw failure()}
         return true
+    }
+    private static func observeManagerCheckpointPaths(_ raw:Data,request:SNESCompatibilityLaunchRequest) throws -> ManagerScreenshotPaths {
+        if raw.starts(with:Data("HCMGR2\0\0".utf8)) || raw.starts(with:Data("HCMGR3\0\0".utf8)) {return try observeManagerTimeRecord(raw,request:request).0}
+        return try observeManagerScreenshotRecord(raw,request:request)
     }
     private static func validateDescriptor(_ descriptor:Data,gameCode:String,romSHA256:String,
                                            session:Data,epoch:UInt64,regions:[Region]) throws {
@@ -167,6 +234,54 @@ struct SNESRecoveryBinding {
             expected += "\(region.type) \(region.device) \(region.inode) \(path)\n"
         }
         guard let canonical=expected.data(using:.utf8),canonical.count<20_000,descriptor==canonical else {throw failure()}
+    }
+    /// Correlates archived raw state with a reviewed session and independent digest.
+    /// This does not establish console identity or authorize restore.
+    static func validateStateArchive(descriptor: Data, managerRecord: Data, request: SNESCompatibilityLaunchRequest, game: Game,
+                                     device: UInt64, inode: UInt64, state: Data, expectedSHA256: String,
+                                     expectedManagerLoadPath: String? = nil) throws -> SNESCompatibilitySave {
+        let frame = Array(try SNESCompatibilityPreflightCommand.prepare(request: request, helperSHA256: String(repeating: "0", count: 64)).input)
+        let code = String(decoding: frame[8..<19], as: UTF8.self), token = Data(frame[83..<99])
+        let epoch = (0..<8).reduce(UInt64(0)) { $0 | UInt64(frame[99+$1]) << (8*$1) }
+        let hex = token.map { String(format: "%02x", $0) }.joined(), record = [UInt8](managerRecord)
+        if record.starts(with: Array("HCSESS1\0".utf8)) {
+            guard expectedManagerLoadPath == nil, record.count == 119, Array(record[8..<115]) == frame, record.suffix(4).allSatisfy({ $0 == 0 }) else { throw failure() }
+        } else if record.starts(with: Array("HCMGR2\0\0".utf8)) || record.starts(with: Array("HCMGR3\0\0".utf8)) {
+            let (paths, _) = try observeManagerTimeRecord(managerRecord, request: request)
+            guard paths.loadPath == expectedManagerLoadPath else { throw failure() }
+        } else {
+            guard expectedManagerLoadPath == nil else { throw failure() }
+            _ = try observeManagerScreenshotRecord(managerRecord, request: request)
+        }
+        let path = "/var/lib/clover/profiles/0/\(code)/hakchi/\(SNESCompatibilityCorePackage.engineID)/\(request.source.sha256)/sessions/checkpoint-\(hex)/state-archive/state-captured"
+        guard game.code == code, inode > 0, (1...16*1024*1024).contains(state.count),
+              SNESDataSnapshotChunk.isDigest(expectedSHA256), BackupManifest.digest(state) == expectedSHA256 else { throw failure() }
+        try validateDescriptor(descriptor, gameCode: code, romSHA256: request.source.sha256, session: token, epoch: epoch,
+                               regions: [.init(path: path, type: 107, device: device, inode: inode)])
+        try request.verifySource()
+        let envelope = try SNESCompatibilitySave.create(payload: state, kind: .suspend, gameCode: code, romSHA256: request.source.sha256)
+        return try SNESCompatibilitySave.forLibraryRecovery(envelope.bytes, kind: .suspend, game: game, source: request.source)
+    }
+    /// Correlation and byte-integrity checks only; neither authorizes a restore.
+    static func validateRetainedTime(descriptor: Data, managerRecord: Data, request: SNESCompatibilityLaunchRequest,
+                                     device: UInt64, inode: UInt64, expectedLoadPath: String,
+                                     original: Data, expectedSHA256: String, expectedManagerLoadPath: String? = nil) throws -> Data {
+        let frame = try SNESCompatibilityPreflightCommand.prepare(request: request, helperSHA256: String(repeating: "0", count: 64)).input
+        let game = String(decoding: frame[8..<19], as: UTF8.self), token = Data(frame[83..<99])
+        let epoch = (0..<8).reduce(UInt64(0)) { $0 | UInt64(frame[99+$1]) << (8*$1) }
+        let hex = token.map { String(format: "%02x", $0) }.joined()
+        let path = "/var/lib/clover/profiles/0/\(game)/hakchi/\(SNESCompatibilityCorePackage.engineID)/\(request.source.sha256)/sessions/checkpoint-\(hex)/time-original"
+        let (paths, times) = try observeManagerTimeRecord(managerRecord, request: request)
+        var digits = [UInt8](original)
+        if digits.last == 10 { digits.removeLast() }
+        guard paths.loadPath == expectedManagerLoadPath, times.loadPath == expectedLoadPath, inode > 0, (1...20).contains(digits.count), original.count <= 21,
+              digits.allSatisfy({ (48...57).contains($0) }),
+              let decimal = String(bytes: digits, encoding: .ascii), UInt64(decimal) != nil,
+              SNESDataSnapshotChunk.isDigest(expectedSHA256), BackupManifest.digest(original) == expectedSHA256 else { throw failure() }
+        try validateDescriptor(descriptor, gameCode: game, romSHA256: request.source.sha256, session: token, epoch: epoch,
+                               regions: [.init(path: path, type: 106, device: device, inode: inode)])
+        try request.verifySource()
+        return original
     }
     /// Validates a read-only screenshot candidate against independently reviewed
     /// session metadata. Neither the digest nor the binding authenticates a
@@ -208,14 +323,15 @@ struct SNESRecoveryBinding {
     /// must still obtain authorization before any console write or deletion.
     static func validateRetainedScreenshot(descriptor:Data,managerRecord:Data,request:SNESCompatibilityLaunchRequest,
                                            regions:[Region],expectedRetainedPath:String,expectedManagerSavePath:String?,
-                                           expectedManagerImagePath:String,image:Data,expectedSHA256:String) throws -> Data {
+                                           expectedManagerImagePath:String,image:Data,expectedSHA256:String,
+                                           expectedManagerLoadPath:String? = nil) throws -> Data {
         let prepared=try SNESCompatibilityPreflightCommand.prepare(request:request,helperSHA256:String(repeating:"0",count:64))
         let game=String(decoding:prepared.input[8..<19],as:UTF8.self)
         let persistentParent="/var/lib/clover/profiles/0/\(game)/hakchi/\(SNESCompatibilityCorePackage.engineID)/\(request.source.sha256)"
         guard URL(fileURLWithPath:expectedRetainedPath).deletingLastPathComponent().path == persistentParent,
               expectedRetainedPath.lowercased() != expectedManagerImagePath.lowercased(),
               regions.filter({$0.type==100 && $0.path==expectedRetainedPath}).count==1 else {throw failure()}
-        try validateManagerScreenshotRecord(managerRecord,request:request,expectedSavePath:expectedManagerSavePath,expectedImagePath:expectedManagerImagePath)
+        _ = try validateManagerScreenshotRecord(managerRecord,request:request,expectedSavePath:expectedManagerSavePath,expectedImagePath:expectedManagerImagePath,expectedLoadPath:expectedManagerLoadPath)
         let result=try validateStagedScreenshot(descriptor:descriptor,request:request,regions:regions,
             expectedImagePath:expectedRetainedPath,image:image,expectedSHA256:expectedSHA256)
         try request.verifySource();return result
@@ -225,25 +341,25 @@ struct SNESRecoveryBinding {
     /// correlation only and never authorizes restore or cleanup.
     static func validateSessionRetainedScreenshot(descriptor:Data,managerRecord:Data,request:SNESCompatibilityLaunchRequest,
                                                   regions:[Region],expectedManagerSavePath:String?,expectedManagerImagePath:String,
-                                                  image:Data,expectedSHA256:String) throws -> Data {
+                                                  image:Data,expectedSHA256:String,expectedManagerLoadPath:String? = nil) throws -> Data {
         let prepared=try SNESCompatibilityPreflightCommand.prepare(request:request,helperSHA256:String(repeating:"0",count:64))
         let game=String(decoding:prepared.input[8..<19],as:UTF8.self)
         let token=prepared.input[83..<99].map{String(format:"%02x",$0)}.joined()
         let path="/var/lib/clover/profiles/0/\(game)/hakchi/\(SNESCompatibilityCorePackage.engineID)/\(request.source.sha256)/shot-\(token).png"
         return try validateRetainedScreenshot(descriptor:descriptor,managerRecord:managerRecord,request:request,
             regions:regions,expectedRetainedPath:path,expectedManagerSavePath:expectedManagerSavePath,
-            expectedManagerImagePath:expectedManagerImagePath,image:image,expectedSHA256:expectedSHA256)
+            expectedManagerImagePath:expectedManagerImagePath,image:image,expectedSHA256:expectedSHA256,expectedManagerLoadPath:expectedManagerLoadPath)
     }
     static func validateSessionRetainedState(descriptor:Data,managerRecord:Data,request:SNESCompatibilityLaunchRequest,game:Game,
                                              regions:[Region],expectedManagerSavePath:String,expectedManagerImagePath:String?,
-                                             state:Data,expectedSHA256:String) throws -> SNESCompatibilitySave {
+                                             state:Data,expectedSHA256:String,expectedManagerLoadPath:String? = nil) throws -> SNESCompatibilitySave {
         let prepared=try SNESCompatibilityPreflightCommand.prepare(request:request,helperSHA256:String(repeating:"0",count:64))
         let frame=prepared.input,code=String(decoding:frame[8..<19],as:UTF8.self),token=Data(frame[83..<99])
         let epoch=(0..<8).reduce(UInt64(0)) { $0 | UInt64(frame[99+$1]) << (8*$1) }
         let hex=token.map{String(format:"%02x",$0)}.joined()
         let path="/var/lib/clover/profiles/0/\(code)/hakchi/\(SNESCompatibilityCorePackage.engineID)/\(request.source.sha256)/state-\(hex).state"
-        let observed=try observeManagerScreenshotRecord(managerRecord,request:request),retainedStates=regions.filter{$0.type==101}
-        guard game.code==code,observed.savePath==expectedManagerSavePath,observed.imagePath==expectedManagerImagePath,
+        let observed=try observeManagerCheckpointPaths(managerRecord,request:request),retainedStates=regions.filter{$0.type==101}
+        guard game.code==code,observed.savePath==expectedManagerSavePath,observed.imagePath==expectedManagerImagePath,observed.loadPath==expectedManagerLoadPath,
               retainedStates.count==1,retainedStates[0].path==path,
               (1...16*1024*1024).contains(state.count),SNESDataSnapshotChunk.isDigest(expectedSHA256),
               BackupManifest.digest(state)==expectedSHA256 else {throw failure()}
@@ -271,14 +387,19 @@ struct SNESRecoveryBinding {
         try evidence.validate(request:request)
         return evidence.original
     }
-    /// Compare the frontend's two-region binding; the return value covers
-    /// battery SRAM only. RTC backup/recovery requires separate evidence.
+    /// Compare the frontend's save binding, optionally including the same
+    /// session's retained image. The result covers battery SRAM only.
     static func validateBackupEvidence(descriptor: Data, evidence: SNESCompatibilityBackupEvidence,
                                        request: SNESCompatibilityLaunchRequest, regions: [Region]) throws -> SNESCompatibilityBackupEvidence.Original {
         let base = "/var/lib/clover/profiles/0/\(evidence.gameCode)/hakchi/\(SNESCompatibilityCorePackage.engineID)/\(evidence.romSHA256)"
-        guard regions.count == 2, regions[0].type == 0, regions[0].path == base + "/battery.srm",
+        guard (regions.count == 2 || regions.count == 3), regions[0].type == 0, regions[0].path == base + "/battery.srm",
               regions[1].type == 1, regions[1].path == base + "/battery.rtc",
               regions[0].device == regions[1].device, regions[0].inode == regions[1].inode else { throw failure() }
+        if regions.count == 3 {
+            let token=evidence.session.map {String(format:"%02x",$0)}.joined()
+            guard regions[2].type==100,regions[2].path==base+"/shot-\(token).png",
+                  regions[2].device==regions[0].device,regions[2].inode==regions[0].inode else {throw failure()}
+        }
         try evidence.validate(request: request)
         try validateDescriptor(descriptor, gameCode: evidence.gameCode, romSHA256: evidence.romSHA256,
                                session: evidence.session, epoch: evidence.epoch, regions: regions)

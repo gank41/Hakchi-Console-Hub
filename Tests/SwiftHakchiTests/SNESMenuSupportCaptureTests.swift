@@ -35,6 +35,7 @@ actor MenuSupportFakeIO: SNESMenuSupportIO {
     func disconnect() async { await base.disconnect() }
     func readSupport() async throws -> Data {
         captures += 1
+        if fault == "task-cancel" { try await Task.sleep(for: .seconds(30)) }
         if fault == "final-source" && captures == 2 { try Data([1]).write(to: sourceURL.appendingPathComponent("startup.frame")) }
         if fault == "cancel" { throw CancellationError() }
         if fault == "transport" || fault == "empty" || (fault == "second-transport" && captures == 2) {
@@ -48,6 +49,20 @@ actor MenuSupportFakeIO: SNESMenuSupportIO {
 }
 @Suite(.serialized)
 struct SNESMenuSupportCaptureTests {
+    @Test func failedFinalPackageVerificationCannotLeaveCompleteManifest() async throws {
+        let root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}
+        guard let source=try await menuSupportSourceFixture(root:root) else { return }
+        let pins=try PinnedFELInputs.load(),inputs=RecoveryBootInputs(fes1:pins.fes1,uboot:pins.uboot,bootImage:pins.bootImage)
+        let result=try await SNESMenuSupportService(wait:{}).capture(source:source,inputs:inputs,io:MenuSupportFakeIO(source:source))
+        let store=try RecoveryBootSnapshotStore(root:root)
+        await #expect(throws:(any Error).self) {
+            try await store.saveSNESMenuSupport(result,verify:{_ in throw RecoveryProbeError.refused("verification failed")})
+        }
+        let folders=try FileManager.default.contentsOfDirectory(at:root,includingPropertiesForKeys:nil)
+            .filter{$0.lastPathComponent.hasPrefix("SNES-Menu-Support-")}
+        #expect(folders.count==1)
+        #expect(folders.allSatisfy{!FileManager.default.fileExists(atPath:$0.appendingPathComponent("manifest.json").path)})
+    }
     @Test(arguments: ["none", "inventory", "boot", "connect", "identity", "mounted-data", "nested-mount", "kernel", "second-kernel", "partitions", "truncated", "launcher", "transport", "second-transport", "empty", "changed", "cancel"])
     func oneSessionChecksSourceAndClosesOnEveryOutcome(fault: String) async throws {
         let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }

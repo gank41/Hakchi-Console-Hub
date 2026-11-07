@@ -33,10 +33,10 @@ actor NativeSNESStartupTrialIO:SNESStartupTrialIO {
     private var client:LegacyInspectionClient?
     init(trial:PreparedSNESStartupTrial){self.trial=trial}
     func inventory()throws->[RecoveryProbeUSBDevice] {try Task.checkCancellation();return try RecoveryProbeUSBRegistry.inventory()}
-    func boot(expected:RecoveryProbeUSBDevice) async throws {
+    func boot(expected:RecoveryProbeUSBDevice, validateInputs:@escaping @Sendable () throws -> Void) async throws {
         try trial.validateCurrent()
         let fel=FELService(makeSession:{IOKitFELSessionTransport(expected:expected)})
-        try await fel.memboot(startupTrial:trial,progress:{status,_ in print(status)})
+        try await fel.memboot(startupTrial:trial,progress:{status,_ in print(status)},validateInputs:validateInputs)
     }
     func connect(expected:RecoveryProbeUSBDevice) async throws {
         try trial.validateCurrent();_=try SNESStartupTrialUSBPolicy.nativeIdentity(expected)

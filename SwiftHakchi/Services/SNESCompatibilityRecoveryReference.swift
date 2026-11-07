@@ -1,17 +1,109 @@
 import Foundation
 
+/// Read-only captured-state evidence; the caller authenticates the console,
+/// excludes writers and supplies an independently retained digest.
+enum SNESStateArchiveObservation {
+    static func capture(managerRecord: Data, request: SNESCompatibilityLaunchRequest, game: Game, expectedSHA256: String,
+                        expectedManagerLoadPath: String? = nil,
+                        validate: @Sendable () async throws -> Void, read: @Sendable () async throws -> Data) async throws -> SNESCompatibilitySave {
+        try await validate(); let first = try await read()
+        guard first.count <= 16 * 1024 * 1024 + 24576 else { throw SNESLibraryMenu.failure() }
+        try await validate(); let second = try await read(); try await validate()
+        guard first == second else { throw SNESLibraryMenu.failure() }
+        let result = try parse(second, managerRecord: managerRecord, request: request, game: game, expectedSHA256: expectedSHA256, expectedManagerLoadPath: expectedManagerLoadPath)
+        try await validate(); try request.verifySource(); return result
+    }
+    static func parse(_ raw: Data, managerRecord: Data, request: SNESCompatibilityLaunchRequest, game: Game,
+                      expectedSHA256: String, expectedManagerLoadPath: String? = nil) throws -> SNESCompatibilitySave {
+        let failure = SNESLibraryMenu.failure()
+        guard raw.count <= 16 * 1024 * 1024 + 24576, request.frame.count == 107 else { throw failure }
+        let bytes = [UInt8](raw), prefix = Array("HC-STATE-ARCHIVE-1\n".utf8), footer = Array("HC-STATE-ARCHIVE-END\n".utf8)
+        guard bytes.starts(with: prefix), let end = bytes[prefix.count...].firstIndex(of: 10), end - prefix.count <= 120,
+              let header = String(bytes: bytes[prefix.count..<end], encoding: .ascii) else { throw failure }
+        let fields = header.split(separator: " ", omittingEmptySubsequences: false)
+        guard fields.count == 5, let device = UInt64(fields[0]), String(device) == fields[0],
+              let inode = UInt64(fields[1]), inode > 0, String(inode) == fields[1],
+              let descriptorLength = Int(fields[2]), (1..<20000).contains(descriptorLength), String(descriptorLength) == fields[2],
+              fields[3] == "1", let length = Int(fields[4]), (1...16*1024*1024).contains(length), String(length) == fields[4] else { throw failure }
+        var position = end + 1
+        guard descriptorLength <= bytes.count - position else { throw failure }
+        let descriptor = Data(bytes[position..<(position + descriptorLength)]); position += descriptorLength
+        guard position < bytes.count, let lineEnd = bytes[position...].firstIndex(of: 10), lineEnd - position <= 255,
+              let line = String(bytes: bytes[position..<lineEnd], encoding: .ascii) else { throw failure }
+        position = lineEnd + 1
+        let entry = line.split(separator: " ", omittingEmptySubsequences: false)
+        let token = Array(request.frame)[83..<99].map { String(format: "%02x", $0) }.joined()
+        guard entry.count == 6, entry[0] == "ENTRY", entry[1] == token,
+              entry[2].hasPrefix("checkpoint-"), entry[2].utf8.count == 43,
+              entry[2].dropFirst(11).utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              entry[3] == "state-captured", entry[4] == "2", entry[5] == "1",
+              length <= bytes.count - position, bytes.count - position - length == footer.count,
+              bytes.suffix(footer.count).elementsEqual(footer) else { throw failure }
+        return try SNESRecoveryBinding.validateStateArchive(descriptor: descriptor, managerRecord: managerRecord, request: request,
+            game: game, device: device, inode: inode, state: Data(bytes[position..<(position + length)]), expectedSHA256: expectedSHA256, expectedManagerLoadPath: expectedManagerLoadPath)
+    }
+}
+
+/// Read-only time evidence, compared with an independently retained digest.
+/// Callers must authenticate the console and exclude writers; no restore is authorized.
+enum SNESRetainedTimeObservation {
+    static func capture(managerRecord: Data, request: SNESCompatibilityLaunchRequest, expectedLoadPath: String,
+                        expectedSHA256: String, expectedManagerLoadPath: String? = nil, validate: @Sendable () async throws -> Void,
+                        read: @Sendable () async throws -> Data) async throws -> Data {
+        try await validate(); let first = try await read()
+        guard first.count <= 24576 else { throw SNESLibraryMenu.failure() }
+        try await validate(); let second = try await read(); try await validate()
+        guard first == second else { throw SNESLibraryMenu.failure() }
+        let result = try parse(second, managerRecord: managerRecord, request: request,
+                               expectedLoadPath: expectedLoadPath, expectedSHA256: expectedSHA256, expectedManagerLoadPath: expectedManagerLoadPath)
+        try await validate(); try request.verifySource()
+        return result
+    }
+    static func parse(_ raw: Data, managerRecord: Data, request: SNESCompatibilityLaunchRequest,
+                      expectedLoadPath: String, expectedSHA256: String, expectedManagerLoadPath: String? = nil) throws -> Data {
+        let failure = SNESLibraryMenu.failure()
+        guard raw.count <= 24576, request.frame.count == 107 else { throw failure }
+        let bytes = [UInt8](raw), prefix = Array("HC-RETAINED-TIME-1\n".utf8), footer = Array("HC-RETAINED-TIME-END\n".utf8)
+        guard bytes.starts(with: prefix), let end = bytes[prefix.count...].firstIndex(of: 10), end - prefix.count <= 120,
+              let header = String(bytes: bytes[prefix.count..<end], encoding: .ascii) else { throw failure }
+        let fields = header.split(separator: " ", omittingEmptySubsequences: false)
+        guard fields.count == 5, let device = UInt64(fields[0]), String(device) == fields[0],
+              let inode = UInt64(fields[1]), inode > 0, String(inode) == fields[1],
+              let descriptorLength = Int(fields[2]), (1..<20000).contains(descriptorLength), String(descriptorLength) == fields[2],
+              fields[3] == "1", let length = Int(fields[4]), (1...21).contains(length), String(length) == fields[4] else { throw failure }
+        var position = end + 1
+        guard descriptorLength <= bytes.count - position else { throw failure }
+        let descriptor = Data(bytes[position..<(position + descriptorLength)]); position += descriptorLength
+        guard position < bytes.count, let lineEnd = bytes[position...].firstIndex(of: 10), lineEnd - position <= 255,
+              let line = String(bytes: bytes[position..<lineEnd], encoding: .ascii) else { throw failure }
+        position = lineEnd + 1
+        let entry = line.split(separator: " ", omittingEmptySubsequences: false)
+        let token = request.frame[83..<99].map { String(format: "%02x", $0) }.joined()
+        guard entry.count == 6, entry[0] == "ENTRY", entry[1] == token,
+              entry[2].hasPrefix("checkpoint-"), entry[2].utf8.count == 43,
+              entry[2].dropFirst(11).utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              entry[3] == "time-original", entry[4] == "2", entry[5] == "1",
+              length <= bytes.count - position, bytes.count - position - length == footer.count,
+              bytes.suffix(footer.count).elementsEqual(footer) else { throw failure }
+        return try SNESRecoveryBinding.validateRetainedTime(descriptor: descriptor, managerRecord: managerRecord, request: request,
+            device: device, inode: inode, expectedLoadPath: expectedLoadPath,
+            original: Data(bytes[position..<(position + length)]), expectedSHA256: expectedSHA256, expectedManagerLoadPath: expectedManagerLoadPath)
+    }
+}
+
 /// Read-only image evidence; matching metadata is not proof of console
 /// identity, quiescent writers or authority to change a console.
 enum SNESRetainedImageObservation {
     static func capture(managerRecord: Data, request: SNESCompatibilityLaunchRequest, expectedManagerSavePath: String?,
                         expectedManagerImagePath: String, expectedSHA256: String,
+                        retired: Bool = false, expectedManagerLoadPath: String? = nil,
                         validate: @Sendable () async throws -> Void, read: @Sendable () async throws -> Data) async throws -> Data {
         try await validate(); let first = try await read()
         guard first.count <= 8 * 1024 * 1024 + 24576 else { throw SNESLibraryMenu.failure() }
         try await validate(); let second = try await read(); try await validate()
         guard first == second else { throw SNESLibraryMenu.failure() }
         let result = try parse(second, managerRecord: managerRecord, request: request, expectedManagerSavePath: expectedManagerSavePath,
-                               expectedManagerImagePath: expectedManagerImagePath, expectedSHA256: expectedSHA256)
+                               expectedManagerImagePath: expectedManagerImagePath, expectedSHA256: expectedSHA256, retired: retired, expectedManagerLoadPath: expectedManagerLoadPath)
         // Parsing and image decoding can take time while the connection
         // changes. Recheck its generation before returning this observation.
         try await validate()
@@ -19,17 +111,18 @@ enum SNESRetainedImageObservation {
         return result
     }
     static func parse(_ raw: Data, managerRecord: Data, request: SNESCompatibilityLaunchRequest,
-                      expectedManagerSavePath: String?, expectedManagerImagePath: String, expectedSHA256: String) throws -> Data {
+                      expectedManagerSavePath: String?, expectedManagerImagePath: String, expectedSHA256: String,
+                      retired: Bool = false, expectedManagerLoadPath: String? = nil) throws -> Data {
         let failure = SNESLibraryMenu.failure()
         guard raw.count <= 8 * 1024 * 1024 + 24576, request.frame.count == 107 else { throw failure }
-        let bytes = [UInt8](raw), prefix = Array("HC-RETAINED-IMAGE-1\n".utf8), footer = Array("HC-RETAINED-IMAGE-END\n".utf8)
+        let bytes = [UInt8](raw), prefix = Array((retired ? "HC-RETIRED-IMAGE-1\n" : "HC-RETAINED-IMAGE-1\n").utf8), footer = Array((retired ? "HC-RETIRED-IMAGE-END\n" : "HC-RETAINED-IMAGE-END\n").utf8)
         guard bytes.starts(with: prefix), let end = bytes[prefix.count...].firstIndex(of: 10), end - prefix.count <= 120,
               let header = String(bytes: bytes[prefix.count..<end], encoding: .ascii) else { throw failure }
         let fields = header.split(separator: " ", omittingEmptySubsequences: false)
         guard fields.count == 5, let device = UInt64(fields[0]), String(device) == fields[0],
               let inode = UInt64(fields[1]), inode > 0, String(inode) == fields[1],
               let descriptorLength = Int(fields[2]), (1..<20000).contains(descriptorLength), String(descriptorLength) == fields[2],
-              let entryCount = Int(fields[3]), (1...16).contains(entryCount), String(entryCount) == fields[3],
+              let entryCount = Int(fields[3]), (retired ? entryCount == 0 : (1...16).contains(entryCount)), String(entryCount) == fields[3],
               let imageLength = Int(fields[4]), (1...8*1024*1024).contains(imageLength), String(imageLength) == fields[4] else { throw failure }
         var position = end + 1
         guard descriptorLength <= bytes.count - position else { throw failure }
@@ -52,7 +145,7 @@ enum SNESRetainedImageObservation {
                   entry[4] == "1" || entry[4] == "2", entry[5] == "0" || entry[5] == "1" else { throw failure }
             if entry[3] == imageName { guard entry[4] == "2", entry[5] == "1" else { throw failure }; matchedImage += 1 }
         }
-        guard matchedImage == 1, imageLength <= bytes.count - position,
+        guard matchedImage == (retired ? 0 : 1), imageLength <= bytes.count - position,
               bytes.count - position - imageLength == footer.count,
               bytes.suffix(footer.count).elementsEqual(footer) else { throw failure }
         let payload = Data(bytes[position..<(position + imageLength)])
@@ -63,7 +156,7 @@ enum SNESRetainedImageObservation {
         regions.append(.init(path: base + "/" + imageName, type: 100, device: device, inode: inode))
         return try SNESRecoveryBinding.validateSessionRetainedScreenshot(descriptor: descriptor, managerRecord: managerRecord,
             request: request, regions: regions, expectedManagerSavePath: expectedManagerSavePath,
-            expectedManagerImagePath: expectedManagerImagePath, image: payload, expectedSHA256: expectedSHA256)
+            expectedManagerImagePath: expectedManagerImagePath, image: payload, expectedSHA256: expectedSHA256, expectedManagerLoadPath: expectedManagerLoadPath)
     }
 }
 
@@ -72,6 +165,7 @@ enum SNESRetainedImageObservation {
 enum SNESRetainedStateObservation {
     static func capture(managerRecord: Data, request: SNESCompatibilityLaunchRequest, game: Game,
                         expectedManagerSavePath: String, expectedManagerImagePath: String?, expectedSHA256: String,
+                        expectedManagerLoadPath: String? = nil,
                         validate: @Sendable () async throws -> Void,
                         read: @Sendable () async throws -> Data) async throws -> SNESCompatibilitySave {
         try await validate(); let first = try await read()
@@ -80,14 +174,14 @@ enum SNESRetainedStateObservation {
         guard first == second else { throw SNESLibraryMenu.failure() }
         let result = try parse(second, managerRecord: managerRecord, request: request, game: game,
                                expectedManagerSavePath: expectedManagerSavePath, expectedManagerImagePath: expectedManagerImagePath,
-                               expectedSHA256: expectedSHA256)
+                               expectedSHA256: expectedSHA256, expectedManagerLoadPath: expectedManagerLoadPath)
         try await validate()
         try request.verifySource()
         return result
     }
     static func parse(_ raw: Data, managerRecord: Data, request: SNESCompatibilityLaunchRequest, game: Game,
                       expectedManagerSavePath: String, expectedManagerImagePath: String?,
-                      expectedSHA256: String) throws -> SNESCompatibilitySave {
+                      expectedSHA256: String, expectedManagerLoadPath: String? = nil) throws -> SNESCompatibilitySave {
         let failure = SNESLibraryMenu.failure()
         guard raw.count <= 16 * 1024 * 1024 + 24576, request.frame.count == 107 else { throw failure }
         let bytes = [UInt8](raw), prefix = Array("HC-RETAINED-STATE-1\n".utf8), footer = Array("HC-RETAINED-STATE-END\n".utf8)
@@ -131,7 +225,7 @@ enum SNESRetainedStateObservation {
         if expectedManagerImagePath != nil { regions.append(.init(path: base + "/" + imageName, type: 100, device: device, inode: inode)) }
         return try SNESRecoveryBinding.validateSessionRetainedState(descriptor: descriptor, managerRecord: managerRecord,
             request: request, game: game, regions: regions, expectedManagerSavePath: expectedManagerSavePath,
-            expectedManagerImagePath: expectedManagerImagePath, state: payload, expectedSHA256: expectedSHA256)
+            expectedManagerImagePath: expectedManagerImagePath, state: payload, expectedSHA256: expectedSHA256, expectedManagerLoadPath: expectedManagerLoadPath)
     }
 }
 import Darwin
@@ -319,19 +413,25 @@ struct SNESRecoveryConsoleObservation: Equatable, Sendable {
         let lines = tail.components(separatedBy: "\n")
         guard lines.count == count + 2, lines[count] == "HC-RECOVERY-OBS-END", lines[count + 1].isEmpty else { throw failure() }
         let token = request.frame[83..<99].map { String(format: "%02x", $0) }.joined()
+        guard let descriptorText=String(data:descriptor,encoding:.ascii) else {throw failure()}
+        let descriptorLines=descriptorText.components(separatedBy:"\n")
+        guard descriptorLines.count>=6,descriptorLines[5]=="2" || descriptorLines[5]=="3" else {throw failure()}
+        let hasImage=descriptorLines[5]=="3",imageName="shot-\(token).png"
         var pending: [Pending] = [], seen = Set<String>()
         for line in lines.prefix(count) {
             let item = line.split(separator: " ", omittingEmptySubsequences: false)
             guard item.count == 6, item[0] == "ENTRY", item[1] == token,
                   item[2].hasPrefix("checkpoint-"), lowerHex(item[2].dropFirst(11), count: 32),
-                  ["battery.srm", "battery.rtc"].contains(String(item[3])),
+                  (["battery.srm", "battery.rtc"].contains(String(item[3])) || (hasImage && item[3]==imageName)),
                   let kind = Int(item[4]), [1, 2].contains(kind), String(kind) == item[4],
                   item[5] == "0" || item[5] == "1", seen.insert(String(item[2])).inserted else { throw failure() }
+            if item[3]==imageName && kind != 2 {throw failure()}
             pending.append(.init(workspace: String(item[2]), region: String(item[3]), kind: kind, workspacePresent: item[5] == "1"))
         }
         let base = "/var/lib/clover/profiles/0/\(String(decoding: request.frame[8..<19], as: UTF8.self))/hakchi/\(SNESCompatibilityCorePackage.engineID)/\(request.source.sha256)"
-        let regions = [SNESRecoveryBinding.Region(path: base + "/battery.srm", type: 0, device: device, inode: inode),
+        var regions = [SNESRecoveryBinding.Region(path: base + "/battery.srm", type: 0, device: device, inode: inode),
                        SNESRecoveryBinding.Region(path: base + "/battery.rtc", type: 1, device: device, inode: inode)]
+        if hasImage {regions.append(.init(path:base+"/"+imageName,type:100,device:device,inode:inode))}
         let saves = try SNESCompatibilityRecoveryReference.matchHistoricalSaves(directory: directory, backup: backup,
                                                                                  request: request, descriptor: descriptor, regions: regions)
         return .init(device: device, inode: inode, requestFrame: request.frame, saves: saves, pending: pending)

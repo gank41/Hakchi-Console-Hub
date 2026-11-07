@@ -14,8 +14,7 @@ enum SNESActiveBoot2Diagnostic {
         let source=try SNESPreparationSource.load(SNESOfflineSource.load(snapshot:URL(fileURLWithPath:args[1])))
         let helper=try SNESBoundedReadHelper.load(URL(fileURLWithPath:args[2]))
         let destination=URL(fileURLWithPath:args[3]),store=try RecoveryBootSnapshotStore(root:destination)
-        let values=try destination.resourceValues(forKeys:[.volumeAvailableCapacityForImportantUsageKey,.volumeAvailableCapacityKey])
-        guard let available=values.volumeAvailableCapacityForImportantUsage ?? values.volumeAvailableCapacity.map(Int64.init),available>=7340032+16*1024*1024 else {
+        guard let available=try SNESBackupCapacity.available(at:destination),available>=7340032+16*1024*1024 else {
             throw RecoveryProbeError.refused("The Mac Backups folder needs about 24 MB free for this small startup copy. Nothing was sent to the console.")
         }
         let inputs=try await loadInputs();_=try inputs.prepare()

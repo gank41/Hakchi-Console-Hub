@@ -6,6 +6,269 @@ import SwiftHakchiCore
 @testable import SwiftHakchi
 
 @MainActor struct SNESCompatibilityBackupEvidenceTests {
+    @Test func archivedStateRequiresMatchingSessionAndIndependentDigest() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("CLV-U-ABCDE", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("abc".utf8).write(to: folder.appendingPathComponent("game.sfc"))
+        var game = Game(code: "CLV-U-ABCDE", desktopContent: "Name=Game\n", consoleType: .snesUsa, source: .local); game.romPath = folder.path
+        let source = try SNESLibraryROMSource.capture(directory: folder, filename: "game.sfc").0
+        let request = try SNESCompatibilityLaunchRequest.prepare(game: game, source: source, session: Data(repeating: 7, count: 16), epoch: 4)
+        var manager = Data("HCSESS1\0".utf8); manager.append(request.frame); manager.append(contentsOf: [0, 0, 0, 0])
+        let token = request.frame[83..<99].map { String(format: "%02x", $0) }.joined()
+        let path = "/var/lib/clover/profiles/0/CLV-U-ABCDE/hakchi/\(SNESCompatibilityCorePackage.engineID)/\(source.sha256)/sessions/checkpoint-\(token)/state-archive/state-captured"
+        let descriptor = Data("HC-BINDING-1\nCLV-U-ABCDE\n\(source.sha256)\n\(token)\n4\n1\n107 123 456 \(path)\n".utf8)
+        let payload = Data("test state".utf8), digest = BackupManifest.digest(payload)
+        var response = Data("HC-STATE-ARCHIVE-1\n123 456 \(descriptor.count) 1 \(payload.count)\n".utf8)
+        response.append(descriptor); response.append(Data("ENTRY \(token) checkpoint-fffffffffffffffffffffffffffffffe state-captured 2 1\n".utf8)); response.append(payload); response.append(Data("HC-STATE-ARCHIVE-END\n".utf8))
+        #expect(try SNESStateArchiveObservation.parse(response, managerRecord: manager, request: request, game: game, expectedSHA256: digest).payload == payload)
+        let selectedState = "/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint1/rollback/savestate"
+        let selectedFields = ["", "", "", "", selectedState].map { Array($0.utf8) }
+        var resumedManager = Data("HCMGR3\0\0".utf8); resumedManager.append(request.frame)
+        for field in selectedFields { resumedManager.append(UInt8(field.count & 255)); resumedManager.append(UInt8(field.count >> 8)) }
+        for field in selectedFields { resumedManager.append(contentsOf: field) }
+        #expect(throws: (any Error).self) { try SNESStateArchiveObservation.parse(response, managerRecord: resumedManager, request: request, game: game, expectedSHA256: digest) }
+        #expect(try SNESStateArchiveObservation.parse(response, managerRecord: resumedManager, request: request, game: game, expectedSHA256: digest, expectedManagerLoadPath: selectedState).payload == payload)
+        #expect(throws: (any Error).self) { try SNESStateArchiveObservation.parse(response, managerRecord: resumedManager, request: request, game: game, expectedSHA256: digest, expectedManagerLoadPath: selectedState + "-wrong") }
+        #expect(throws: (any Error).self) { try SNESStateArchiveObservation.parse(response, managerRecord: manager, request: request, game: game, expectedSHA256: digest, expectedManagerLoadPath: selectedState) }
+        #expect(throws: (any Error).self) { try SNESStateArchiveObservation.parse(response.dropLast(), managerRecord: manager, request: request, game: game, expectedSHA256: digest) }
+        #expect(throws: (any Error).self) { try SNESStateArchiveObservation.parse(response, managerRecord: manager, request: request, game: game, expectedSHA256: String(repeating: "0", count: 64)) }
+        var wrongSession = request.frame; wrongSession[83] ^= 1
+        let wrong = SNESCompatibilityLaunchRequest(frame: wrongSession, source: source)
+        #expect(throws: (any Error).self) { try SNESStateArchiveObservation.parse(response, managerRecord: manager, request: wrong, game: game, expectedSHA256: digest) }
+        var wrongManager = manager; wrongManager[wrongManager.count-1] = 1
+        #expect(throws: (any Error).self) { try SNESStateArchiveObservation.parse(response, managerRecord: wrongManager, request: request, game: game, expectedSHA256: digest) }
+        var wrongGame = Game(code: "CLV-U-ABCDF", desktopContent: "Name=Game\n", consoleType: .snesUsa, source: .local); wrongGame.romPath = folder.path
+        #expect(throws: (any Error).self) { try SNESStateArchiveObservation.parse(response, managerRecord: manager, request: request, game: wrongGame, expectedSHA256: digest) }
+        var alteredDescriptor = response
+        let descriptorStart = Data("HC-STATE-ARCHIVE-1\n123 456 \(descriptor.count) 1 \(payload.count)\n".utf8).count
+        alteredDescriptor[descriptorStart] ^= 1
+        #expect(throws: (any Error).self) { try SNESStateArchiveObservation.parse(alteredDescriptor, managerRecord: manager, request: request, game: game, expectedSHA256: digest) }
+        let stable = RecoveryReadSequence(frame: response, changed: false)
+        #expect(try await SNESStateArchiveObservation.capture(managerRecord: manager, request: request, game: game, expectedSHA256: digest, validate: {}, read: { await stable.read() }).payload == payload)
+        #expect(await stable.reads == 2)
+        let changed = RecoveryReadSequence(frame: response, changed: true)
+        await #expect(throws: (any Error).self) { try await SNESStateArchiveObservation.capture(managerRecord: manager, request: request, game: game, expectedSHA256: digest, validate: {}, read: { await changed.read() }) }
+        let disconnected = RecoveryFinalValidation(failOnFourth: true), stableReply = response
+        await #expect(throws: (any Error).self) { try await SNESStateArchiveObservation.capture(managerRecord: manager, request: request, game: game, expectedSHA256: digest, validate: { try await disconnected.check() }, read: { stableReply }) }
+        let command = try SNESCompatibilityRecoveryCommand.prepareStateArchive(request: request, helperSHA256: String(repeating: "a", count: 64))
+        #expect(command.input == request.frame && command.command.hasSuffix("--observe-state-archive"))
+        #expect(throws: (any Error).self) { try SNESCompatibilityRecoveryCommand.prepareStateArchive(request: request, helperSHA256: "invalid") }
+        if let fixture = ProcessInfo.processInfo.environment["HC_STATE_ARCHIVE_WIRE_FIXTURE"] {
+            let directory = URL(fileURLWithPath: fixture, isDirectory: true)
+            let actualManager = try Data(contentsOf: directory.appendingPathComponent("manager.meta"))
+            let frame = Data(actualManager[8..<115]), code = String(decoding: frame[8..<19], as: UTF8.self)
+            let romFolder = directory.appendingPathComponent(code, isDirectory: true)
+            var actualGame = Game(code: code, desktopContent: "Name=Fixture\n", consoleType: .snesUsa, source: .local); actualGame.romPath = romFolder.path
+            let actualSource = try SNESLibraryROMSource.capture(directory: romFolder, filename: "fixture.sfc").0
+            let actualRequest = try SNESCompatibilityLaunchRequest.observeConsoleFrame(frame, game: actualGame, source: actualSource)
+            let expected = try Data(contentsOf: directory.appendingPathComponent("expected-state"))
+            let reply = try Data(contentsOf: directory.appendingPathComponent("reply"))
+            let observed = try SNESStateArchiveObservation.parse(reply, managerRecord: actualManager, request: actualRequest, game: actualGame, expectedSHA256: BackupManifest.digest(expected))
+            #expect(observed.payload == expected)
+        }
+    }
+    @Test func retainedTimeRequiresTheSelectedSessionAndIndependentDigest() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("CLV-U-ABCDE", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("abc".utf8).write(to: folder.appendingPathComponent("game.sfc"))
+        var game = Game(code: "CLV-U-ABCDE", desktopContent: "Name=Game\n", consoleType: .snesUsa, source: .local); game.romPath = folder.path
+        let source = try SNESLibraryROMSource.capture(directory: folder, filename: "game.sfc").0
+        let request = try SNESCompatibilityLaunchRequest.prepare(game: game, source: source, session: Data(repeating: 7, count: 16), epoch: 4)
+        let managerPath = "/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/old.time"
+        let fields = ["", "", managerPath, managerPath].map { Array($0.utf8) }
+        var record = Data("HCMGR2\0\0".utf8); record.append(request.frame)
+        for field in fields { record.append(UInt8(field.count & 255)); record.append(UInt8(field.count >> 8)) }
+        for field in fields { record.append(contentsOf: field) }
+        let token = request.frame[83..<99].map { String(format: "%02x", $0) }.joined()
+        let path = "/var/lib/clover/profiles/0/CLV-U-ABCDE/hakchi/\(SNESCompatibilityCorePackage.engineID)/\(source.sha256)/sessions/checkpoint-\(token)/time-original"
+        let descriptor = Data("HC-BINDING-1\nCLV-U-ABCDE\n\(source.sha256)\n\(token)\n4\n1\n106 123 456 \(path)\n".utf8)
+        let original = Data("0043\n".utf8), digest = BackupManifest.digest(original)
+        var response = Data("HC-RETAINED-TIME-1\n123 456 \(descriptor.count) 1 \(original.count)\n".utf8)
+        response.append(descriptor); response.append(Data("ENTRY \(token) checkpoint-fffffffffffffffffffffffffffffffe time-original 2 1\n".utf8)); response.append(original); response.append(Data("HC-RETAINED-TIME-END\n".utf8))
+        #expect(try SNESRetainedTimeObservation.parse(response, managerRecord: record, request: request, expectedLoadPath: managerPath, expectedSHA256: digest) == original)
+        let selectedState = "/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint1/rollback/savestate"
+        let resumedFields = ["", "", managerPath, managerPath, selectedState].map { Array($0.utf8) }
+        var resumedRecord = Data("HCMGR3\0\0".utf8); resumedRecord.append(request.frame)
+        for field in resumedFields { resumedRecord.append(UInt8(field.count & 255)); resumedRecord.append(UInt8(field.count >> 8)) }
+        for field in resumedFields { resumedRecord.append(contentsOf: field) }
+        #expect(throws: (any Error).self) { try SNESRetainedTimeObservation.parse(response, managerRecord: resumedRecord, request: request, expectedLoadPath: managerPath, expectedSHA256: digest) }
+        #expect(try SNESRetainedTimeObservation.parse(response, managerRecord: resumedRecord, request: request, expectedLoadPath: managerPath, expectedSHA256: digest, expectedManagerLoadPath: selectedState) == original)
+        #expect(throws: (any Error).self) { try SNESRetainedTimeObservation.parse(response, managerRecord: resumedRecord, request: request, expectedLoadPath: managerPath, expectedSHA256: digest, expectedManagerLoadPath: selectedState + "-wrong") }
+        #expect(throws: (any Error).self) { try SNESRetainedTimeObservation.parse(response, managerRecord: record, request: request, expectedLoadPath: managerPath, expectedSHA256: digest, expectedManagerLoadPath: selectedState) }
+        #expect(throws: (any Error).self) { try SNESRetainedTimeObservation.parse(response, managerRecord: record, request: request, expectedLoadPath: managerPath, expectedSHA256: String(repeating: "0", count: 64)) }
+        #expect(throws: (any Error).self) { try SNESRetainedTimeObservation.parse(response.dropLast(), managerRecord: record, request: request, expectedLoadPath: managerPath, expectedSHA256: digest) }
+        #expect(throws: (any Error).self) { try SNESRetainedTimeObservation.parse(response, managerRecord: record, request: request, expectedLoadPath: managerPath + "x", expectedSHA256: digest) }
+        let malformed = Data("xx43\n".utf8)
+        var badPayload = response
+        let payloadStart = badPayload.count - Data("HC-RETAINED-TIME-END\n".utf8).count - original.count
+        badPayload.replaceSubrange(payloadStart..<(payloadStart + original.count), with: malformed)
+        #expect(throws: (any Error).self) { try SNESRetainedTimeObservation.parse(badPayload, managerRecord: record, request: request, expectedLoadPath: managerPath, expectedSHA256: BackupManifest.digest(malformed)) }
+        var badDescriptor = response
+        let descriptorStart = Data("HC-RETAINED-TIME-1\n123 456 \(descriptor.count) 1 \(original.count)\n".utf8).count
+        badDescriptor[descriptorStart] ^= 1
+        #expect(throws: (any Error).self) { try SNESRetainedTimeObservation.parse(badDescriptor, managerRecord: record, request: request, expectedLoadPath: managerPath, expectedSHA256: digest) }
+        var wrongSession = request.frame; wrongSession[83] ^= 1
+        let wrong = SNESCompatibilityLaunchRequest(frame: wrongSession, source: source)
+        #expect(throws: (any Error).self) { try SNESRetainedTimeObservation.parse(response, managerRecord: record, request: wrong, expectedLoadPath: managerPath, expectedSHA256: digest) }
+        let slicedRequest = SNESCompatibilityLaunchRequest(frame: (Data([0]) + request.frame).dropFirst(), source: source)
+        #expect(try SNESRetainedTimeObservation.parse(response, managerRecord: record, request: slicedRequest, expectedLoadPath: managerPath, expectedSHA256: digest) == original)
+        let stable = RecoveryReadSequence(frame: response, changed: false)
+        #expect(try await SNESRetainedTimeObservation.capture(managerRecord: record, request: request, expectedLoadPath: managerPath, expectedSHA256: digest, validate: {}, read: { await stable.read() }) == original)
+        #expect(await stable.reads == 2)
+        let changed = RecoveryReadSequence(frame: response, changed: true)
+        await #expect(throws: (any Error).self) { try await SNESRetainedTimeObservation.capture(managerRecord: record, request: request, expectedLoadPath: managerPath, expectedSHA256: digest, validate: {}, read: { await changed.read() }) }
+        let disconnected = RecoveryFinalValidation(failOnFourth: true)
+        let stableReply = response
+        await #expect(throws: (any Error).self) { try await SNESRetainedTimeObservation.capture(managerRecord: record, request: request, expectedLoadPath: managerPath, expectedSHA256: digest, validate: { try await disconnected.check() }, read: { stableReply }) }
+        let command = try SNESCompatibilityRecoveryCommand.prepareRetainedTime(request: request, helperSHA256: String(repeating: "a", count: 64))
+        #expect(command.input == request.frame && command.command.hasSuffix("--observe-retained-time"))
+        #expect(throws: (any Error).self) { try SNESCompatibilityRecoveryCommand.prepareRetainedTime(request: request, helperSHA256: "invalid") }
+    }
+    @Test func discoversBatteryOnlySessionWithoutScreenshot() throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("CLV-U-ABCDE", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("abc".utf8).write(to: folder.appendingPathComponent("game.sfc"))
+        var game = Game(code: "CLV-U-ABCDE", desktopContent: "Name=Game\n", consoleType: .snesUsa, source: .local); game.romPath = folder.path
+        let source = try SNESLibraryROMSource.capture(directory: folder, filename: "game.sfc").0
+        let request = try SNESCompatibilityLaunchRequest.prepare(game: game, source: source, session: Data(repeating: 7, count: 16), epoch: 4)
+        var record = Data("HCSESS1\0".utf8); record.append(request.frame); record.append(contentsOf: [0, 0, 0, 0])
+        var inventory = Data("HCMINV2\0".utf8); inventory.append(contentsOf: [1, 0, UInt8(record.count), 0]); inventory.append(record)
+        let observed = try SNESCompatibilityManagerInventory.parse(inventory, game: game, source: source)
+        #expect(observed.sessions.count == 1 && observed.sessions[0].request.frame == request.frame)
+        #expect(observed.sessions[0].paths.savePath == nil && observed.sessions[0].paths.imagePath == nil)
+        #expect(throws: (any Error).self) { try SNESRecoveryBinding.observeManagerScreenshotRecord(record, request: request) }
+        var malformed = inventory; malformed[malformed.count - 1] = 1
+        #expect(throws: (any Error).self) { try SNESCompatibilityManagerInventory.parse(malformed, game: game, source: source) }
+        var wrongGame = inventory; wrongGame[12 + 8 + 6] = 90
+        #expect(throws: (any Error).self) { try SNESCompatibilityManagerInventory.parse(wrongGame, game: game, source: source) }
+        var zeroSession = inventory; zeroSession.replaceSubrange((12 + 8 + 83)..<(12 + 8 + 99), with: Data(repeating: 0, count: 16))
+        #expect(throws: (any Error).self) { try SNESCompatibilityManagerInventory.parse(zeroSession, game: game, source: source) }
+        var fakeScreenshot = inventory; fakeScreenshot.replaceSubrange(12..<20, with: Data("HCSHOT1\0".utf8))
+        #expect(throws: (any Error).self) { try SNESCompatibilityManagerInventory.parse(fakeScreenshot, game: game, source: source) }
+    }
+    @Test func discoversScreenshotAndPlayTimePathsTogether() throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("CLV-U-ABCDE", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("abc".utf8).write(to: folder.appendingPathComponent("game.sfc"))
+        var game = Game(code: "CLV-U-ABCDE", desktopContent: "Name=Game\n", consoleType: .snesUsa, source: .local); game.romPath = folder.path
+        let source = try SNESLibraryROMSource.capture(directory: folder, filename: "game.sfc").0
+        let request = try SNESCompatibilityLaunchRequest.prepare(game: game, source: source, session: Data(repeating: 7, count: 16), epoch: 4)
+        let image = "/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/state.png"
+        let load = "/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/old.time"
+        let save = "/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/state.time"
+        func record(_ image: String, _ load: String, _ save: String) -> Data {
+            let fields = ["", image, load, save].map { Array($0.utf8) }
+            var data = Data("HCMGR2\0\0".utf8); data.append(request.frame)
+            for field in fields { data.append(UInt8(field.count & 255)); data.append(UInt8(field.count >> 8)) }
+            for field in fields { data.append(contentsOf: field) }; return data
+        }
+        func inventory(_ record: Data) -> Data {
+            var data = Data("HCMINV2\0".utf8); data.append(contentsOf: [1, 0, UInt8(record.count & 255), UInt8(record.count >> 8)]); data.append(record); return data
+        }
+        let combined = record(image, load, save)
+        if let path = ProcessInfo.processInfo.environment["HC_MANAGER_TIME_RECORD_OUTPUT"] {
+            let actual = try Data(contentsOf: URL(fileURLWithPath: path))
+            #expect(actual == combined)
+            #expect(try SNESCompatibilityManagerInventory.parse(inventory(actual), game: game, source: source).sessions[0].time.savePath == save)
+        }
+        if let path = ProcessInfo.processInfo.environment["HC_MANAGER_TIME_INVENTORY_INPUT"] {
+            let actual = try Data(contentsOf: URL(fileURLWithPath: path))
+            let sessions = try SNESCompatibilityManagerInventory.parse(actual, game: game, source: source).sessions
+            let matching = sessions.filter { $0.request.frame == request.frame }
+            #expect(matching.count == 1 && matching[0].paths.imagePath == image && matching[0].time.loadPath == load && matching[0].time.savePath == save)
+        }
+        let result = try SNESCompatibilityManagerInventory.parse(inventory(combined), game: game, source: source)
+        #expect(result.sessions.count == 1 && result.sessions[0].paths.imagePath == image)
+        #expect(result.sessions[0].time.loadPath == load && result.sessions[0].time.savePath == save)
+        let timeOnly = try SNESCompatibilityManagerInventory.parse(inventory(record("", load, save)), game: game, source: source)
+        #expect(timeOnly.sessions[0].paths.imagePath == nil && timeOnly.sessions[0].time.savePath == save)
+        let sharedTime = try SNESCompatibilityManagerInventory.parse(inventory(record(image, load, load)), game: game, source: source)
+        #expect(sharedTime.sessions[0].time.loadPath == load && sharedTime.sessions[0].time.savePath == load)
+        #expect(throws: (any Error).self) { try SNESRecoveryBinding.observeManagerScreenshotRecord(combined, request: request) }
+        #expect(try SNESRecoveryBinding.validateManagerScreenshotRecord(combined,request:request,expectedSavePath:nil,expectedImagePath:image))
+        #expect(throws: (any Error).self) { try SNESRecoveryBinding.validateManagerScreenshotRecord(record(image,load,image),request:request,expectedSavePath:nil,expectedImagePath:image) }
+        var wrongSession=combined;wrongSession[wrongSession.startIndex+91] ^= 1
+        #expect(throws: (any Error).self) { try SNESRecoveryBinding.validateManagerScreenshotRecord(wrongSession,request:request,expectedSavePath:nil,expectedImagePath:image) }
+        #expect(throws: (any Error).self) { try SNESRecoveryBinding.validateManagerScreenshotRecord(combined.dropLast(),request:request,expectedSavePath:nil,expectedImagePath:image) }
+        #expect(throws: (any Error).self) { try SNESCompatibilityManagerInventory.parse(inventory(record(image, load, image)), game: game, source: source) }
+        let battery = "/var/lib/clover/profiles/0/\(game.code)/hakchi/\(SNESCompatibilityCorePackage.engineID)/\(source.sha256)/battery.srm"
+        #expect(throws: (any Error).self) { try SNESCompatibilityManagerInventory.parse(inventory(record(image, load, battery)), game: game, source: source) }
+        #expect(throws: (any Error).self) { try SNESCompatibilityManagerInventory.parse(inventory(record(image, "", "")), game: game, source: source) }
+    }
+    @Test func observesManagerSelectedStateAndRejectsAliasedInputs() throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("CLV-U-ABCDE", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("abc".utf8).write(to: folder.appendingPathComponent("game.sfc"))
+        var game = Game(code: "CLV-U-ABCDE", desktopContent: "Name=Game\n", consoleType: .snesUsa, source: .local); game.romPath = folder.path
+        let source = try SNESLibraryROMSource.capture(directory: folder, filename: "game.sfc").0
+        let request = try SNESCompatibilityLaunchRequest.prepare(game: game, source: source, session: Data(repeating: 7, count: 16), epoch: 4)
+        let selected = "/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint1/rollback/savestate"
+        let image = "/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/state.png"
+        let time = "/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/state.time"
+        func record(_ input: String) -> Data {
+            let fields = ["", image, "", time, input].map { Array($0.utf8) }
+            var data = Data("HCMGR3\0\0".utf8); data.append(request.frame)
+            for field in fields { data.append(UInt8(field.count & 255)); data.append(UInt8(field.count >> 8)) }
+            for field in fields { data.append(contentsOf: field) }; return data
+        }
+        func inventory(_ record: Data) -> Data {
+            var data = Data("HCMINV2\0".utf8); data.append(contentsOf: [1, 0, UInt8(record.count & 255), UInt8(record.count >> 8)]); data.append(record); return data
+        }
+        let observed = try SNESCompatibilityManagerInventory.parse(inventory(record(selected)), game: game, source: source)
+        #expect(observed.sessions.count == 1 && observed.sessions[0].paths.loadPath == selected)
+        #expect(observed.sessions[0].paths.imagePath == image && observed.sessions[0].time.savePath == time)
+        #expect(throws: (any Error).self) { try SNESRecoveryBinding.validateManagerScreenshotRecord(record(selected), request: request, expectedSavePath: nil, expectedImagePath: image) }
+        #expect(try SNESRecoveryBinding.validateManagerScreenshotRecord(record(selected), request: request, expectedSavePath: nil, expectedImagePath: image, expectedLoadPath: selected))
+        #expect(throws: (any Error).self) { try SNESRecoveryBinding.validateManagerScreenshotRecord(record(selected), request: request, expectedSavePath: nil, expectedImagePath: image, expectedLoadPath: selected + "-other") }
+        #expect(throws: (any Error).self) { try SNESCompatibilityManagerInventory.parse(inventory(record(image)), game: game, source: source) }
+        let battery = "/var/lib/clover/profiles/0/\(game.code)/hakchi/\(SNESCompatibilityCorePackage.engineID)/\(source.sha256)/battery.srm"
+        #expect(throws: (any Error).self) { try SNESCompatibilityManagerInventory.parse(inventory(record(battery)), game: game, source: source) }
+        #expect(throws: (any Error).self) { try SNESCompatibilityManagerInventory.parse(inventory(record(time)), game: game, source: source) }
+        #expect(throws: (any Error).self) { try SNESCompatibilityManagerInventory.parse(inventory(record("")), game: game, source: source) }
+        if let path = ProcessInfo.processInfo.environment["HC_MANAGER_LOAD_RECORD_INPUT"] {
+            let actual = try Data(contentsOf: URL(fileURLWithPath: path))
+            #expect(actual == record(selected))
+            #expect(try SNESCompatibilityManagerInventory.parse(inventory(actual), game: game, source: source).sessions[0].paths.loadPath == selected)
+        }
+    }
+    @Test func observesActualStockSessionBindingFixture() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let bindingPath = env["HC_REAL_STOCK_BINDING"],
+              let romPath = env["HC_REAL_STOCK_ROM"],
+              let code = env["HC_REAL_STOCK_GAME"] else { return }
+        let binding = URL(fileURLWithPath: bindingPath), parent = binding.deletingLastPathComponent()
+        let rom = URL(fileURLWithPath: romPath), source = try SNESLibraryROMSource.capture(directory: rom.deletingLastPathComponent(), filename: rom.lastPathComponent).0
+        let hex = String(binding.lastPathComponent.dropFirst(5))
+        try #require(binding.lastPathComponent.hasPrefix("bind-") && hex.utf8.count == 32)
+        var token = Data(); var offset = hex.startIndex
+        for _ in 0..<16 {
+            let end = hex.index(offset, offsetBy: 2)
+            token.append(try #require(UInt8(hex[offset..<end], radix: 16))); offset = end
+        }
+        var info = stat(); try #require(stat(parent.path, &info) == 0)
+        let device = UInt64(info.st_dev), inode = UInt64(info.st_ino)
+        let regions = [SNESRecoveryBinding.Region(path: parent.appendingPathComponent("battery.srm").path, type: 0, device: device, inode: inode),
+                       SNESRecoveryBinding.Region(path: parent.appendingPathComponent("battery.rtc").path, type: 1, device: device, inode: inode)]
+        var game = Game(code: code, desktopContent: "Name=Fixture\n", consoleType: .snesUsa, source: .local); game.romPath = rom.deletingLastPathComponent().path
+        let payload = Data("SAVE".utf8)
+        let save = try SNESCompatibilitySave.create(payload: payload, kind: .battery, gameCode: code, romSHA256: source.sha256)
+        let descriptor = try Data(contentsOf: binding)
+        let result = try SNESRecoveryBinding.validate(descriptor: descriptor, save: save.bytes, kind: .battery, game: game, source: source, session: token, epoch: 1, regions: regions)
+        #expect(result.payload == payload)
+        #expect(throws: (any Error).self) { try SNESRecoveryBinding.validate(descriptor: descriptor, save: save.bytes, kind: .battery, game: game, source: source, session: Data(repeating: 1, count: 16), epoch: 1, regions: regions) }
+        if let metaPath = env["HC_REAL_STOCK_META"] {
+            let record = try Data(contentsOf: URL(fileURLWithPath: metaPath)); try #require(record.count == 119)
+            var inventory = Data("HCMINV2\0".utf8); inventory.append(contentsOf: [1, 0, UInt8(record.count), 0]); inventory.append(record)
+            let observed = try SNESCompatibilityManagerInventory.parse(inventory, game: game, source: source)
+            #expect(observed.sessions.count == 1 && observed.sessions[0].request.frame[83..<99].elementsEqual(token))
+            #expect(observed.sessions[0].paths.savePath == nil && observed.sessions[0].paths.imagePath == nil)
+        }
+    }
     @Test func observesSaveOnlyManagerRecord() async throws {
         let root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}
         let folder=root.appendingPathComponent("CLV-U-ABCDE",isDirectory:true)
@@ -219,6 +482,34 @@ import SwiftHakchiCore
         let imageWorkspace="checkpoint-123456789abcdef0123456789abcdef0"
         var imageReply=Data("HC-RETAINED-IMAGE-1\n123 456 \(imageDescriptor.count) 1 \(png.count)\n".utf8);imageReply.append(imageDescriptor);imageReply.append(Data("ENTRY \(token) \(imageWorkspace) shot-\(token).png 2 1\n".utf8));imageReply.append(png);imageReply.append(Data("HC-RETAINED-IMAGE-END\n".utf8))
         #expect(try SNESRetainedImageObservation.parse(imageReply,managerRecord:managerRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest)==png)
+        var retiredReply=Data("HC-RETIRED-IMAGE-1\n123 456 \(imageDescriptor.count) 0 \(png.count)\n".utf8);retiredReply.append(imageDescriptor);retiredReply.append(png);retiredReply.append(Data("HC-RETIRED-IMAGE-END\n".utf8))
+        #expect(throws:(any Error).self){try SNESRetainedImageObservation.parse(retiredReply,managerRecord:managerRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest)}
+        #expect(try SNESRetainedImageObservation.parse(retiredReply,managerRecord:managerRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest,retired:true)==png)
+        #expect(throws:(any Error).self){try SNESRetainedImageObservation.parse(retiredReply,managerRecord:managerRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:String(repeating:"0",count:64),retired:true)}
+        #expect(throws:(any Error).self){try SNESRetainedImageObservation.parse(imageReply,managerRecord:managerRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest,retired:true)}
+        let stableRetired=RecoveryReadSequence(frame:retiredReply,changed:false)
+        #expect(try await SNESRetainedImageObservation.capture(managerRecord:managerRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest,retired:true,validate:{},read:{await stableRetired.read()})==png)
+        #expect(await stableRetired.reads==2)
+        let changedRetired=RecoveryReadSequence(frame:retiredReply,changed:true)
+        await #expect(throws:(any Error).self){try await SNESRetainedImageObservation.capture(managerRecord:managerRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest,retired:true,validate:{},read:{await changedRetired.read()})}
+        let timeBytes=Data("/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/state.time".utf8)
+        var combinedRecord=Data("HCMGR2\0\0".utf8);combinedRecord.append(request.frame)
+        for field in [saveBytes,imageBytes,Data(),timeBytes] { combinedRecord.append(UInt8(field.count & 255));combinedRecord.append(UInt8(field.count >> 8)) }
+        for field in [saveBytes,imageBytes,Data(),timeBytes] { combinedRecord.append(field) }
+        let selectedPath = "/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint1/rollback/savestate"
+        let selectedBytes = Data(selectedPath.utf8)
+        var resumedRecord=Data("HCMGR3\0\0".utf8);resumedRecord.append(request.frame)
+        for field in [saveBytes,imageBytes,Data(),timeBytes,selectedBytes] { resumedRecord.append(UInt8(field.count & 255));resumedRecord.append(UInt8(field.count >> 8)) }
+        for field in [saveBytes,imageBytes,Data(),timeBytes,selectedBytes] { resumedRecord.append(field) }
+        #expect(throws:(any Error).self){try SNESRetainedImageObservation.parse(retiredReply,managerRecord:resumedRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest,retired:true)}
+        #expect(try SNESRetainedImageObservation.parse(retiredReply,managerRecord:resumedRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest,retired:true,expectedManagerLoadPath:selectedPath)==png)
+        #expect(throws:(any Error).self){try SNESRetainedImageObservation.parse(retiredReply,managerRecord:resumedRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest,retired:true,expectedManagerLoadPath:selectedPath+"-wrong")}
+        #expect(throws:(any Error).self){try SNESRetainedImageObservation.parse(retiredReply,managerRecord:combinedRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest,retired:true,expectedManagerLoadPath:selectedPath)}
+        let resumedImage=RecoveryReadSequence(frame:retiredReply,changed:false)
+        #expect(try await SNESRetainedImageObservation.capture(managerRecord:resumedRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest,retired:true,expectedManagerLoadPath:selectedPath,validate:{},read:{await resumedImage.read()})==png)
+        #expect(await resumedImage.reads==2)
+        #expect(try SNESRetainedImageObservation.parse(imageReply,managerRecord:combinedRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest)==png)
+        #expect(throws:(any Error).self){try SNESRetainedImageObservation.parse(imageReply,managerRecord:combinedRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath+"x",expectedSHA256:digest)}
         #expect(throws:(any Error).self){try SNESRetainedImageObservation.parse(imageReply.dropLast(),managerRecord:managerRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:digest)}
         #expect(throws:(any Error).self){try SNESRetainedImageObservation.parse(imageReply,managerRecord:managerRecord,request:request,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:String(repeating:"0",count:64))}
         var corruptImage=png;corruptImage[corruptImage.startIndex] ^= 1
@@ -243,8 +534,18 @@ import SwiftHakchiCore
         let offlineDescriptor=Data("HC-BINDING-1\nCLV-U-ABCDE\n\(request.source.sha256)\n\(token)\n2\n3\n0 123 456 \(ram.path)\n101 123 456 \(sessionState.path)\n100 123 456 \(sessionImage.path)\n".utf8)
         #expect(try SNESRecoveryBinding.validateSessionRetainedScreenshot(descriptor:offlineDescriptor,managerRecord:managerRecord,request:request,regions:[ram,sessionState,sessionImage],expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,image:png,expectedSHA256:digest)==png)
         let retainedState=Data("SAVE".utf8),stateDigest=BackupManifest.digest(retainedState)
+        #expect(throws:(any Error).self){try SNESRecoveryBinding.validateSessionRetainedState(descriptor:offlineDescriptor,managerRecord:resumedRecord,request:request,game:localGame,regions:[ram,sessionState,sessionImage],expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,state:retainedState,expectedSHA256:stateDigest)}
+        #expect(try SNESRecoveryBinding.validateSessionRetainedState(descriptor:offlineDescriptor,managerRecord:resumedRecord,request:request,game:localGame,regions:[ram,sessionState,sessionImage],expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,state:retainedState,expectedSHA256:stateDigest,expectedManagerLoadPath:selectedPath).payload==retainedState)
+        #expect(throws:(any Error).self){try SNESRecoveryBinding.validateSessionRetainedState(descriptor:offlineDescriptor,managerRecord:resumedRecord,request:request,game:localGame,regions:[ram,sessionState,sessionImage],expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,state:retainedState,expectedSHA256:stateDigest,expectedManagerLoadPath:selectedPath+"-wrong")}
+        var resumedStateReply=Data("HC-RETAINED-STATE-1\n123 456 \(imageDescriptor.count) 1 \(retainedState.count)\n".utf8);resumedStateReply.append(imageDescriptor);resumedStateReply.append(Data("ENTRY \(token) \(imageWorkspace) state-\(token).state 2 1\n".utf8));resumedStateReply.append(retainedState);resumedStateReply.append(Data("HC-RETAINED-STATE-END\n".utf8))
+        let resumedStateRead=RecoveryReadSequence(frame:resumedStateReply,changed:false)
+        #expect(try await SNESRetainedStateObservation.capture(managerRecord:resumedRecord,request:request,game:localGame,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:stateDigest,expectedManagerLoadPath:selectedPath,validate:{},read:{await resumedStateRead.read()}).payload==retainedState)
+        #expect(await resumedStateRead.reads==2)
+        #expect(throws:(any Error).self){try SNESRetainedStateObservation.parse(resumedStateReply,managerRecord:resumedRecord,request:request,game:localGame,expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,expectedSHA256:stateDigest)}
         let checkedState=try SNESRecoveryBinding.validateSessionRetainedState(descriptor:offlineDescriptor,managerRecord:managerRecord,request:request,game:localGame,regions:[ram,sessionState,sessionImage],expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,state:retainedState,expectedSHA256:stateDigest)
         #expect(checkedState.payload==retainedState)
+        let combinedState=try SNESRecoveryBinding.validateSessionRetainedState(descriptor:offlineDescriptor,managerRecord:combinedRecord,request:request,game:localGame,regions:[ram,sessionState,sessionImage],expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,state:retainedState,expectedSHA256:stateDigest)
+        #expect(combinedState.payload==retainedState)
         #expect(throws:(any Error).self){try SNESRecoveryBinding.validateSessionRetainedState(descriptor:offlineDescriptor,managerRecord:managerRecord,request:request,game:localGame,regions:[ram,sessionState,sessionImage],expectedManagerSavePath:savePath,expectedManagerImagePath:cachePath,state:retainedState,expectedSHA256:String(repeating:"0",count:64))}
         let wrongState=SNESRecoveryBinding.Region(path:base+"/state-other.state",type:101,device:123,inode:456)
         let wrongStateDescriptor=Data("HC-BINDING-1\nCLV-U-ABCDE\n\(request.source.sha256)\n\(token)\n2\n3\n0 123 456 \(ram.path)\n101 123 456 \(wrongState.path)\n100 123 456 \(sessionImage.path)\n".utf8)
@@ -493,6 +794,21 @@ import SwiftHakchiCore
         #expect(observation.saves.battery == .present(battery))
         #expect(observation.saves.clock == .present(Data([2, 4, 6])))
         #expect(observation.pending.count == 1)
+        let imageName="shot-\(token).png",imageWorkspace="checkpoint-"+String(repeating:"2",count:32)
+        let combinedDescriptor=Data("HC-BINDING-1\nCLV-U-ABCDE\n\(request.source.sha256)\n\(token)\n2\n3\n0 123 456 \(base)/battery.srm\n1 123 456 \(base)/battery.rtc\n100 123 456 \(base)/\(imageName)\n".utf8)
+        let combinedFrame=Data("HC-RECOVERY-OBS-1\n123 456 \(combinedDescriptor.count) 2\n".utf8)+combinedDescriptor+Data("ENTRY \(token) \(workspace) battery.srm 2 1\nENTRY \(token) \(imageWorkspace) \(imageName) 2 1\nHC-RECOVERY-OBS-END\n".utf8)
+        let combinedObservation=try SNESRecoveryConsoleObservation.parse(combinedFrame,directory:saved.directory,backup:backup,request:request)
+        #expect(combinedObservation.saves.battery == .present(battery) && combinedObservation.pending.count == 2)
+        let combinedRoot=root.appendingPathComponent("combined-current",isDirectory:true)
+        try FileManager.default.createDirectory(at:combinedRoot,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        let combinedCurrent=try SNESCompatibilityCurrentEvidence.create(root:combinedRoot,referenceDirectory:saved.directory,backup:backup,request:request,observation:combinedObservation,region:.battery,current:.present(Data("NEW!".utf8)))
+        let combinedPlan=try SNESBatteryRecoveryPlan.prepare(referenceDirectory:saved.directory,currentDirectory:combinedCurrent.directory,backup:backup,request:request,observation:combinedObservation,workspace:workspace)
+        #expect(combinedPlan.workspace==workspace)
+        #expect(throws:(any Error).self){try SNESBatteryRecoveryPlan.prepare(referenceDirectory:saved.directory,currentDirectory:combinedCurrent.directory,backup:backup,request:request,observation:combinedObservation,workspace:imageWorkspace)}
+        let wrongImageFrame=Data(String(decoding:combinedFrame,as:UTF8.self).replacingOccurrences(of:imageName,with:"shot-"+String(repeating:"a",count:32)+".png").utf8)
+        #expect(throws:(any Error).self){try SNESRecoveryConsoleObservation.parse(wrongImageFrame,directory:saved.directory,backup:backup,request:request)}
+        let periodicImageFrame=Data(String(decoding:combinedFrame,as:UTF8.self).replacingOccurrences(of:"\(imageName) 2 1",with:"\(imageName) 1 1").utf8)
+        #expect(throws:(any Error).self){try SNESRecoveryConsoleObservation.parse(periodicImageFrame,directory:saved.directory,backup:backup,request:request)}
         let retained = try SNESCompatibilityCurrentEvidence.create(root: root, referenceDirectory: saved.directory, backup: backup, request: request, observation: observation, region: .clock, current: .present(Data("TIME".utf8)))
         let reopened = try SNESCompatibilityCurrentEvidence.open(directory: retained.directory, referenceDirectory: saved.directory, backup: backup, request: request, observation: observation, region: .clock)
         #expect(reopened.current == .present(Data("TIME".utf8)))
@@ -548,6 +864,8 @@ import SwiftHakchiCore
         let pairedImage = try SNESCompatibilityRecoveryCommand.prepareRetainedImage(request: request, helperSHA256: hash, paired: true)
         #expect(retainedImage.input == request.frame && retainedImage.command.hasSuffix("--observe-retained-image image"))
         #expect(pairedImage.input == request.frame && pairedImage.command.hasSuffix("--observe-retained-image paired"))
+        let retiredImage = try SNESCompatibilityRecoveryCommand.prepareRetainedImage(request: request, helperSHA256: hash, paired: true, retired: true)
+        #expect(retiredImage.input == request.frame && retiredImage.command.hasSuffix("--observe-retired-image paired"))
         #expect(prepared.command.contains(hash))
         #expect(!prepared.command.contains(request.source.directory.path))
         #expect(throws: (any Error).self) { try SNESCompatibilityRecoveryCommand.prepare(request: request, helperSHA256: "a'; touch /tmp/bad") }
@@ -562,6 +880,8 @@ import SwiftHakchiCore
             try Data(actualRetained.command.utf8).write(to: root.appendingPathComponent("retained-command"))
             let actualImage = try SNESCompatibilityRecoveryCommand.prepareRetainedImage(request: request, helperSHA256: actualHash, paired: false)
             try Data(actualImage.command.utf8).write(to: root.appendingPathComponent("retained-image-command"))
+            let actualRetiredImage = try SNESCompatibilityRecoveryCommand.prepareRetainedImage(request: request, helperSHA256: actualHash, paired: false, retired: true)
+            try Data(actualRetiredImage.command.utf8).write(to: root.appendingPathComponent("retired-image-command"))
             try actual.input.write(to: root.appendingPathComponent("request"))
         }
     }
@@ -585,6 +905,12 @@ import SwiftHakchiCore
         }
         await #expect(throws: (any Error).self) {
             try await session.captureCompatibilityRetainedImage(request: request, helperSHA256: String(repeating: "a", count: 64), managerRecord: Data(), expectedManagerSavePath: nil, expectedManagerImagePath: "/invalid", expectedSHA256: String(repeating: "0", count: 64))
+        }
+        await #expect(throws: (any Error).self) {
+            try await session.captureCompatibilityRetainedTime(request: request, helperSHA256: String(repeating: "a", count: 64), managerRecord: Data(), expectedLoadPath: "/invalid", expectedSHA256: String(repeating: "0", count: 64))
+        }
+        await #expect(throws: (any Error).self) {
+            try await session.captureCompatibilityStateArchive(request: request, game: localGame, helperSHA256: String(repeating: "a", count: 64), managerRecord: Data(), expectedSHA256: String(repeating: "0", count: 64))
         }
         await #expect(throws: (any Error).self) {
             try await session.retainCompatibilityCurrent(request: request, helperSHA256: String(repeating: "a", count: 64), directory: reference.directory, backup: backup, region: .clock, root: root)

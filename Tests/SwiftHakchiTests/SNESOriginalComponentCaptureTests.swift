@@ -47,8 +47,9 @@ actor OriginalComponentFakeIO: SNESOriginalComponentIO {
     func readBoot2(_ slot: RecoveryBootSlot) async -> RecoveryBoot2Read { await base.menuKernel(slot) }
     func readPartitions() async -> Data { await base.menuPartitions() }
     func disconnect() async { await base.disconnect() }
-    func readComponents() throws -> Data {
+    func readComponents() async throws -> Data {
         reads += 1
+        if fault == "task-cancel" { try await Task.sleep(for: .seconds(30)) }
         if fault == "cancel" { throw CancellationError() }
         if fault == "transport" || fault == "empty" || fault == "second-transport" && reads == 2 {
             throw SNESStartupTransportFailure(frame: fault == "empty" ? Data() : Data("partial".utf8), stageLog: Data("fixture transport\n".utf8))
@@ -62,6 +63,20 @@ actor OriginalComponentFakeIO: SNESOriginalComponentIO {
 }
 @Suite(.serialized)
 struct SNESOriginalComponentCaptureTests {
+    @Test func failedFinalVerificationRemovesCompletedComponentManifest() async throws {
+        let root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}
+        guard let source=try await originalComponentSourceFixture(root:root) else { return }
+        let pins=try PinnedFELInputs.load(),inputs=RecoveryBootInputs(fes1:pins.fes1,uboot:pins.uboot,bootImage:pins.bootImage)
+        let result=try await SNESOriginalComponentService(wait:{}).capture(source:source,inputs:inputs,io:OriginalComponentFakeIO(source:source))
+        let store=try RecoveryBootSnapshotStore(root:root)
+        await #expect(throws:(any Error).self) {
+            try await store.saveSNESOriginalComponents(result,verify:{_ in throw RecoveryProbeError.refused("verification failed")})
+        }
+        let folders=try FileManager.default.contentsOfDirectory(at:root,includingPropertiesForKeys:nil)
+            .filter{$0.lastPathComponent.hasPrefix("SNES-Original-Components-")}
+        #expect(folders.count==1)
+        #expect(folders.allSatisfy{!FileManager.default.fileExists(atPath:$0.appendingPathComponent("manifest.json").path)})
+    }
     @Test(arguments: ["none", "inventory", "boot", "connect", "identity", "mounted-data", "kernel", "partitions", "truncated", "inventory-mismatch", "transport", "second-transport", "empty", "different", "source", "final-observation", "cancel"])
     func captureChecksTwoReadsAndClosesOnce(fault: String) async throws {
         let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }

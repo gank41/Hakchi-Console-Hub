@@ -23,6 +23,8 @@ int hc_checkpoint_encode(uint8_t output[HC_CHECKPOINT_RECEIPT_BYTES],const uint8
 /* Sends one encoded receipt; successful pipe write is not an artifact proof. */
 int hc_checkpoint_send(int fd,const uint8_t session[16],uint64_t sequence,HCCheckpointKind kind,int success);
 int hc_checkpoint_init(HCCheckpoint *state,const uint8_t session[16],uint64_t sequence);
+/* A screenshot-only transaction starts directly at the image receipt. */
+int hc_checkpoint_init_image(HCCheckpoint *state,const uint8_t session[16],uint64_t sequence);
 int hc_checkpoint_receipt(HCCheckpoint *state,const uint8_t *frame,size_t length);
 /* Save verification must authenticate its session, identity and bytes externally. */
 int hc_checkpoint_verified(HCCheckpoint *state,HCCheckpointKind kind,int valid);

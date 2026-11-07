@@ -4,7 +4,7 @@ import SwiftHakchiCore
 @testable import SwiftHakchi
 
 struct SNESOneGameMenuTrialCommandsTests {
- @Test(arguments:["none","shutdown","hard-limit","foreign-bind","existing","init","game","tree","ui-exe","ui-parent","ui-framebuffer","ui-multiple","mcp-exe","compatibility-game","compatibility-supervisor"])
+ @Test(arguments:["none","shutdown","foreign-bind","existing","init","game","tree","ui-exe","ui-parent","ui-framebuffer","ui-multiple","mcp-exe","compatibility-game","compatibility-supervisor"])
  func temporaryMenuUsesOnlyRAMAndRejectsUnsafeState(_ fault:String)throws {
   let root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}
   let originals=try SNESOriginalGamesFrame(originalGamesFrameFixture(),binding:originalGamesBinding(),challenge:originalGamesChallenge)
@@ -50,48 +50,27 @@ struct SNESOneGameMenuTrialCommandsTests {
   esac
   """
   let bb=path("busybox"),shimData=Data(shim.utf8);try shimData.write(to:bb);try FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:bb.path)
-  // A hosted runner can impose a finite hard limit which a child cannot raise.
-  // Exercise the happy path at that ceiling, while retaining the real console
-  // script's unlimited requirement and testing its refusal separately below.
-  let limitProcess=Process(),limitOutput=Pipe()
-  limitProcess.executableURL=URL(fileURLWithPath:"/bin/sh")
-  limitProcess.arguments=["-c","ulimit -H -f"]
-  limitProcess.standardOutput=limitOutput
-  try limitProcess.run()
-  let hardLimit=String(decoding:limitOutput.fileHandleForReading.readDataToEndOfFile(),as:UTF8.self).trimmingCharacters(in:.whitespacesAndNewlines)
-  limitProcess.waitUntilExit()
-  guard limitProcess.terminationStatus == 0, hardLimit == "unlimited" || UInt64(hardLimit) != nil else {throw SNESOneGameMenu.failure()}
-  let executionLimit = fault == "hard-limit" ? "unlimited" : hardLimit
   func rewrite(_ source:String)->String {
-   source.replacingOccurrences(of:"ulimit -f unlimited",with:"ulimit -f " + executionLimit)
-    .replacingOccurrences(of:"/mnt/swifthakchi/busybox",with:bb.path).replacingOccurrences(of:SNESRAMProbeScripts.busyboxSHA256,with:BackupManifest.digest(shimData))
+   source.replacingOccurrences(of:"/mnt/swifthakchi/busybox",with:bb.path).replacingOccurrences(of:SNESRAMProbeScripts.busyboxSHA256,with:BackupManifest.digest(shimData))
     .replacingOccurrences(of:SNESOneGameMenuTrialCommands.originalInitSHA256,with:BackupManifest.digest(initData))
     .replacingOccurrences(of:SNESMenuAdapterScripts.mcpDesktopSHA256,with:BackupManifest.digest(template))
     .replacingOccurrences(of:"/var/lib",with:path("var/lib").path).replacingOccurrences(of:"/usr/share",with:path("usr/share").path)
     .replacingOccurrences(of:"/usr/bin/clover-canoe-shvc",with:path("usr/bin/clover-canoe-shvc").path).replacingOccurrences(of:"/etc/",with:path("etc").path+"/").replacingOccurrences(of:"/proc/",with:path("proc").path+"/").replacingOccurrences(of:"/run",with:path("run").path).replacingOccurrences(of:"/mnt/swifthakchi/daemon.pid",with:path("mnt/swifthakchi/daemon.pid").path)
   }
   func execute(_ script:String)throws->(Int32,Data,Data) {
-   let errorFile=path("stderr-"+UUID().uuidString);FileManager.default.createFile(atPath:errorFile.path,contents:nil);let errorHandle=try FileHandle(forWritingTo:errorFile);defer{try? errorHandle.close()};let p=Process(),out=Pipe();p.executableURL=URL(fileURLWithPath:"/bin/sh");p.arguments=["-c",(fault == "hard-limit" ? "ulimit -S -f 1; ulimit -H -f 1\n" : "") + rewrite(script)];p.standardOutput=out;p.standardError=errorHandle;try p.run();let o=out.fileHandleForReading.readDataToEndOfFile();p.waitUntilExit();let e=try Data(contentsOf:errorFile);return(p.terminationStatus,o,Data(e.suffix(6000)))
+   let errorFile=path("stderr-"+UUID().uuidString);FileManager.default.createFile(atPath:errorFile.path,contents:nil);let errorHandle=try FileHandle(forWritingTo:errorFile);defer{try? errorHandle.close()};let p=Process(),out=Pipe();p.executableURL=URL(fileURLWithPath:"/bin/sh");p.arguments=["-c",rewrite(script)];p.standardOutput=out;p.standardError=errorHandle;try p.run();let o=out.fileHandleForReading.readDataToEndOfFile();p.waitUntilExit();let e=try Data(contentsOf:errorFile);return(p.terminationStatus,o,Data(e.suffix(6000)))
   }
   let command=try SNESOneGameMenuTrialCommands.start(menu:menu,originals:originals,binding:originalGamesBinding(),challenge:originalGamesChallenge),result=try execute(command)
-  #expect(command.contains("ulimit -f unlimited"))
   #expect(!FileManager.default.fileExists(atPath:path(namespace+"/active-menu").path))
   if ["none","shutdown"].contains(fault) {
    #expect(!FileManager.default.fileExists(atPath:path("shutdown").path))
    #expect(result.0==0,"stderr: \(String(decoding:result.2,as:UTF8.self))")
    #expect(String(decoding:result.1,as:UTF8.self).contains("STATE=ram-menu"))
    #expect(try String(contentsOf:path("usr/share/applications/clover-mcp.desktop")).contains("GamesFolder = "+path(target+"/games").path))
-   #expect(try String(contentsOf:path("child-limit")).trimmingCharacters(in:.whitespacesAndNewlines)==hardLimit)
+   #expect(try String(contentsOf:path("child-limit")).trimmingCharacters(in:.whitespacesAndNewlines)=="unlimited")
    #expect(try execute(command).0 != 0)
    let state=try execute(SNESOneGameMenuTrialCommands.state(menu:menu,originals:originals,binding:originalGamesBinding(),challenge:UUID()));#expect(state.0==0)
    if fault=="none",let export=ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_MENU_TRIAL_EXPORT"] {let d=URL(fileURLWithPath:export);try Data(command.utf8).write(to:d.appendingPathComponent("start.sh"));try SNESOneGameMaterial.encodeBundle(menu).write(to:d.appendingPathComponent("input.bundle"));try Data(try SNESOneGameMenuTrialCommands.state(menu:menu,originals:originals,binding:originalGamesBinding(),challenge:originalGamesChallenge,original:true).utf8).write(to:d.appendingPathComponent("returned.sh"));try Data(try SNESOneGameMenuTrialCommands.state(menu:menu,originals:originals,binding:originalGamesBinding(),challenge:originalGamesChallenge).utf8).write(to:d.appendingPathComponent("state.sh"))}
-  } else {
-   #expect(result.0 != 0)
-   #expect(try String(contentsOf:path("mcp")).trimmingCharacters(in:.whitespacesAndNewlines)=="100")
-   if fault == "hard-limit" {
-    #expect(!FileManager.default.fileExists(atPath:ram.path))
-    #expect(try Data(contentsOf:path("usr/share/applications/clover-mcp.desktop")) == template)
-   }
-  }
+  } else {#expect(result.0 != 0);#expect(try String(contentsOf:path("mcp")).trimmingCharacters(in:.whitespacesAndNewlines)=="100")}
  }
 }

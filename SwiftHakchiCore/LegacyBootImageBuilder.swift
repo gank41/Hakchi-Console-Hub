@@ -59,6 +59,21 @@ public enum LegacyBootImageBuilder {
         return result
     }
 
+    /// Compare the validated decoded image with the result of a rebuild without
+    /// recompressing it. Ramdisk size and identifier may differ by encoder;
+    /// `inspect` independently verifies both the identifier and the payload.
+    public static func matchesRebuild(_ image: Data, source: Data, kernel: Data, archive: NewcArchive) throws -> Bool {
+        let original = try inspect(source)
+        let actual = try inspect(image)
+        guard !kernel.isEmpty, kernel.count <= LegacyAndroidBootImage.maximumSize else { throw failure() }
+        var expectedHeader = original.header
+        expectedHeader.replaceSubrange(8..<12, with: littleEndian(UInt32(kernel.count)))
+        return actual.kernel == kernel && actual.archive == archive &&
+            actual.header[0..<16] == expectedHeader[0..<16] &&
+            actual.header[20..<576] == expectedHeader[20..<576] &&
+            actual.header[596..<608] == expectedHeader[596..<608]
+    }
+
     public static func identifier(kernel: Data, ramdisk: Data) -> Data {
         var hash = Insecure.SHA1()
         // Classic mkbootimg ID includes an empty second section followed by its zero size.

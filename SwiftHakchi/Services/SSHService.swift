@@ -131,13 +131,27 @@ actor SSHService: ConsoleShell {
 
     /// Bounded capture retains partial bytes even when transport completion fails.
     func executeBounded(_ command: String, stdoutLimit: Int, stderrLimit: Int, timeout: Int) throws -> BoundedSSHExecution {
+        try executeBounded(command, stdoutLimit: stdoutLimit, stderrLimit: stderrLimit, timeout: timeout, dispatchGate: nil)
+    }
+
+    /// Claim the firmware gate on this actor immediately before entering the C bridge.
+    func executeFirmwareBounded(_ command: String, stdoutLimit: Int, stderrLimit: Int, timeout: Int, gate: SNESFirmwareDispatchGate) throws -> BoundedSSHExecution {
+        try executeBounded(command, stdoutLimit: stdoutLimit, stderrLimit: stderrLimit, timeout: timeout, dispatchGate: gate)
+    }
+
+    private func executeBounded(_ command: String, stdoutLimit: Int, stderrLimit: Int, timeout: Int, dispatchGate: SNESFirmwareDispatchGate?) throws -> BoundedSSHExecution {
         guard let session else { throw SSHError.notConnected }
         guard (1...64*1024*1024).contains(stdoutLimit), (1...64*1024*1024).contains(stderrLimit),
               (1...Int(Int32.max)).contains(timeout), !command.contains("\0") else {
             throw SSHError.connectionFailed("Invalid bounded capture settings.")
         }
         var result = ssh_exec_result_t()
-        let status = ssh_exec_bounded(session, command, &result, Int32(timeout), UInt32(stdoutLimit), UInt32(stderrLimit))
+        let status: Int32
+        if let dispatchGate {
+            status = try dispatchGate.dispatch { ssh_exec_bounded(session, command, &result, Int32(timeout), UInt32(stdoutLimit), UInt32(stderrLimit)) }
+        } else {
+            status = ssh_exec_bounded(session, command, &result, Int32(timeout), UInt32(stdoutLimit), UInt32(stderrLimit))
+        }
         defer { ssh_result_free(&result) }
         guard Int(result.stdout_len) <= stdoutLimit, Int(result.stderr_len) <= stderrLimit,
               result.stdout_len == 0 || result.stdout_buf != nil,

@@ -2,13 +2,66 @@ import Foundation
 import CryptoKit
 import SwiftHakchiCore
 
-protocol SNESDataSnapshotIO: RecoveryProbeIO {
+protocol SNESDataHashIO: RecoveryProbeIO {
     func dataHash(challenge: UUID) async throws -> Data
+}
+protocol SNESDataSnapshotIO: SNESDataHashIO {
     func dataChunk(index: Int, challenge: UUID) async throws -> Data
+}
+/// Evidence of a completed check in one live session; not a persistent write permit.
+struct SNESDataSnapshotSessionCheck: Sendable {
+    let backup: SNESDataSnapshotReceipt
+    let dataSHA256: String
+}
+struct SNESDataSnapshotPostSaveError: Error, LocalizedError, Sendable {
+    let location: URL
+    let backupVerified: Bool
+    var errorDescription: String? {
+        if backupVerified {
+            return "A backup at \(location.path) was verified, but the recovery session was not accepted. Keep the backup for inspection. No firmware was installed."
+        }
+        return "The save operation reported \(location.path), but the app could not verify a backup there. Preserve any files for inspection. No firmware was installed."
+    }
+}
+private actor SNESDataSnapshotSavedReceipt {
+    private var receipt: SNESDataSnapshotReceipt?
+    private var verified = false
+    func set(_ value: SNESDataSnapshotReceipt) { receipt = value }
+    func markVerified() { verified = true }
+    func get() -> (SNESDataSnapshotReceipt,Bool)? { receipt.map { ($0,verified) } }
 }
 extension SNESPreparationSource {
     func dataSnapshotPlan() throws -> SNESDataSnapshotPlan {
         try SNESDataSnapshotPlan(partitionSectors: StockRestorePartitions.dataSectors(String(decoding: partitions, as: UTF8.self)))
+    }
+}
+/// Call only inside the coordinator's active recovery session. The context is not
+/// itself a session capability; this comparison is not an approval or write permit.
+enum SNESDataSnapshotLiveCheck {
+    static func verify(package: SNESDataSnapshotPackage, source: SNESPreparationSource,
+                       context: RecoverySessionContext, header: Data,
+                       connection: any SNESDataHashIO) async throws {
+        let plan = try source.dataSnapshotPlan()
+        let receipt = SNESDataSnapshotReceipt(directory: package.directory, manifestSHA256: package.manifestSHA256)
+        let checked = try SNESDataSnapshotPackage.load(receipt: receipt, source: source)
+        guard checked.sha256 == package.sha256, checked.byteCount == package.byteCount,
+              checked.binding == source.source.runtimeBinding, checked.byteCount == plan.byteCount else { throw SNESDataSnapshotError.refused }
+        let checkLive: @Sendable () async throws -> Void = {
+            try Task.checkCancellation(); try source.revalidate()
+            guard try await connection.inventory() == [context.after] else { throw SNESDataSnapshotError.refused }
+            let observation = try SNESBackupPolicy.observation(await connection.observe())
+            try source.requireObservation(observation)
+            guard observation.hwid == context.observation.hwid, observation.mounts == context.observation.mounts,
+                  try await connection.inventory() == [context.after],
+                  try await connection.readPartitions() == source.partitions,
+                  try source.validateHeader(await connection.readDataSuperblock()) == header,
+                  try await connection.inventory() == [context.after] else { throw SNESDataSnapshotError.refused }
+            try Task.checkCancellation(); try source.revalidate()
+        }
+        try await checkLive()
+        let challenge = UUID(), frame = try await connection.dataHash(challenge: challenge)
+        guard try SNESDataSnapshotChunk.fullHash(frame, challenge: challenge, count: plan.byteCount) == checked.sha256 else { throw SNESDataSnapshotError.refused }
+        try checked.revalidate(); try await checkLive()
     }
 }
 struct SNESDataSnapshotResult: Sendable {
@@ -63,6 +116,38 @@ actor SNESDataSnapshotService {
     init(wait:@escaping @Sendable () async throws -> Void={ try await Task.sleep(for:.seconds(1)) }) { session=RecoverySessionCoordinator(wait:wait) }
     func capture(source:SNESPreparationSource,inputs:RecoveryBootInputs,io:any SNESDataSnapshotIO,
         progress:@escaping RecoveryProgressSink={ _ in },detail:@escaping @Sendable (String) async -> Void={ _ in }) async throws -> SNESDataSnapshotResult {
+        try await captureInSession(source:source,inputs:inputs,io:io,progress:progress,detail:detail) { result, _ in result }
+    }
+    /// Save and verify a new backup before the coordinator closes its one recovery session.
+    /// If a store throws before returning a receipt, it must carry any known saved path in its error.
+    func captureAndSave(source:SNESPreparationSource,inputs:RecoveryBootInputs,io:any SNESDataSnapshotIO,
+        progress:@escaping RecoveryProgressSink={ _ in },detail:@escaping @Sendable (String) async -> Void={ _ in },
+        save:@escaping @Sendable (SNESDataSnapshotResult) async throws -> SNESDataSnapshotReceipt) async throws -> SNESDataSnapshotSessionCheck {
+        let saved = SNESDataSnapshotSavedReceipt()
+        do {
+            return try await captureInSession(source:source,inputs:inputs,io:io,progress:progress,detail:detail) { result, connection in
+                let expectedManifest = BackupManifest.digest(try result.checkedExport().manifest)
+                await detail("Saving and checking the console backup on this Mac")
+                let receipt = try await save(result)
+                await saved.set(receipt)
+                guard receipt.manifestSHA256 == expectedManifest else { throw SNESDataSnapshotError.refused }
+                let package = try SNESDataSnapshotPackage.load(receipt:receipt,source:source)
+                let plan = try source.dataSnapshotPlan(), context = result.context
+                guard package.sha256 == result.sha256, package.byteCount == plan.byteCount else { throw SNESDataSnapshotError.refused }
+                await saved.markVerified()
+                await progress(.verifying)
+                try await SNESDataSnapshotLiveCheck.verify(package: package, source: source, context: context,
+                                                           header: result.header, connection: connection)
+                return SNESDataSnapshotSessionCheck(backup:receipt,dataSHA256:package.sha256)
+            }
+        } catch {
+            if let (receipt, verified) = await saved.get() { throw SNESDataSnapshotPostSaveError(location:receipt.directory,backupVerified:verified) }
+            throw error
+        }
+    }
+    private func captureInSession<Value:Sendable>(source:SNESPreparationSource,inputs:RecoveryBootInputs,io:any SNESDataSnapshotIO,
+        progress:@escaping RecoveryProgressSink,detail:@escaping @Sendable (String) async -> Void,
+        finish:@escaping @Sendable (SNESDataSnapshotResult,SNESDataSnapshotConnection) async throws -> Value) async throws -> Value {
         guard !busy else { throw LegacyInspectionError.busy }; busy=true; defer { busy=false }
         let validate:@Sendable () throws -> Void = { try Task.checkCancellation(); try source.revalidate() }
         try validate(); let plan=try source.dataSnapshotPlan(), connection=SNESDataSnapshotConnection(io)
@@ -100,9 +185,10 @@ actor SNESDataSnapshotService {
                 let after=try SNESBackupPolicy.observation(await connection.observe()); try validate()
                 guard after.hwid==context.observation.hwid, after.mounts==context.observation.mounts,
                       try await connection.inventory()==[context.after] else { throw SNESDataSnapshotError.refused }; try validate()
-                return (header,chunks,expected)
+                let result = SNESDataSnapshotResult(source:source,context:context,header:header,chunks:chunks,sha256:expected)
+                return try await finish(result,connection)
             }
-            try validate(); return .init(source:source,context:context,header:value.0,chunks:value.1,sha256:value.2)
+            _ = context; try validate(); return value
         } catch { await connection.disconnect(); throw error }
     }
 }

@@ -13,6 +13,19 @@ struct PreparedSNESOriginalMenu: Sendable {
         imageSHA256 = BackupManifest.digest(image); filesSHA256 = BackupManifest.digest(files)
         sourceFilesSHA256 = BackupManifest.digest(sourceFiles); componentsSHA256 = BackupManifest.digest(components)
     }
+    /// Only for the separately approved, RAM-only compatibility-menu trial.
+    init(temporaryCompatibilityTrial trial: SNESRAMCompatibilityMenuBuilder.Result,
+         basedOn original: PreparedSNESOriginalMenu) throws {
+        try original.validateCurrent()
+        guard try LegacyBootImageBuilder.inspect(trial.image).kernel == original.material.kernel else {
+            throw SNESRuntimeBinding.failure()
+        }
+        image = trial.image; fes1 = original.fes1; uboot = original.uboot
+        material = original.material; nonce = original.nonce
+        imageSHA256 = BackupManifest.digest(trial.image); filesSHA256 = trial.filesSHA256
+        sourceFilesSHA256 = original.sourceFilesSHA256; componentsSHA256 = original.componentsSHA256
+        try validateCurrent()
+    }
     func validateCurrent() throws {
         try Task.checkCancellation(); try material.revalidate()
         guard BackupManifest.digest(image) == imageSHA256,

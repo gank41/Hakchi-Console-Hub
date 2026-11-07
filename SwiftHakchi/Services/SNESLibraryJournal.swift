@@ -220,6 +220,7 @@ actor SNESLibraryJournal {
     static func backupDeletionLease(directory: URL, root: URL) throws -> RestoreJournalStorage {
         let storage = try RestoreJournalStorage(root: root)
         do {
+            try SNESReplacementSaveJournal.requireBackupsNotInUse(storage: storage, directory: directory)
             let names = try storage.root.names().filter { $0.hasPrefix(prefix) }
             guard names.count <= 256 else { throw failure() }
             for name in names {
@@ -628,7 +629,11 @@ actor SNESLibraryJournal {
         try storage.write(raw, name: Self.name(previous.count), directory: storage.operation!)
         try storage.sync(storage.operation!); return BackupManifest.digest(raw)
     }
-    private static func checkOthers(_ storage: RestoreJournalStorage, excluding: String?, hwid: String) throws {
+    static func requireNoPendingForSave(storage: RestoreJournalStorage, hwid: String, excludingSave: String) throws {
+        try checkOthers(storage, excluding: nil, hwid: hwid, excludingSave: excludingSave)
+    }
+    private static func checkOthers(_ storage: RestoreJournalStorage, excluding: String?, hwid: String, excludingSave: String? = nil) throws {
+        try SNESReplacementSaveJournal.requireNoPending(storage: storage, hwid: hwid, excluding: excludingSave)
         let names = try storage.root.names().filter { $0.hasPrefix(prefix) && $0 != excluding }
         guard names.count <= 256 else { throw failure() }
         for name in names {

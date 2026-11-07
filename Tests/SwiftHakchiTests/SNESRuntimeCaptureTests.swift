@@ -42,18 +42,20 @@ func runtimeBindingFixture() -> SNESRuntimeBinding {
     .init(sourceSnapshot: "SNES-US-Setup-11111111-1111-1111-1111-111111111111",
           setupManifestSHA256: String(repeating: "a", count: 64), expectedHWID: "0123456789abcdef0123456789abcdef")
 }
-private actor RuntimeCaptureIO: RecoveryProbeIO {
+actor RuntimeCaptureIO: RecoveryProbeIO {
     var events: [String] = []
     let fault: String
+    let hwid: String
     var reads = 0
-    init(_ fault: String = "none") { self.fault = fault }
+    init(_ fault: String = "none", hwid: String = runtimeBindingFixture().expectedHWID) { self.fault = fault; self.hwid = hwid }
     func inventory() -> [RecoveryProbeUSBDevice] { events.append("inventory"); return events.count == 1 ? [probeFEL()] : [probeRNDIS()] }
     func boot(_ inputs: RecoveryBootInputs, expected: RecoveryProbeUSBDevice) { events.append("boot") }
     func connect(expected: RecoveryProbeUSBDevice) { events.append("connect") }
     func disconnect() { events.append("disconnect") }
     func observe() -> String {
         events.append("observe")
-        return fault == "identity" ? snesObservation().replacingOccurrences(of: "HWID=012", with: "HWID=112") : snesObservation()
+        let observed = snesObservation().replacingOccurrences(of: runtimeBindingFixture().expectedHWID, with: hwid)
+        return fault == "identity" ? observed.replacingOccurrences(of: "HWID=", with: "HWID=1") : observed
     }
     func readSNESRuntime() throws -> Data {
         events.append("read"); reads += 1

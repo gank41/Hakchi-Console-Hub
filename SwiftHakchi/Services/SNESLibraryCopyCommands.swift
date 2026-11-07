@@ -181,6 +181,15 @@ struct SNESLibraryCopyStream: Sendable {
         guard command.utf8.count < 1020 else { throw LegacyInspectionError.outputLimit }
     }
 }
+extension SNESReplacementSaveStageCommands.Request {
+    func stream() throws -> SNESLibraryCopyStream { try .init(script: script, body: input) }
+}
+extension SNESReplacementSaveStageInspection.Request {
+    func stream() throws -> SNESLibraryCopyStream { try .init(script: script, body: input) }
+}
+extension SNESReplacementSaveHelperDelivery.Request {
+    func stream() throws -> SNESLibraryCopyStream { try .init(script: script, body: input) }
+}
 struct SNESLibraryCopyReceipt: Sendable {
     let raw: Data, id: UUID, challenge: UUID, freeBytes: Int64
     init(_ raw: Data, request: SNESLibraryCopyCommands.Request) throws {

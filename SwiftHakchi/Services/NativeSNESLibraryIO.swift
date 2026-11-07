@@ -6,12 +6,16 @@ protocol SNESLibraryConnectionIO: Sendable {
     func inventory() async throws -> [RecoveryProbeUSBDevice]
     func identity(challenge: UUID) async throws -> Data
     func compatibilitySupport(context: SNESLibraryContext, challenge: UUID) async throws -> Data
+    func compatibilityInstalledSupport(context: SNESLibraryContext, helperSHA256: String) async throws -> Data
     func compatibilityPreflight(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String) async throws -> Data
     func compatibilityManagerInventory(context: SNESLibraryContext, game: Game, source: SNESLibraryROMSource, helperSHA256: String) async throws -> SNESCompatibilityManagerInventory.Observation
     func compatibilityRecovery(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String) async throws -> Data
     func compatibilityRecoveryCurrent(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String, region: SNESRecoveryRegion) async throws -> Data
     func compatibilityRetainedState(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String, paired: Bool) async throws -> Data
     func compatibilityRetainedImage(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String, paired: Bool) async throws -> Data
+    func compatibilityRetiredImage(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String, paired: Bool) async throws -> Data
+    func compatibilityRetainedTime(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String) async throws -> Data
+    func compatibilityStateArchive(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String) async throws -> Data
     func inspectClockRecovery(context: SNESLibraryContext, plan: SNESClockRecoveryPlan, helperSHA256: String) async throws -> Data
     func inspectBatteryRecovery(context: SNESLibraryContext, plan: SNESBatteryRecoveryPlan, helperSHA256: String) async throws -> Data
     func frontendSupport(context: SNESLibraryContext, challenge: UUID) async throws -> Data
@@ -19,6 +23,10 @@ protocol SNESLibraryConnectionIO: Sendable {
     func powerInput(context: SNESLibraryContext, challenge: UUID) async throws -> Data
     func report(installation: SNESLibraryInstallation, challenge: UUID) async throws -> Data
     func libraryInventory(context: SNESLibraryContext, challenge: UUID) async throws -> Data
+    func inspectReplacementSaveStage(context: SNESLibraryContext, request: SNESReplacementSaveStageInspection.Request) async throws -> SNESReplacementSaveStageInspectionReceipt.Outcome
+    func stageReplacementSave(context: SNESLibraryContext, request: SNESReplacementSaveStageCommands.Request, before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.StagePermit) async throws -> SNESReplacementSaveStageReceipt
+    func deliverReplacementSaveHelper(context: SNESLibraryContext, request: SNESReplacementSaveHelperDelivery.Request, before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.HelperDeliveryPermit) async throws
+    func publishReplacementSave(context: SNESLibraryContext, request: SNESReplacementSaveProfilePublication.Request, before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.PublicationPermit) async throws
     func recoveryInventory(context: SNESLibraryContext, permit: SNESLibraryReconciliationPermit, challenge: UUID) async throws -> Data
     func librarySpace(context: SNESLibraryContext, selection: SNESLibraryInventory.Selection, challenge: UUID) async throws -> Data
     func libraryChunk(context: SNESLibraryContext, file: SNESLibraryInventory.File, offset: Int, challenge: UUID) async throws -> Data
@@ -36,13 +44,21 @@ protocol SNESLibraryConnectionIO: Sendable {
     func disconnect() async
 }
 extension SNESLibraryConnectionIO {
+    func inspectReplacementSaveStage(context: SNESLibraryContext, request: SNESReplacementSaveStageInspection.Request) async throws -> SNESReplacementSaveStageInspectionReceipt.Outcome { throw SNESLibraryInventory.failure() }
+    func stageReplacementSave(context: SNESLibraryContext, request: SNESReplacementSaveStageCommands.Request, before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.StagePermit) async throws -> SNESReplacementSaveStageReceipt { throw SNESLibraryInventory.failure() }
+    func deliverReplacementSaveHelper(context: SNESLibraryContext, request: SNESReplacementSaveHelperDelivery.Request, before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.HelperDeliveryPermit) async throws { throw SNESLibraryInventory.failure() }
+    func publishReplacementSave(context: SNESLibraryContext, request: SNESReplacementSaveProfilePublication.Request, before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.PublicationPermit) async throws { throw SNESLibraryInventory.failure() }
+    func compatibilityStateArchive(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String) async throws -> Data { throw SNESCompatibilitySupportFrame.failure() }
+    func compatibilityRetainedTime(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String) async throws -> Data { throw SNESCompatibilitySupportFrame.failure() }
     func compatibilityRetainedImage(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String, paired: Bool) async throws -> Data { throw SNESCompatibilitySupportFrame.failure() }
+    func compatibilityRetiredImage(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String, paired: Bool) async throws -> Data { throw SNESCompatibilitySupportFrame.failure() }
     func compatibilityRetainedState(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String, paired: Bool) async throws -> Data { throw SNESCompatibilitySupportFrame.failure() }
     func compatibilityManagerInventory(context: SNESLibraryContext, game: Game, source: SNESLibraryROMSource, helperSHA256: String) async throws -> SNESCompatibilityManagerInventory.Observation { throw SNESCompatibilitySupportFrame.failure() }
     func inspectClockRecovery(context: SNESLibraryContext, plan: SNESClockRecoveryPlan, helperSHA256: String) async throws -> Data { throw SNESCompatibilitySupportFrame.failure() }
     func inspectBatteryRecovery(context: SNESLibraryContext, plan: SNESBatteryRecoveryPlan, helperSHA256: String) async throws -> Data { throw SNESCompatibilitySupportFrame.failure() }
     func compatibilityRecoveryCurrent(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String, region: SNESRecoveryRegion) async throws -> Data { throw SNESCompatibilitySupportFrame.failure() }
     func compatibilityRecovery(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String) async throws -> Data { throw SNESCompatibilitySupportFrame.failure() }
+    func compatibilityInstalledSupport(context: SNESLibraryContext, helperSHA256: String) async throws -> Data { throw SNESCompatibilitySupportFrame.failure() }
     func compatibilityPreflight(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String) async throws -> Data { throw SNESCompatibilitySupportFrame.failure() }
     func resetInput(context: SNESLibraryContext, challenge: UUID) async throws -> Data {throw SNESCompatibilitySupportFrame.failure()}
     func powerInput(context: SNESLibraryContext, challenge: UUID) async throws -> Data {throw SNESCompatibilitySupportFrame.failure()}
@@ -72,6 +88,16 @@ extension SNESLibraryConnectionIO {
 }
 struct SNESLibraryOwnerRecords: Sendable {
     let installation: SNESLibraryInstallation, index: SNESLibraryInstallationIndex.Loaded
+}
+
+/// A checked, read-only preparation. This is not a console-write permit.
+struct SNESReplacementSavePublicationPreview: Sendable {
+    let request: SNESReplacementSaveProfilePublication.Request
+    let helperDelivery: SNESReplacementSaveHelperDelivery.Request
+    let helper: SNESReplacementSaveHelper
+    let inventory: SNESLibraryInventory
+    let summary: SNESReplacementSaveJournal.PublicationSummary
+    let group: Int
 }
 
 /// Read-only observation from a checked attachment. This never grants copy, switch or deletion permission.
@@ -157,6 +183,306 @@ actor SNESLibraryConnectionSession: SNESLibraryCopyDevice, SNESLibrarySelectionD
         guard !busy else { throw LegacyInspectionError.busy }
         busy = true; defer { busy = false }
         return try await observeLocked(value, reconciliation: reconciliation, token: generation)
+    }
+    /// Inspect one interrupted save stage without modifying it or clearing its
+    /// recovery record. Both surrounding observations must remain unchanged.
+    func inspectReplacementSaveStage(journal: SNESReplacementSaveJournal, group: Int) async throws -> SNESReplacementSaveStageInspectionReceipt.Outcome {
+        guard let value = context else { throw LegacyInspectionError.disconnected }
+        try await journal.requireNativeInspection(context: value)
+        try await requireCurrent(value)
+        guard !busy, !backingUp else { throw LegacyInspectionError.busy }
+        busy = true; defer { busy = false }
+        let token = generation
+        func validate() throws {
+            try check(token); try value.requireCurrent(attachment: attachment, sessionID: value.sessionID)
+            guard connected, !closed, context?.sha256 == value.sha256 else { throw LegacyInspectionError.disconnected }
+        }
+        do {
+            let before = try await observeLocked(value, token: token)
+            try validate(); try await checkAttachment(token); try await journal.requireNativeInspection(context: value)
+            let challenge = UUID()
+            let request = try await journal.prepareStageInspection(group: group, before: before.inventory,
+                runtimeSHA256: value.installation.expected.runtimeSHA256, challenge: challenge)
+            try validate(); try request.require(value); try request.requireInventory(before.inventory); try await checkAttachment(token)
+            let outcome = try await io.inspectReplacementSaveStage(context: value, request: request)
+            try validate(); try await checkAttachment(token)
+            let after = try await observeLocked(value, token: token)
+            try validate(); try request.requireInventory(after.inventory); try await checkAttachment(token)
+            try await journal.requireNativeInspection(context: value)
+            let rechecked = try await journal.prepareStageInspection(group: group, before: after.inventory,
+                runtimeSHA256: value.installation.expected.runtimeSHA256, challenge: challenge)
+            guard rechecked.script == request.script, rechecked.input == request.input,
+                  rechecked.absent == request.absent, rechecked.incomplete == request.incomplete,
+                  rechecked.verified == request.verified else { throw SNESLibraryInventory.failure() }
+            try validate(); return outcome
+        } catch {
+            context = nil; connected = false
+            if !closed { closed = true; generation += 1; await io.disconnect() }
+            throw error
+        }
+    }
+    /// Build a publication preview only after a fresh stage inspection. The
+    /// returned request and helper cannot themselves authorize a write.
+    func previewReplacementSavePublication(journal: SNESReplacementSaveJournal, group: Int) async throws -> SNESReplacementSavePublicationPreview {
+        guard let value = context else { throw LegacyInspectionError.disconnected }
+        try await journal.requireNativeInspection(context: value)
+        guard try await journal.phase() == .uncertain else { throw SNESLibraryInventory.failure() }
+        try await requireCurrent(value)
+        guard !busy, !backingUp else { throw LegacyInspectionError.busy }
+        busy = true; defer { busy = false }
+        let token = generation
+        func validate() throws {
+            try check(token); try value.requireCurrent(attachment: attachment, sessionID: value.sessionID)
+            guard connected, !closed, context?.sha256 == value.sha256 else { throw LegacyInspectionError.disconnected }
+        }
+        do {
+            let helper = try SNESReplacementSaveHelper.bundled()
+            let before = try await observeLocked(value, token: token)
+            try validate(); try await checkAttachment(token); try await journal.requireNativeInspection(context: value)
+            let inspection = try await journal.prepareStageInspection(group: group, before: before.inventory,
+                runtimeSHA256: value.installation.expected.runtimeSHA256, challenge: UUID())
+            try inspection.require(value); try inspection.requireInventory(before.inventory)
+            guard try await io.inspectReplacementSaveStage(context: value, request: inspection) == .verified else { throw SNESLibraryInventory.failure() }
+            try validate(); try await checkAttachment(token)
+            let after = try await observeLocked(value, token: token)
+            try validate(); try inspection.requireInventory(after.inventory); try await checkAttachment(token)
+            try await journal.requireNativeInspection(context: value)
+            guard try await journal.phase() == .uncertain else { throw SNESLibraryInventory.failure() }
+            let request = try await journal.prepareProfilePublication(group: group, before: after.inventory,
+                runtimeSHA256: value.installation.expected.runtimeSHA256, switcherSHA256: SNESReplacementSaveHelper.sha256, challenge: UUID())
+            let delivery = try SNESReplacementSaveHelperDelivery.prepare(helper: helper, hwid: after.inventory.hwid,
+                contextSHA256: value.sha256, runtimeSHA256: value.installation.expected.runtimeSHA256,
+                selection: after.inventory.selection, challenge: UUID())
+            let summary = try await journal.publicationSummary(group: group)
+            try validate(); try await checkAttachment(token)
+            _ = try SNESReplacementSaveHelper.validate(helper.bytes)
+            return .init(request: request, helperDelivery: delivery, helper: helper, inventory: after.inventory, summary: summary, group: group)
+        } catch {
+            context = nil; connected = false
+            if !closed { closed = true; generation += 1; await io.disconnect() }
+            throw error
+        }
+    }
+    /// Deliver only the reviewed helper into temporary runtime memory. Saved
+    /// data publication still needs a separate guarded operation and approval.
+    func deliverReplacementSaveHelper(journal: SNESReplacementSaveJournal, preview: SNESReplacementSavePublicationPreview, approved: Bool) async throws {
+        guard approved else { throw RecoveryProbeError.refused("Review and approve the temporary helper before continuing.") }
+        guard let value = context, value.sha256 == preview.inventory.contextSHA256 else { throw LegacyInspectionError.disconnected }
+        let checked = try await previewReplacementSavePublication(journal: journal, group: preview.group)
+        guard checked.inventory.stateSHA256 == preview.inventory.stateSHA256,
+              checked.inventory.snapshotSHA256 == preview.inventory.snapshotSHA256,
+              checked.summary.gameCode == preview.summary.gameCode,
+              checked.summary.saveDescription == preview.summary.saveDescription,
+              checked.summary.fileCount == preview.summary.fileCount,
+              checked.summary.byteCount == preview.summary.byteCount,
+              checked.summary.existingProfile == preview.summary.existingProfile,
+              checked.helper.bytes == preview.helper.bytes else { throw SNESLibraryInventory.failure() }
+        try await requireCurrent(value)
+        guard !busy, !backingUp else { throw LegacyInspectionError.busy }
+        busy = true; defer { busy = false }
+        let token = generation
+        func validate() throws {
+            try check(token); try value.requireCurrent(attachment: attachment, sessionID: value.sessionID)
+            guard connected, !closed, context?.sha256 == value.sha256 else { throw LegacyInspectionError.disconnected }
+        }
+        do {
+            let before = try await observeLocked(value, token: token)
+            try validate(); try await checkAttachment(token)
+            guard before.inventory.stateSHA256 == preview.inventory.stateSHA256,
+                  before.inventory.snapshotSHA256 == preview.inventory.snapshotSHA256 else { throw SNESLibraryInventory.failure() }
+            let permit = try await journal.authorizeHelperDelivery(request: preview.helperDelivery, before: before.inventory, approved: approved)
+            try validate(); try permit.requireOwner(value); try await checkAttachment(token)
+            try await io.deliverReplacementSaveHelper(context: value, request: preview.helperDelivery, before: before.inventory, permit: permit)
+            try validate(); try await checkAttachment(token)
+            let after = try await observeLocked(value, token: token)
+            try validate(); try permit.require(request: preview.helperDelivery, before: after.inventory); try await checkAttachment(token)
+            await journal.revokeHelperDelivery()
+        } catch {
+            await journal.revokeHelperDelivery()
+            context = nil; connected = false
+            if !closed { closed = true; generation += 1; await io.disconnect() }
+            throw error
+        }
+    }
+    /// Publish the exact reviewed save set once. The recovery record remains
+    /// open even after matching observations; gameplay verification is separate.
+    func publishReplacementSave(journal: SNESReplacementSaveJournal, preview: SNESReplacementSavePublicationPreview,
+                                approved: Bool) async throws -> SNESReplacementSaveProfileRecovery.Outcome {
+        guard approved else { throw RecoveryProbeError.refused("Review and approve the saved-game copy before continuing.") }
+        guard let value = context, value.sha256 == preview.inventory.contextSHA256 else { throw LegacyInspectionError.disconnected }
+        let checked = try await previewReplacementSavePublication(journal: journal, group: preview.group)
+        guard checked.inventory.stateSHA256 == preview.inventory.stateSHA256,
+              checked.inventory.snapshotSHA256 == preview.inventory.snapshotSHA256,
+              checked.summary.gameCode == preview.summary.gameCode,
+              checked.summary.saveDescription == preview.summary.saveDescription,
+              checked.summary.fileCount == preview.summary.fileCount,
+              checked.summary.byteCount == preview.summary.byteCount,
+              checked.summary.existingProfile == preview.summary.existingProfile,
+              checked.helper.bytes == preview.helper.bytes else { throw SNESLibraryInventory.failure() }
+        try await requireCurrent(value)
+        guard !busy, !backingUp else { throw LegacyInspectionError.busy }
+        busy = true; defer { busy = false }
+        let token = generation
+        func validate() throws {
+            try check(token); try value.requireCurrent(attachment: attachment, sessionID: value.sessionID)
+            guard connected, !closed, context?.sha256 == value.sha256 else { throw LegacyInspectionError.disconnected }
+        }
+        do {
+            let before = try await observeLocked(value, token: token)
+            try validate(); try await checkAttachment(token)
+            guard before.inventory.stateSHA256 == preview.inventory.stateSHA256,
+                  before.inventory.snapshotSHA256 == preview.inventory.snapshotSHA256 else { throw SNESLibraryInventory.failure() }
+            let expected = try await journal.prepareProfilePublication(group: preview.group, before: before.inventory,
+                runtimeSHA256: value.installation.expected.runtimeSHA256, switcherSHA256: SNESReplacementSaveHelper.sha256,
+                challenge: preview.request.challenge)
+            guard expected.script == preview.request.script, expected.receipt == preview.request.receipt else { throw SNESLibraryInventory.failure() }
+            let permit = try await journal.authorizeProfilePublication(request: preview.request, group: preview.group,
+                before: before.inventory, runtimeSHA256: value.installation.expected.runtimeSHA256,
+                challenge: preview.request.challenge, approved: approved)
+            try validate(); try permit.requireOwner(value); try await checkAttachment(token)
+            try await io.publishReplacementSave(context: value, request: preview.request, before: before.inventory, permit: permit)
+            try validate(); try await checkAttachment(token)
+            try await journal.markProfilePublicationUncertain()
+            let first = try await observeLocked(value, token: token)
+            try validate(); try await checkAttachment(token)
+            let firstResult = try await journal.inspectProfilePublication(observed: first.inventory)
+            let last = try await observeLocked(value, token: token)
+            try validate(); try await checkAttachment(token)
+            guard first.inventory.stateSHA256 == last.inventory.stateSHA256,
+                  first.inventory.snapshotSHA256 == last.inventory.snapshotSHA256,
+                  firstResult == .published,
+                  try await journal.inspectProfilePublication(observed: last.inventory) == .published else { throw SNESLibraryInventory.failure() }
+            return .published
+        } catch {
+            // If intent was saved, retain it as uncertain even after cancellation.
+            try? await Task.detached { try await journal.markProfilePublicationUncertain() }.value
+            context = nil; connected = false
+            if !closed { closed = true; generation += 1; await io.disconnect() }
+            throw error
+        }
+    }
+    /// Compare the destination twice while the same checked connection remains
+    /// active. This inspection neither publishes files nor clears the record.
+    func inspectReplacementSavePublication(journal: SNESReplacementSaveJournal) async throws -> SNESReplacementSaveProfileRecovery.Outcome {
+        guard let value = context else { throw LegacyInspectionError.disconnected }
+        try await journal.requireNativePublicationInspection(context: value)
+        try await requireCurrent(value)
+        guard !busy, !backingUp else { throw LegacyInspectionError.busy }
+        busy = true; defer { busy = false }
+        let token = generation
+        func validate() throws {
+            try check(token); try value.requireCurrent(attachment: attachment, sessionID: value.sessionID)
+            guard connected, !closed, context?.sha256 == value.sha256 else { throw LegacyInspectionError.disconnected }
+        }
+        do {
+            let before = try await observeLocked(value, token: token)
+            try validate(); try await checkAttachment(token)
+            try await journal.requireNativePublicationInspection(context: value)
+            let first = try await journal.inspectProfilePublication(observed: before.inventory)
+            try validate(); try await checkAttachment(token)
+            let after = try await observeLocked(value, token: token)
+            try validate(); try await checkAttachment(token)
+            guard before.inventory.stateSHA256 == after.inventory.stateSHA256,
+                  before.inventory.snapshotSHA256 == after.inventory.snapshotSHA256 else { throw SNESLibraryInventory.failure() }
+            let last = try await journal.inspectProfilePublication(observed: after.inventory)
+            try await journal.requireNativePublicationInspection(context: value)
+            guard first == last else { throw SNESLibraryInventory.failure() }
+            try validate(); try await checkAttachment(token)
+            return last
+        } catch {
+            context = nil; connected = false
+            if !closed { closed = true; generation += 1; await io.disconnect() }
+            throw error
+        }
+    }
+    /// Verify the copied files and retain their exact post-copy state before
+    /// the person starts the game. No console files are changed.
+    func verifyReplacementSaveBeforeTesting(journal: SNESReplacementSaveJournal, backupRoot: URL) async throws -> SNESLibrarySnapshotReference {
+        guard let value = context else { throw LegacyInspectionError.disconnected }
+        try await journal.requireNativePublicationInspection(context: value)
+        guard try await journal.phase() == .publicationUncertain else { throw SNESLibraryInventory.failure() }
+        let before = try await observe(value)
+        guard try await journal.inspectProfilePublication(observed: before.inventory) == .published else { throw SNESLibraryInventory.failure() }
+        let backup = try await captureBackup(before, root: backupRoot, allowCreation: true, forceNew: true)
+        let after = try await observe(value)
+        guard before.inventory.stateSHA256 == after.inventory.stateSHA256,
+              before.inventory.snapshotSHA256 == after.inventory.snapshotSHA256,
+              try await journal.inspectProfilePublication(observed: after.inventory) == .published else { throw SNESLibraryInventory.failure() }
+        try await requireCurrent(value); try await journal.requireNativePublicationInspection(context: value)
+        let reference = try SNESLibrarySnapshotReference(backup)
+        try await journal.recordVerifiedPublication(backup: backup, observed: after.inventory)
+        return reference
+    }
+
+    /// Capture a fresh Mac backup after the user checks the saved game. The
+    /// protected pre-test backup permits only reviewed game-profile changes.
+    func finishReplacementSavePublication(journal: SNESReplacementSaveJournal, backupRoot: URL,
+                                          confirmed: Bool) async throws -> SNESLibrarySnapshotReference {
+        guard confirmed else { throw RecoveryProbeError.refused("Check that the saved game works before finishing.") }
+        guard let value = context else { throw LegacyInspectionError.disconnected }
+        try await journal.requireNativePublicationInspection(context: value)
+        guard try await journal.phase() == .publicationVerified else { throw SNESLibraryInventory.failure() }
+        let before = try await observe(value)
+        let changes = try await journal.inspectAfterGameTest(observed: before.inventory)
+        let backup = try await captureBackup(before, root: backupRoot, allowCreation: true, forceNew: true)
+        let after = try await observe(value)
+        guard before.inventory.stateSHA256 == after.inventory.stateSHA256,
+              before.inventory.snapshotSHA256 == after.inventory.snapshotSHA256,
+              try await journal.inspectAfterGameTest(observed: after.inventory) == changes else { throw SNESLibraryInventory.failure() }
+        try await requireCurrent(value); try await journal.requireNativePublicationInspection(context: value)
+        let reference = try SNESLibrarySnapshotReference(backup)
+        try await journal.finishVerifiedPublication(backup: backup, observed: after.inventory, confirmed: confirmed)
+        return reference
+    }
+    /// Stage a single reviewed set only. Even a verified stage remains an
+    /// unfinished recovery record; this does not publish saved progress.
+    func stageReplacementSave(journal: SNESReplacementSaveJournal, group: Int, approved: Bool) async throws -> SNESReplacementSaveStageInspectionReceipt.Outcome {
+        guard approved else { throw RecoveryProbeError.refused("Review and approve the saved-game copy before continuing.") }
+        guard let value = context else { throw LegacyInspectionError.disconnected }
+        try await journal.requireNativePreparation(context: value)
+        try await requireCurrent(value)
+        guard !busy, !backingUp else { throw LegacyInspectionError.busy }
+        busy = true; defer { busy = false }
+        let token = generation
+        var intentRecorded = false
+        func validate() throws {
+            try check(token); try value.requireCurrent(attachment: attachment, sessionID: value.sessionID)
+            guard connected, !closed, context?.sha256 == value.sha256 else { throw LegacyInspectionError.disconnected }
+        }
+        do {
+            let before = try await observeLocked(value, token: token)
+            try validate(); try await checkAttachment(token); try await journal.requireNativePreparation(context: value)
+            let challenge = UUID()
+            let request = try await journal.prepareStage(group: group, before: before.inventory,
+                runtimeSHA256: value.installation.expected.runtimeSHA256, challenge: challenge)
+            try validate(); try await checkAttachment(token)
+            let permit = try await journal.recordStageIntent(group: group, before: before.inventory,
+                runtimeSHA256: value.installation.expected.runtimeSHA256, challenge: challenge, approved: approved)
+            intentRecorded = true
+            try validate(); try await checkAttachment(token); try permit.requireOwner(value)
+            _ = try await io.stageReplacementSave(context: value, request: request, before: before.inventory, permit: permit)
+            try validate(); try await checkAttachment(token)
+            let after = try await observeLocked(value, token: token)
+            try validate(); try permit.require(request: request, before: after.inventory); try await checkAttachment(token)
+            let inspectionChallenge = UUID()
+            let inspection = try await journal.prepareStageInspection(group: group, before: after.inventory,
+                runtimeSHA256: value.installation.expected.runtimeSHA256, challenge: inspectionChallenge)
+            try inspection.require(value); try inspection.requireInventory(after.inventory)
+            let result = try await io.inspectReplacementSaveStage(context: value, request: inspection)
+            guard result == .verified else { throw SNESLibraryInventory.failure() }
+            try validate(); try await checkAttachment(token)
+            let final = try await observeLocked(value, token: token)
+            try validate(); try inspection.requireInventory(final.inventory); try await checkAttachment(token)
+            // Keep the journal open for the separately reviewed publication step
+            // and recovery even after a successful staging check.
+            try await journal.markUncertain()
+            try validate(); return result
+        } catch {
+            if intentRecorded { try? await Task.detached { try await journal.markUncertain() }.value }
+            context = nil; connected = false
+            if !closed { closed = true; generation += 1; await io.disconnect() }
+            throw error
+        }
     }
     private func observeLocked(_ value: SNESLibraryContext, reconciliation: SNESLibraryReconciliationPermit? = nil, token: Int) async throws -> SNESLibraryObservation {
         func validate() throws { try check(token); try value.requireCurrent(attachment: attachment, sessionID: value.sessionID); try reconciliation?.requireOwner(value) }
@@ -354,6 +680,24 @@ actor SNESLibraryConnectionSession: SNESLibraryCopyDevice, SNESLibrarySelectionD
         try check(token);try value.requireCurrent(attachment:attachment,sessionID:value.sessionID)
         try await checkAttachment(token)
     }
+    /// Read-only; independently verified helper bytes and a current connection are required.
+    func checkCompatibilityInstalledSupport(helperSHA256: String) async throws -> Data {
+        guard let value = context, connected, !closed else { throw LegacyInspectionError.disconnected }
+        guard !busy, !backingUp else { throw LegacyInspectionError.busy }
+        busy = true; defer { busy = false }; let token = generation
+        do {
+            let expected = try SNESCompatibilityInstalledSupportCommand.prepare(helperSHA256: helperSHA256)
+            try await supportCurrent(value, token: token)
+            let data = try await io.compatibilityInstalledSupport(context: value, helperSHA256: helperSHA256)
+            try await supportCurrent(value, token: token)
+            guard try expected.validateReceipt(data) else { throw SNESLibraryMenu.failure() }
+            return data
+        } catch {
+            context = nil; connected = false
+            if !closed { closed = true; generation += 1; await io.disconnect() }
+            throw error
+        }
+    }
     /// Read-only; caller must obtain the helper hash from a verified install.
     /// This does not install the helper or enable compatibility game launch.
     func preflightCompatibility(request: SNESCompatibilityLaunchRequest, helperSHA256: String) async throws -> Data {
@@ -414,7 +758,8 @@ actor SNESLibraryConnectionSession: SNESLibraryCopyDevice, SNESLibrarySelectionD
     /// excludes writers and supplies the already-reviewed state digest.
     func captureCompatibilityRetainedState(request: SNESCompatibilityLaunchRequest, game: Game, helperSHA256: String,
                                            managerRecord: Data, expectedManagerSavePath: String,
-                                           expectedManagerImagePath: String?, expectedSHA256: String) async throws -> SNESCompatibilitySave {
+                                           expectedManagerImagePath: String?, expectedSHA256: String,
+                                           expectedManagerLoadPath: String? = nil) async throws -> SNESCompatibilitySave {
         guard let value = context, connected, !closed else { throw LegacyInspectionError.disconnected }
         guard !busy, !backingUp else { throw LegacyInspectionError.busy }
         busy = true; defer { busy = false }; let token = generation
@@ -422,7 +767,7 @@ actor SNESLibraryConnectionSession: SNESLibraryCopyDevice, SNESLibrarySelectionD
             let paired = expectedManagerImagePath != nil
             _ = try SNESCompatibilityRecoveryCommand.prepareRetainedState(request: request, helperSHA256: helperSHA256, paired: paired)
             return try await SNESRetainedStateObservation.capture(managerRecord: managerRecord, request: request, game: game,
-                expectedManagerSavePath: expectedManagerSavePath, expectedManagerImagePath: expectedManagerImagePath, expectedSHA256: expectedSHA256,
+                expectedManagerSavePath: expectedManagerSavePath, expectedManagerImagePath: expectedManagerImagePath, expectedSHA256: expectedSHA256, expectedManagerLoadPath: expectedManagerLoadPath,
                 validate: { try await self.supportCurrent(value, token: token) },
                 read: { try await self.io.compatibilityRetainedState(context: value, request: request, helperSHA256: helperSHA256, paired: paired) })
         } catch {
@@ -435,17 +780,53 @@ actor SNESLibraryConnectionSession: SNESLibraryCopyDevice, SNESLibrarySelectionD
     /// and supplies a previously reviewed image digest. No restore occurs.
     func captureCompatibilityRetainedImage(request: SNESCompatibilityLaunchRequest, helperSHA256: String,
                                            managerRecord: Data, expectedManagerSavePath: String?,
-                                           expectedManagerImagePath: String, expectedSHA256: String) async throws -> Data {
+                                           expectedManagerImagePath: String, expectedSHA256: String, retired: Bool = false,
+                                           expectedManagerLoadPath: String? = nil) async throws -> Data {
         guard let value = context, connected, !closed else { throw LegacyInspectionError.disconnected }
         guard !busy, !backingUp else { throw LegacyInspectionError.busy }
         busy = true; defer { busy = false }; let token = generation
         do {
             let paired = expectedManagerSavePath != nil
-            _ = try SNESCompatibilityRecoveryCommand.prepareRetainedImage(request: request, helperSHA256: helperSHA256, paired: paired)
+            _ = try SNESCompatibilityRecoveryCommand.prepareRetainedImage(request: request, helperSHA256: helperSHA256, paired: paired, retired: retired)
             return try await SNESRetainedImageObservation.capture(managerRecord: managerRecord, request: request,
-                expectedManagerSavePath: expectedManagerSavePath, expectedManagerImagePath: expectedManagerImagePath, expectedSHA256: expectedSHA256,
+                expectedManagerSavePath: expectedManagerSavePath, expectedManagerImagePath: expectedManagerImagePath, expectedSHA256: expectedSHA256, retired: retired, expectedManagerLoadPath: expectedManagerLoadPath,
                 validate: { try await self.supportCurrent(value, token: token) },
-                read: { try await self.io.compatibilityRetainedImage(context: value, request: request, helperSHA256: helperSHA256, paired: paired) })
+                read: { if retired { return try await self.io.compatibilityRetiredImage(context: value, request: request, helperSHA256: helperSHA256, paired: paired) }; return try await self.io.compatibilityRetainedImage(context: value, request: request, helperSHA256: helperSHA256, paired: paired) })
+        } catch {
+            context = nil; connected = false
+            if !closed { closed = true; generation += 1; await io.disconnect() }
+            throw error
+        }
+    }
+    /// Read-only evidence; callers authenticate the console, exclude writers and provide an independent digest.
+    func captureCompatibilityStateArchive(request: SNESCompatibilityLaunchRequest, game: Game, helperSHA256: String,
+                                          managerRecord: Data, expectedSHA256: String, expectedManagerLoadPath: String? = nil) async throws -> SNESCompatibilitySave {
+        guard let value = context, connected, !closed else { throw LegacyInspectionError.disconnected }
+        guard !busy, !backingUp else { throw LegacyInspectionError.busy }
+        busy = true; defer { busy = false }; let token = generation
+        do {
+            _ = try SNESCompatibilityRecoveryCommand.prepareStateArchive(request: request, helperSHA256: helperSHA256)
+            return try await SNESStateArchiveObservation.capture(managerRecord: managerRecord, request: request, game: game, expectedSHA256: expectedSHA256, expectedManagerLoadPath: expectedManagerLoadPath,
+                validate: { try await self.supportCurrent(value, token: token) },
+                read: { try await self.io.compatibilityStateArchive(context: value, request: request, helperSHA256: helperSHA256) })
+        } catch {
+            context = nil; connected = false
+            if !closed { closed = true; generation += 1; await io.disconnect() }
+            throw error
+        }
+    }
+    /// Read-only evidence; callers authenticate the console, exclude writers and provide an independent digest.
+    func captureCompatibilityRetainedTime(request: SNESCompatibilityLaunchRequest, helperSHA256: String,
+                                          managerRecord: Data, expectedLoadPath: String, expectedSHA256: String, expectedManagerLoadPath: String? = nil) async throws -> Data {
+        guard let value = context, connected, !closed else { throw LegacyInspectionError.disconnected }
+        guard !busy, !backingUp else { throw LegacyInspectionError.busy }
+        busy = true; defer { busy = false }; let token = generation
+        do {
+            _ = try SNESCompatibilityRecoveryCommand.prepareRetainedTime(request: request, helperSHA256: helperSHA256)
+            return try await SNESRetainedTimeObservation.capture(managerRecord: managerRecord, request: request,
+                expectedLoadPath: expectedLoadPath, expectedSHA256: expectedSHA256, expectedManagerLoadPath: expectedManagerLoadPath,
+                validate: { try await self.supportCurrent(value, token: token) },
+                read: { try await self.io.compatibilityRetainedTime(context: value, request: request, helperSHA256: helperSHA256) })
         } catch {
             context = nil; connected = false
             if !closed { closed = true; generation += 1; await io.disconnect() }
@@ -727,11 +1108,11 @@ actor SNESLibraryConnectionSession: SNESLibraryCopyDevice, SNESLibrarySelectionD
         try observation.reconciliationPermit?.requireOwner(observation.context)
         try await requireCurrent(observation.context)
     }
-    func captureBackup(_ observation: SNESLibraryObservation, root: URL, material: SNESLibraryMaterial? = nil, reusing backups: [SNESLibraryBackup] = [], allowCreation: Bool = true) async throws -> SNESLibraryBackup {
+    func captureBackup(_ observation: SNESLibraryObservation, root: URL, material: SNESLibraryMaterial? = nil, reusing backups: [SNESLibraryBackup] = [], allowCreation: Bool = true, forceNew: Bool = false) async throws -> SNESLibraryBackup {
         guard !backingUp else { throw LegacyInspectionError.busy }
         backingUp = true; defer { backingUp = false }
         try await requireCurrent(observation)
-        for backup in backups where backup.inventory.snapshotSHA256 == observation.inventory.snapshotSHA256 {
+        for backup in backups where !forceNew && backup.inventory.snapshotSHA256 == observation.inventory.snapshotSHA256 {
             try backup.validate()
             let fresh = try await observe(observation.context, reconciliation: observation.reconciliationPermit)
             guard fresh.inventory.snapshotSHA256 == observation.inventory.snapshotSHA256, fresh.inventory.stateSHA256 == observation.inventory.stateSHA256 else { throw SNESLibraryInventory.failure() }
@@ -743,7 +1124,7 @@ actor SNESLibraryConnectionSession: SNESLibraryCopyDevice, SNESLibrarySelectionD
                 if let bytes = try reuse.chunk(file: file, offset: offset) { return bytes }
                 return try await self.readBackupChunk(observation, file: file, offset: offset)
             },
-            refresh: { try await self.observe(observation.context, reconciliation: observation.reconciliationPermit).inventory }, allowCreation: allowCreation)
+            refresh: { try await self.observe(observation.context, reconciliation: observation.reconciliationPermit).inventory }, allowCreation: allowCreation, forceNew: forceNew)
         try await requireCurrent(observation); return saved
     }
     func readBackupChunk(_ observation: SNESLibraryObservation, file: SNESLibraryInventory.File, offset: Int) async throws -> Data {
@@ -801,6 +1182,14 @@ actor NativeSNESLibraryIO: SNESLibraryConnectionIO {
         guard result.succeeded, result.stderr.isEmpty, result.stdoutData.count <= 16384 else { throw SNESLibraryInstallation.failure() }
         return result.stdoutData
     }
+    func compatibilityInstalledSupport(context: SNESLibraryContext, helperSHA256: String) async throws -> Data {
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESCompatibilitySupportFrame.failure() }
+        let result = try await client.checkSNESCompatibilityInstalledSupport(context, helperSHA256: helperSHA256)
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESCompatibilitySupportFrame.failure() }
+        return try checkedResult(result, maximum: 256)
+    }
     func compatibilityPreflight(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String) async throws -> Data {
         try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
         guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESCompatibilitySupportFrame.failure() }
@@ -848,6 +1237,30 @@ actor NativeSNESLibraryIO: SNESLibraryConnectionIO {
         try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
         guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESCompatibilitySupportFrame.failure() }
         return try checkedResult(result, maximum: 8 * 1024 * 1024 + 24576)
+    }
+    func compatibilityRetiredImage(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String, paired: Bool) async throws -> Data {
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESCompatibilitySupportFrame.failure() }
+        let result = try await client.readSNESCompatibilityRetainedImage(context, request: request, helperSHA256: helperSHA256, paired: paired, retired: true)
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESCompatibilitySupportFrame.failure() }
+        return try checkedResult(result, maximum: 8 * 1024 * 1024 + 24576)
+    }
+    func compatibilityStateArchive(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String) async throws -> Data {
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESCompatibilitySupportFrame.failure() }
+        let result = try await client.readSNESCompatibilityStateArchive(context, request: request, helperSHA256: helperSHA256)
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESCompatibilitySupportFrame.failure() }
+        return try checkedResult(result, maximum: 16 * 1024 * 1024 + 24576)
+    }
+    func compatibilityRetainedTime(context: SNESLibraryContext, request: SNESCompatibilityLaunchRequest, helperSHA256: String) async throws -> Data {
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESCompatibilitySupportFrame.failure() }
+        let result = try await client.readSNESCompatibilityRetainedTime(context, request: request, helperSHA256: helperSHA256)
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESCompatibilitySupportFrame.failure() }
+        return try checkedResult(result, maximum: 24576)
     }
     func inspectClockRecovery(context: SNESLibraryContext, plan: SNESClockRecoveryPlan, helperSHA256: String) async throws -> Data {
         try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
@@ -911,6 +1324,56 @@ actor NativeSNESLibraryIO: SNESLibraryConnectionIO {
         let result = try await client.readSNESLibraryInventory(context, challenge: challenge)
         try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
         return try checkedResult(result, maximum: SNESLibraryInventory.maximumFrameBytes)
+    }
+    func inspectReplacementSaveStage(context: SNESLibraryContext, request: SNESReplacementSaveStageInspection.Request) async throws -> SNESReplacementSaveStageInspectionReceipt.Outcome {
+        try request.require(context)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESLibraryInventory.failure() }
+        let nonce = UUID(), raw = try await libraryInventory(context: context, challenge: nonce)
+        let fresh = try SNESLibraryInventory(raw: raw, challenge: nonce, contextSHA256: context.sha256,
+            hwid: context.installation.expected.hwid, catalogSHA256: context.installation.catalogContentSHA256)
+        try request.requireInventory(fresh); try request.require(context)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESLibraryInventory.failure() }
+        let outcome = try await client.inspectSNESReplacementSaveStage(context, request: request)
+        try request.require(context)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESLibraryInventory.failure() }
+        return outcome
+    }
+    func stageReplacementSave(context: SNESLibraryContext, request: SNESReplacementSaveStageCommands.Request, before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.StagePermit) async throws -> SNESReplacementSaveStageReceipt {
+        try permit.requireOwner(context); try permit.require(request: request, before: before)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESLibraryInventory.failure() }
+        let nonce = UUID(), raw = try await libraryInventory(context: context, challenge: nonce)
+        let fresh = try SNESLibraryInventory(raw: raw, challenge: nonce, contextSHA256: context.sha256,
+            hwid: context.installation.expected.hwid, catalogSHA256: context.installation.catalogContentSHA256)
+        try permit.requireOwner(context); try permit.require(request: request, before: fresh)
+        guard fresh.stateSHA256 == before.stateSHA256, try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESLibraryInventory.failure() }
+        let receipt = try await client.stageSNESReplacementSave(context, request: request, before: fresh, permit: permit)
+        try permit.requireOwner(context); try permit.require(request: request, before: fresh)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESLibraryInventory.failure() }
+        return receipt
+    }
+    func deliverReplacementSaveHelper(context: SNESLibraryContext, request: SNESReplacementSaveHelperDelivery.Request, before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.HelperDeliveryPermit) async throws {
+        try permit.requireOwner(context); try permit.require(request: request, before: before)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESLibraryInventory.failure() }
+        let nonce = UUID(), raw = try await libraryInventory(context: context, challenge: nonce)
+        let fresh = try SNESLibraryInventory(raw: raw, challenge: nonce, contextSHA256: context.sha256,
+            hwid: context.installation.expected.hwid, catalogSHA256: context.installation.catalogContentSHA256)
+        try permit.requireOwner(context); try permit.require(request: request, before: fresh)
+        guard fresh.stateSHA256 == before.stateSHA256, try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESLibraryInventory.failure() }
+        try await client.deliverSNESReplacementSaveHelper(context, request: request, before: fresh, permit: permit)
+        try permit.requireOwner(context); try permit.require(request: request, before: fresh)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESLibraryInventory.failure() }
+    }
+    func publishReplacementSave(context: SNESLibraryContext, request: SNESReplacementSaveProfilePublication.Request, before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.PublicationPermit) async throws {
+        try permit.requireOwner(context); try permit.require(request: request, before: before)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESLibraryInventory.failure() }
+        let nonce = UUID(), raw = try await libraryInventory(context: context, challenge: nonce)
+        let fresh = try SNESLibraryInventory(raw: raw, challenge: nonce, contextSHA256: context.sha256,
+            hwid: context.installation.expected.hwid, catalogSHA256: context.installation.catalogContentSHA256)
+        try permit.requireOwner(context); try permit.require(request: request, before: fresh)
+        guard fresh.stateSHA256 == before.stateSHA256, try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESLibraryInventory.failure() }
+        try await client.publishSNESReplacementSave(context, request: request, before: fresh, permit: permit)
+        try permit.requireOwner(context); try permit.require(request: request, before: fresh)
+        guard try RecoveryProbeUSBRegistry.inventory() == [context.attachment] else { throw SNESLibraryInventory.failure() }
     }
     func recoveryInventory(context: SNESLibraryContext, permit: SNESLibraryReconciliationPermit, challenge: UUID) async throws -> Data {
         try SNESLibraryJournalPolicy.requireOperation(permit.operation); try permit.requireOwner(context)

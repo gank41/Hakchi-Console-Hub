@@ -1,8 +1,8 @@
 #ifndef HAKCHI_SNES_CHILD_PROCESS_H
 #define HAKCHI_SNES_CHILD_PROCESS_H
 #include <sys/types.h>
-typedef struct { pid_t pid; int input; } HCChild;
-#define HC_CHILD_INITIALIZER { -1, -1 }
+typedef struct { pid_t pid; int input; int reaped_pending; int reaped_status; } HCChild;
+#define HC_CHILD_INITIALIZER { -1, -1, 0, 0 }
 /* Caller must verify executable, arguments and environment, and arrange all
  * unrelated inherited descriptors close-on-exec. Caller must be sole child
  * reaper and retain exclusive ownership until reaped, to prevent PID reuse;
@@ -28,6 +28,9 @@ int hc_child_start_rom_reporting(HCChild *,const char *,char *const [],char *con
 /* A cooperating child retains the caller's locked save-directory descriptor
  * across exec. This does not constrain nonparticipating writers. */
 int hc_child_start_rom_reporting_lock(HCChild *,const char *,char *const [],char *const [],int,int,int,int,int,int);
+/* One ROM, save report, isolated-save lock and distinct screenshot receipt.
+ * Caller authenticates the frontend and session and retains the read ends. */
+int hc_child_start_rom_reporting_lock_receipt(HCChild *,const char *,char *const [],char *const [],int,int,int,int,int,int,int,int);
 int hc_child_start_rom_lock(HCChild *,const char *,char *const [],char *const [],int,int,int,int);
 /* Additionally passes two distinct private, empty owned files. The caller
  * protects descriptor and path identity, verifies the workspace and retains
@@ -57,7 +60,12 @@ int hc_child_start_confirmed_lock(HCChild *,const char *,char *const [],char *co
  * if still open; callers must quarantine it and retry cleanup only after the
  * child is reaped. A failed poll never supplies usable completion evidence. */
 int hc_child_close_input(HCChild *child);
-/* Return 1 after reaping and closing input, 0 if running, -1 on error. */
+/* After a failed input close, retrieve an actually reaped status only after
+ * input cleanup. ECHILD does not establish status. Consumes evidence once;
+ * caller retains exclusive child/descriptor ownership throughout. */
+int hc_child_take_reaped(HCChild *child, int *status);
+/* Return 1 after reaping and closing input, 0 while still pending (including
+ * interrupted waits), -1 on error. No status is supplied while pending. */
 int hc_child_poll(HCChild *child, int *status);
 /* Signal only a live owned child; only SIGTERM and SIGKILL are permitted. */
 int hc_child_signal(HCChild *child, int signal_number);

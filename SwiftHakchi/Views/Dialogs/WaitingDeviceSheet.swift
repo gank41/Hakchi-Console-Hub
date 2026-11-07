@@ -16,13 +16,13 @@ struct WaitingDeviceSheet: View {
             Text("Waiting for Console")
                 .font(.headline)
 
-            Text("Connect your console in FEL mode to continue.")
+            Text("Follow these steps to connect your console in recovery mode.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
             GroupBox {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("How to enter FEL mode:")
+                    Text("Get your console ready:")
                         .font(.subheadline)
                         .fontWeight(.medium)
 
@@ -30,7 +30,7 @@ struct WaitingDeviceSheet: View {
                     step(number: 2, text: "Make sure the console's power switch is ON")
                     step(number: 3, text: "Hold the RESET button on the console")
                     step(number: 4, text: "While holding RESET, plug in the USB cable to your Mac")
-                    step(number: 5, text: "Keep holding RESET for 3 seconds, then release")
+                    step(number: 5, text: "Keep holding RESET for 3 seconds, then release it")
                 }
                 .padding(4)
             }
@@ -38,8 +38,8 @@ struct WaitingDeviceSheet: View {
             if appState.deviceManager.felDevicePresent {
                 HStack(spacing: 8) {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("Console detected!")
+                        .foregroundStyle(.orange)
+                    Text("USB device detected — checking the connection…")
                         .fontWeight(.medium)
                 }
                 .transition(.opacity)

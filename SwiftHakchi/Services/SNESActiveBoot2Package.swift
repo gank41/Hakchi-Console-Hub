@@ -29,7 +29,7 @@ struct SNESActiveBoot2Package:Sendable {
               m.schemaVersion==1,m.scope=="snes-active-boot2-preimage",m.complete,
               !m.firmwareWritten,!m.firmwareInstallEligible,!m.firmwareRestoreEligible,!m.bootEligible,
               m.binding==source.source.runtimeBinding,m.sourceManifestSHA256==source.source.manifestSHA256,
-              m.helperSHA256==SNESBoundedReadHelper.sha256,m.stockImageSHA256==BackupManifest.digest(source.stock),
+              SNESBoundedReadHelper.accepts(digest:m.helperSHA256),m.stockImageSHA256==BackupManifest.digest(source.stock),
               m.boot1SHA256==BackupManifest.digest(source.boot1),m.partitionsSHA256==BackupManifest.digest(source.partitions),
               m.offsetBytes==0x600000,m.byteCount==7340032,m.unitBytes==131072,
               m.challenges.count==4,Set(m.challenges).count==4 else {throw SNESRuntimeBinding.failure()}

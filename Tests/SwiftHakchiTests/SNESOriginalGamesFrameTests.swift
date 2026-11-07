@@ -21,6 +21,11 @@ func originalGamesFrameFixture(challenge:UUID=originalGamesChallenge) -> Data {
     raw.append(Data("END 2\n".utf8));return raw
 }
 struct SNESOriginalGamesFrameTests {
+    @Test func findsIncludedGameTitleAndLeavesUnknownCodesUnresolved() throws {
+        let frame = try SNESOriginalGamesFrame(originalGamesFrameFixture(), binding: originalGamesBinding(), challenge: originalGamesChallenge)
+        #expect(frame.gameTitle(for: "CLV-P-AAAAA") == "Été")
+        #expect(frame.gameTitle(for: "CLV-P-XXXXX") == nil)
+    }
     @Test func preservesExactMetadataAndOnlyFixedROMHeaders() throws {
         let raw=originalGamesFrameFixture(),frame=try SNESOriginalGamesFrame(raw,binding:originalGamesBinding(),challenge:originalGamesChallenge)
         #expect(frame.raw==raw && frame.entries.count==2)

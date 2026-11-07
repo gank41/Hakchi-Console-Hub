@@ -156,6 +156,11 @@ struct SNESCompatibilitySupportCaptureTests {
         await #expect(throws: (any Error).self) { try await session.preflightCompatibility(request: request, helperSHA256: String(repeating: "a", count: 64)) }
         #expect(await io.events.isEmpty)
     }
+    @Test func missingPrivateSessionCannotCheckInstalledSupport() async {
+        let io=SNESContextSupportNeverIO(), session=SNESLibraryConnectionSession(attachment:SNESLibraryContextTests.device(),io:io)
+        await #expect(throws:(any Error).self) { try await session.checkCompatibilityInstalledSupport(helperSHA256:String(repeating:"a",count:64)) }
+        #expect(await io.events.isEmpty)
+    }
     @Test func missingPrivateSessionCannotReadSupportData() async {
         let io=SNESContextSupportNeverIO(),session=SNESLibraryConnectionSession(attachment:SNESLibraryContextTests.device(),io:io)
         await #expect(throws:(any Error).self) {try await session.captureCompatibilitySupport()}

@@ -147,34 +147,43 @@ struct GameCommands: Commands {
 
 struct KernelCommands: Commands {
     @ObservedObject var appState: AppState
+    @ObservedObject private var config = AppConfig.shared
+    @AppStorage("showAdvancedFeatures") private var showAdvancedFeatures = false
 
     var body: some Commands {
-        CommandMenu("Kernel") {
-            Button("Advanced NES Recovery Assistant…") {
-                Task {
-                    do { try await RecoveryAssistantLauncher.open(workspace:AppConfig.shared.workspace.root) }
-                    catch { appState.reportOperationError(error.localizedDescription) }
+        CommandMenu("Console") {
+            if showAdvancedFeatures {
+                Button("Advanced NES Recovery Assistant…") {
+                    Task {
+                        do { try await RecoveryAssistantLauncher.open(workspace:AppConfig.shared.workspace.root) }
+                        catch { appState.reportOperationError(error.localizedDescription) }
+                    }
                 }
+                .disabled(appState.recoveryContext.console != .nes || appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
+                Text("Save edits and quit this app before starting recovery.")
             }
-            .disabled(appState.recoveryContext.console != .nes || appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
-            Text("Save edits and quit this app before starting recovery.")
             Button("Restore Console…") { appState.showRecoveryReadiness = true }
                 .disabled(appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
             Divider()
 
-            Button("Install Kernel (Persistent)") {
-                appState.requestFlash(.installHakchi)
+            if config.lastConsoleType == .snesUsa {
+                Button("Set Up SNES…") { appState.reviewSNESBackup() }
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
+                    .disabled(appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
+            } else if showAdvancedFeatures {
+                Button("Install Kernel (Persistent)") { appState.requestFlash(.installHakchi) }
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
+                    .disabled(true)
             }
-            .keyboardShortcut("i", modifiers: [.command, .shift])
-            .disabled(true)
 
-            Divider()
-
-            Button("Memboot (Temporary)") {
-                appState.requestFlash(.memboot)
+            if showAdvancedFeatures {
+                Divider()
+                Button("Memboot (Temporary)") {
+                    appState.requestFlash(.memboot)
+                }
+                .keyboardShortcut("k", modifiers: [.command, .shift])
+                .disabled(true)
             }
-            .keyboardShortcut("k", modifiers: [.command, .shift])
-            .disabled(true)
 
             Divider()
 
@@ -193,36 +202,46 @@ struct KernelCommands: Commands {
 
 struct ModulesCommands: Commands {
     @ObservedObject var appState: AppState
+    @AppStorage("showAdvancedFeatures") private var showAdvancedFeatures = false
 
     var body: some Commands {
-        CommandMenu("Modules") {
-            Button("Module Manager...") {
-                appState.showModuleManager = true
+        if showAdvancedFeatures {
+            CommandMenu("Modules") {
+                Button("Module Manager...") {
+                    appState.showModuleManager = true
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
             }
-            .keyboardShortcut("m", modifiers: [.command, .shift])
         }
     }
 }
 
 struct ToolsCommands: Commands {
     @ObservedObject var appState: AppState
+    @AppStorage("showAdvancedFeatures") private var showAdvancedFeatures = false
 
     var body: some Commands {
         CommandMenu("Tools") {
+            Button("Export Troubleshooting Logs…") { DiagnosticLogExport.present(logs: AppConfig.shared.workspace.logs) }
+            Divider()
             Button("Cheat Codes…") { appState.showCodeCatalog = true }
             Button("Automatic Folders...") { appState.showFolders = true }
             Button("Back Up Console...") { appState.exportConsoleBackup() }
                 .disabled((!appState.deviceManager.canSync && appState.deviceManager.legacyReport == nil) || appState.taskRunner.isRunning || appState.gameManager.isLoading || appState.isPreparingSync)
             Button("Review Legacy Change / Undo…") { appState.reviewLegacyChange() }
                 .disabled(appState.deviceManager.legacyReport == nil || appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading || appState.isPreparingSync)
-            Button("Review Legacy NES Sync Trial…") { appState.reviewLegacySyncTrial() }
-                .disabled(appState.deviceManager.legacyReport == nil || appState.taskRunner.isRunning
-                          || appState.isPreparingSync || appState.gameManager.isLoading)
+            if showAdvancedFeatures {
+                Button("Review Legacy NES Sync Trial…") { appState.reviewLegacySyncTrial() }
+                    .disabled(appState.deviceManager.legacyReport == nil || appState.taskRunner.isRunning
+                              || appState.isPreparingSync || appState.gameManager.isLoading)
+            }
             Button("Sync Library / Update Game Library…") { appState.reviewLibrarySync() }
                 .disabled(!appState.canReviewLibrarySync)
-            Button("Reclaim Console Space…") { appState.reviewLegacyArchiveReclaim() }
-                .disabled(appState.deviceManager.legacyReport == nil || appState.taskRunner.isRunning
-                          || appState.isPreparingSync || appState.gameManager.isLoading)
+            if showAdvancedFeatures {
+                Button("Reclaim Console Space…") { appState.reviewLegacyArchiveReclaim() }
+                    .disabled(appState.deviceManager.legacyReport == nil || appState.taskRunner.isRunning
+                              || appState.isPreparingSync || appState.gameManager.isLoading)
+            }
             Button("Recover Interrupted Sync") { appState.recoverInterruptedSync() }
                 .disabled(!appState.deviceManager.canSync || appState.taskRunner.isRunning)
             Button("Reset Selections to Installed Games") { appState.gameManager.resetSelectionsToInstalled() }
@@ -232,12 +251,13 @@ struct ToolsCommands: Commands {
                 appState.showScraper = true
             }
 
-            Divider()
-
-            Button("Dump Stock Kernel") {
-                appState.requestFlash(.dumpStockKernel)
+            if showAdvancedFeatures {
+                Divider()
+                Button("Dump Stock Kernel") {
+                    appState.requestFlash(.dumpStockKernel)
+                }
+                .disabled(!appState.deviceManager.canInteract || appState.taskRunner.isRunning || appState.isPreparingSync)
             }
-            .disabled(!appState.deviceManager.canInteract || appState.taskRunner.isRunning || appState.isPreparingSync)
         }
     }
 }
@@ -286,6 +306,8 @@ struct AboutCommands: Commands {
                     .credits: credits,
                 ])
             }
+            Button("Check for Updates…") { UpdateChecker.shared.check() }
+                .disabled(UpdateChecker.shared.checking)
         }
     }
 }

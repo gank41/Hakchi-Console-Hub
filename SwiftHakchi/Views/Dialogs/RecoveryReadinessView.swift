@@ -7,6 +7,7 @@ struct RecoveryReadinessView: View {
     let context: ConsoleRecoveryContext
     let legacySnapshot: LegacyConsoleReport?
     var onOriginalGamesReview: (() -> Void)? = nil
+    @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @State private var service = RecoveryPreflightService()
     private struct CheckedReport {
@@ -16,6 +17,7 @@ struct RecoveryReadinessView: View {
     private struct CheckKey: Hashable { let context: ConsoleRecoveryContext; let refresh: UUID }
     @State private var checked: CheckedReport?
     @State private var checkID = UUID()
+    @State private var showSNESBackupHistory = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -25,6 +27,18 @@ struct RecoveryReadinessView: View {
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    if context.console == .snesUsa {
+                        GroupBox("Restore Games and Folders") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Choose a saved SNES library backup to review the games and folders it contains. Your current console saves and settings are kept.")
+                                    .font(.callout).foregroundStyle(.secondary)
+                                Button("Open SNES Backup History…") { showSNESBackupHistory = true }
+                                    .disabled(appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
+                                Text("To restore, connect the same prepared SNES that the backup came from.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
+                        }
+                    }
                     GroupBox("Recovery choices") {
                         VStack(alignment: .leading, spacing: 14) {
                             ForEach(context.choices, id: \.rawValue) { choice in
@@ -74,6 +88,10 @@ struct RecoveryReadinessView: View {
             }
         }
         .padding(22).frame(minWidth: 570, idealWidth: 680, maxWidth: 800, minHeight: 480, idealHeight: 680, maxHeight: 780)
+        .sheet(isPresented: $showSNESBackupHistory) {
+            SNESLibraryBackupHistoryView(workspace: AppConfig.shared.workspace)
+                .environmentObject(appState)
+        }
         .task(id: CheckKey(context: context, refresh: checkID)) {
             checked = nil
             let capturedContext = context

@@ -3,12 +3,21 @@ import Testing
 @testable import SwiftHakchi
 
 struct LegacyBoot2ActivationDiagnosticTests {
-    @Test func publicPreviewRefusesUnverifiedFirmwareOperations() throws {
+    @Test func firmwareJournalRootIsFixedInsideNESWorkspace() throws {
         let expected = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Hakchi Console Hub/Backups/StockKernelRestoreJournals", isDirectory: true)
+            .appendingPathComponent("Development/NES/Backups/StockKernelRestoreJournals", isDirectory: true)
         #expect(RecoveryFirmwareJournalPolicy.root == expected.standardizedFileURL)
-        #expect(throws: (any Error).self) { try RecoveryFirmwareJournalPolicy.require(expected) }
-        #expect(throws: (any Error).self) { try RecoveryFirmwareJournalPolicy.requireOwner() }
+        try RecoveryFirmwareJournalPolicy.require(expected)
+        #expect(throws: (any Error).self) {
+            try RecoveryFirmwareJournalPolicy.require(expected.deletingLastPathComponent())
+        }
+        try RecoveryFirmwareJournalPolicy.requireOwner()
+        #expect(throws: (any Error).self) {
+            try RecoveryFirmwareJournalPolicy.requireOwner(uid: 0)
+        }
+        #expect(throws: (any Error).self) {
+            try RecoveryFirmwareJournalPolicy.requireOwner(home: URL(fileURLWithPath: "/Users/another-account"))
+        }
     }
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_RECOVERY_TEST_BACKUPS"] != nil))
     func alternateJournalRootCannotStartPhysicalPreflight() async throws {

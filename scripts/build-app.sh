@@ -9,9 +9,11 @@ if ! scripts/build-recovery-assistant.sh > "$nes_assistant_log" 2>&1; then cat "
 cat "$nes_assistant_log"
 nes_assistant_app="$(sed -n 's/^RECOVERY_ASSISTANT_PATH=//p' "$nes_assistant_log" | tail -1)"
 [[ -d "$nes_assistant_app" ]]
-swift build --configuration "$configuration"
-bin_path="$(swift build --configuration "$configuration" --show-bin-path)"
-output="$(pwd)/Builds/$configuration"
+swift_flags=()
+[[ "${SWIFTHAKCHI_DISABLE_SWIFTPM_SANDBOX:-0}" != 1 ]] || swift_flags+=(--disable-sandbox)
+swift build "${swift_flags[@]}" --configuration "$configuration"
+bin_path="$(swift build "${swift_flags[@]}" --configuration "$configuration" --show-bin-path)"
+output="$(cd .. && pwd)/Builds/$configuration"
 mkdir -p "$output"
 package_dir="$(mktemp -d "$output/preview.XXXXXX")"
 app="$package_dir/Hakchi Console Hub.app"
@@ -36,9 +38,9 @@ fi
 plutil -lint "$app/Contents/Info.plist"
 codesign --force --sign - --timestamp=none "$app"
 codesign --verify --deep --strict "$app"
-latest="$(pwd)/Builds/Latest.app"
+latest="$(cd .. && pwd)/Builds/Latest.app"
 if [[ ! -e "$latest" || -L "$latest" ]]; then ln -sfn "$app" "$latest"; fi
-for launcher in "$(pwd)/Hakchi Console Hub.app"; do
+for launcher in "$(cd .. && pwd)/Hakchi Console Hub.app"; do
     if [[ ! -e "$launcher" || -L "$launcher" ]]; then ln -sfn "$app" "$launcher"; fi
 done
 printf '\nAPP_BUNDLE_PATH=%s\n' "$app"

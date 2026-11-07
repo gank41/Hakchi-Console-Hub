@@ -3,8 +3,51 @@ import Testing
 import SwiftHakchiCore
 @testable import SwiftHakchi
 
+/// Deliberately lacks the capability to compare a live backup.
+private actor SNESFirmwareWithoutDataHash: SNESFirmwareIO {
+ let base:SNESFirmwareFakeIO
+ init(_ base:SNESFirmwareFakeIO){self.base=base}
+ func inventory() async throws->[RecoveryProbeUSBDevice] {try await base.inventory()}
+ func boot(_ inputs:RecoveryBootInputs,expected:RecoveryProbeUSBDevice) async throws {try await base.boot(inputs,expected:expected)}
+ func connect(expected:RecoveryProbeUSBDevice) async throws {try await base.connect(expected:expected)}
+ func observe() async throws->String {await base.observe()}
+ func readBoot2(_ slot:RecoveryBootSlot) async throws->RecoveryBoot2Read {try await base.readBoot2(slot)}
+ func readBoot1() async throws->Data {try await base.readBoot1()}
+ func readPartitions() async throws->Data {try await base.readPartitions()}
+ func readDataSuperblock() async throws->Data {try await base.readDataSuperblock()}
+ func geometry(challenge:UUID) async throws->Data {await base.geometry(challenge:challenge)}
+ func readActive(challenge:UUID) async throws->Data {await base.readActive(challenge:challenge)}
+ func stage() async throws {try await base.stage()}
+ func verifyStaged() async throws {try await base.verifyStaged()}
+ func replace(_ permit:SNESFirmwareWritePermit) async throws {try await base.replace(permit)}
+ func disconnect() async {await base.disconnect()}
+}
+
 @Suite(.serialized)
 struct SNESMenuFirmwareTransactionTests {
+ @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_MENU_PLAYED"] != nil),arguments:["changed-data","no-hash","none"])
+ func upgradeChecksCurrentBackupInTheWriteSession(_ fault:String) async throws {
+  let root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}
+  let (parentJournal,parentOp)=try await menuStartupParentFixture(root),accepted=try await parentJournal.acceptedInstall(),parent=try await parentJournal.menuStartupParent();try await parentJournal.close()
+  let inputs=try menuFirmwareInputs(),paths=try menuFirmwarePaths(accepted.material)
+  let material=try SNESFirmwareMaterial.upgrade(parent:parent,paths:paths,recovery:inputs),checked=try SNESFirmwareGuard.prepare(material)
+  let prepared=try SNESFirmwareJournal.prepare(material:material,root:parentOp.deletingLastPathComponent(),guard:checked)
+  let journal=try await SNESFirmwareJournal.reopen(operation:prepared.operation,reviewSHA256:prepared.reviewSHA256,recovery:inputs)
+  try await journal.preflightVerified()
+  let fake=SNESFirmwareFakeIO(material:material,fault:fault)
+  let io:any SNESFirmwareIO = fault == "no-hash" ? SNESFirmwareWithoutDataHash(fake) : fake
+  if fault != "none" {
+   await #expect(throws:(any Error).self) {
+    try await SNESFirmwareTransaction(wait:{}).run(mode:.write,journal:journal,guard:checked,inputs:inputs,io:io)
+   }
+  } else {
+   _=try await SNESFirmwareTransaction(wait:{}).run(mode:.write,journal:journal,guard:checked,inputs:inputs,io:io)
+  }
+  #expect(await fake.dataHashes == (fault == "no-hash" ? 0 : 1))
+  #expect(await fake.writes == (fault == "none" ? 1 : 0))
+  #expect(try await journal.phase() == (fault == "none" ? .readbackVerified : .stoppedBeforeWrite))
+  try await journal.close()
+ }
  @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_MENU_PLAYED"] != nil),arguments:["none","preimage","write","parent-change"])
  func reconstructsUpgradeAndOriginalRestoreWithoutRetry(_ fault:String) async throws {
   let root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}

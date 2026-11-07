@@ -88,6 +88,46 @@ actor OriginalMenuFakeIO: SNESOriginalMenuIO {
 }
 @Suite(.serialized)
 struct SNESOriginalMenuSessionTests {
+    @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_COMPONENTS"] != nil))
+    func failedResultVerificationCannotLeaveCompletedMenuRecord() async throws {
+        let root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}
+        let menu=try #require(try privateOriginalMenu())
+        let store=try RecoveryBootSnapshotStore(root:root)
+        let result=try await SNESOriginalMenuService(wait:{}).start(menu:menu,store:store,io:OriginalMenuFakeIO(menu:menu,fault:"none"))
+        await #expect(throws:(any Error).self) {
+            try await store.saveSNESOriginalMenuResult(result,menu:menu,verify:{_ in throw RecoveryProbeError.refused("verification failed")})
+        }
+        let folders=try FileManager.default.contentsOfDirectory(at:root,includingPropertiesForKeys:nil)
+            .filter{$0.lastPathComponent.hasPrefix("SNES-Original-Menu-Result-")}
+        #expect(folders.count==1)
+        #expect(folders.allSatisfy{!FileManager.default.fileExists(atPath:$0.appendingPathComponent("manifest.json").path)})
+        await #expect(throws:(any Error).self) {
+            try await store.saveSNESOriginalMenuResult(result,menu:menu,verify:{directory in
+                try Data([1]).write(to:directory.appendingPathComponent("report-0.bin"))
+            })
+        }
+        let partial=try FileManager.default.contentsOfDirectory(at:root,includingPropertiesForKeys:nil)
+            .filter{$0.lastPathComponent.hasPrefix("SNES-Original-Menu-Result-")}
+        #expect(partial.count==2)
+        #expect(partial.allSatisfy{!FileManager.default.fileExists(atPath:$0.appendingPathComponent("manifest.json").path)})
+        let checkpointFile=result.checkpointDirectory.appendingPathComponent("checkpoint.bin")
+        let checkpointBytes=try Data(contentsOf:checkpointFile)
+        await #expect(throws:(any Error).self) {
+            try await store.saveSNESOriginalMenuResult(result,menu:menu,verify:{_ in try Data([1]).write(to:checkpointFile)})
+        }
+        try checkpointBytes.write(to:checkpointFile)
+        let allPartial=try FileManager.default.contentsOfDirectory(at:root,includingPropertiesForKeys:nil)
+            .filter{$0.lastPathComponent.hasPrefix("SNES-Original-Menu-Result-")}
+        #expect(allPartial.count==3)
+        #expect(allPartial.allSatisfy{!FileManager.default.fileExists(atPath:$0.appendingPathComponent("manifest.json").path)})
+        let started=try await store.saveSNESOriginalMenuResult(result,menu:menu)
+        #expect(try SNESOriginalMenuResult.loadStarted(directory:started,menu:menu).reports==result.reports)
+        let after=SNESOriginalMenuResult(checkpoint:result.checkpoint,checkpointDirectory:result.checkpointDirectory,
+            challenges:result.challenges,reports:result.reports,diagnostics:result.diagnostics,phase:"after-gameplay")
+        let afterPath=try await store.saveSNESOriginalMenuResult(after,menu:menu)
+        let record=try #require(JSONSerialization.jsonObject(with:Data(contentsOf:afterPath.appendingPathComponent("manifest.json"))) as? [String:Any])
+        #expect(record["phase"] as? String == "after-gameplay" && record["complete"] as? Bool == true)
+    }
     @Test func checkpointIsDurableBeforeLaunchAndEveryFailureClosesWithoutRetry() async throws {
         guard let menu=try privateOriginalMenu() else { return }
         for fault in ["none","inventory","boot","legacy-usb","connect","cancel","partial","checkpoint","receipt","launch","report","second-report"] {

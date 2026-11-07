@@ -18,7 +18,7 @@ enum SNESStartupTrialUSBPolicy {
 }
 protocol SNESStartupTrialIO:Sendable {
     func inventory() async throws -> [RecoveryProbeUSBDevice]
-    func boot(expected:RecoveryProbeUSBDevice) async throws
+    func boot(expected:RecoveryProbeUSBDevice, validateInputs:@escaping @Sendable () throws -> Void) async throws
     func connect(expected:RecoveryProbeUSBDevice) async throws
     func report(challenge:UUID) async throws -> Data
     func disconnect() async
@@ -47,17 +47,36 @@ struct SNESStartupTrialResult:Sendable {
         let encoder=JSONEncoder();encoder.outputFormatting=[.prettyPrinted,.sortedKeys]
         return (["report-0.txt":reports[0],"report-1.txt":reports[1]],try encoder.encode(m))
     }
-    static func loadStarted(directory:URL,trial:PreparedSNESStartupTrial)throws->Self {
+    static func loadStarted(directory:URL,trial:PreparedSNESStartupTrial,expectedManifestSHA256:String?=nil)throws->Self {
         let dir=try RestoreDirectory(directory),prefix="SNES-Startup-Trial-Result-"
         guard dir.url.lastPathComponent.hasPrefix(prefix),UUID(uuidString:String(dir.url.lastPathComponent.dropFirst(prefix.count))) != nil,
               Set(try dir.names())==Set(["manifest.json","report-0.txt","report-1.txt"]) else {throw SNESRuntimeBinding.failure()}
         let raw=try dir.read("manifest.json",maximum:65536),m=try JSONDecoder().decode(Manifest.self,from:raw)
+        if let expectedManifestSHA256, BackupManifest.digest(raw) != expectedManifestSHA256 { throw SNESRuntimeBinding.failure() }
         guard m.phase=="started" else {throw SNESRuntimeBinding.failure()}
         let value=Self(before:m.before,after:m.after,challenges:m.challenges,reports:try (0..<2).map {try dir.read("report-\($0).txt",maximum:16384)},phase:m.phase)
         let checked=try value.checkedExport(trial:trial)
         guard let actual=try JSONSerialization.jsonObject(with:checked.manifest) as? NSDictionary,
               let original=try JSONSerialization.jsonObject(with:raw) as? [String:Any],actual.isEqual(to:original) else {throw SNESRuntimeBinding.failure()}
+        guard try dir.read("manifest.json",maximum:65536)==raw,
+              try (0..<2).allSatisfy({ try dir.read("report-\($0).txt",maximum:16384)==value.reports[$0] }) else {throw SNESRuntimeBinding.failure()}
         try dir.check();return value
+    }
+    static func loadStarted(receipt: SNESSetupRecordReceipt, trial: PreparedSNESStartupTrial) throws -> Self {
+        guard receipt.kind == .trialStarted, receipt.manifestSHA256.count == 64,
+              SNESRuntimeBinding.hex(receipt.manifestSHA256) else { throw SNESRuntimeBinding.failure() }
+        return try loadStarted(directory: receipt.directory, trial: trial, expectedManifestSHA256: receipt.manifestSHA256)
+    }
+    /// Recheck a previously decoded, receipt-bound record. The caller must
+    /// separately revalidate the trial and its preflight evidence.
+    func requireSavedReceipt(_ receipt: SNESSetupRecordReceipt) throws {
+        guard phase == "started", reports.count == 2, receipt.kind == .trialStarted,
+              receipt.manifestSHA256.count == 64, SNESRuntimeBinding.hex(receipt.manifestSHA256) else { throw SNESRuntimeBinding.failure() }
+        let directory = try RestoreDirectory(receipt.directory)
+        guard Set(try directory.names()) == Set(["manifest.json", "report-0.txt", "report-1.txt"]),
+              BackupManifest.digest(try directory.read("manifest.json", maximum: 65536)) == receipt.manifestSHA256,
+              try (0..<2).allSatisfy({ try directory.read("report-\($0).txt", maximum: 16384) == reports[$0] }) else { throw SNESRuntimeBinding.failure() }
+        try directory.check()
     }
 }
 struct SNESStartupTrialFailure:Error,Sendable,LocalizedError {
@@ -78,9 +97,10 @@ actor SNESStartupTrialService {
     private let wait:@Sendable () async throws -> Void,attempts:Int
     private var busy=false
     init(wait:@escaping @Sendable () async throws -> Void={try await Task.sleep(for:.seconds(1))},attempts:Int=60) {self.wait=wait;self.attempts=min(60,max(1,attempts))}
-    func capture(trial:PreparedSNESStartupTrial,started:SNESStartupTrialResult?=nil,io:any SNESStartupTrialIO,progress:@escaping RecoveryProgressSink={_ in}) async throws -> SNESStartupTrialResult {
+    func capture(trial:PreparedSNESStartupTrial,started:SNESStartupTrialResult?=nil,io:any SNESStartupTrialIO,progress:@escaping RecoveryProgressSink={_ in},
+                 validateInputs:@escaping @Sendable () throws -> Void = {}) async throws -> SNESStartupTrialResult {
         guard !busy else {throw LegacyInspectionError.busy};busy=true;defer {busy=false}
-        let validate:@Sendable () throws -> Void={try Task.checkCancellation();try trial.validateCurrent()}
+        let validate:@Sendable () throws -> Void={try Task.checkCancellation();try trial.validateCurrent();try validateInputs()}
         var closed=false,stage="checking-files",latest=Data()
         do {
             try validate();let expected=try SNESStartupTrialExpectation.checked(trial)
@@ -92,7 +112,7 @@ actor SNESStartupTrialService {
                 guard try await io.inventory()==[after] else {throw SNESRuntimeBinding.failure()};try validate()
             } else {
                 stage="checking-recovery-connection";before=try RecoveryProbePolicy.before(await io.inventory());try validate()
-                stage="temporary-startup";await progress(.uploadingRecovery);try validate();try await io.boot(expected:before);try validate()
+                stage="temporary-startup";await progress(.uploadingRecovery);try validate();try await io.boot(expected:before,validateInputs:validateInputs);try validate()
                 stage="waiting-for-startup-connection";await progress(.waitingForRecovery);try validate()
                 var found:RecoveryProbeUSBDevice?
                 for i in 0..<attempts {

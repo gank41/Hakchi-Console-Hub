@@ -1,4 +1,5 @@
 import Foundation
+import SwiftHakchiCore
 
 /// Bounded ELF metadata inspection only; never executes or maps a supplied binary on the Mac.
 struct ARMRuntimeELF: Sendable {
@@ -7,8 +8,22 @@ struct ARMRuntimeELF: Sendable {
     let dependencies: [String]
     static let maximumSize = 2 * 1024 * 1024
     init(data: Data, allowedRPath: String? = nil) throws {
+        try self.init(data: data, allowedRPath: allowedRPath, sizeLimit: Self.maximumSize)
+    }
+
+    /// The legacy USB runtime keeps its historical 2 MiB limit. Only this
+    /// exact reviewed frontend may use the larger compatibility boundary.
+    static func reviewedCompatibilityFrontend(data: Data) throws -> Self {
+        guard data.count == SNESCompatibilityFrontendPackage.byteCount,
+              BackupManifest.digest(data) == SNESCompatibilityFrontendPackage.sha256 else {
+            throw RecoveryProbeError.refused("The optional emulator frontend does not match the reviewed build.")
+        }
+        return try Self(data: data, allowedRPath: nil, sizeLimit: SNESCompatibilityFrontendPackage.byteCount)
+    }
+
+    private init(data: Data, allowedRPath: String?, sizeLimit: Int) throws {
         func fail() -> RecoveryProbeError { .refused("The SNES USB runtime uses an unsupported or damaged ARM executable.") }
-        guard (52...Self.maximumSize).contains(data.count) else { throw fail() }
+        guard (52...sizeLimit).contains(data.count) else { throw fail() }
         let b = Array(data)
         func word(_ offset: Int, _ count: Int = 4) throws -> UInt32 {
             guard offset >= 0, count <= b.count - offset else { throw fail() }
