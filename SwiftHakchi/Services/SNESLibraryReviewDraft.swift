@@ -9,6 +9,11 @@ struct SNESCompatibilityMenuPreview {
 }
 struct SNESCompatibilityObjects {
     let items: [String: SNESLibraryObjects.Item], objects: [String: Data], sources: [SNESLibrarySourceFile]
+    /// Separate support data; never mixed into the game-object transfer set.
+    let controllerProfile: SNESCompatibilityControllerProfile.Prepared?
+    let corePackage: SNESCompatibilityCorePackage?
+    let frontendPackage: SNESCompatibilityFrontendPackage?
+    let supportPayload: SNESCompatibilitySupportPayload?
 }
 /// Local choices only. Unavailable games stay selected until an explicit per-sync exclusion.
 @MainActor struct SNESLibraryReviewDraft {
@@ -145,7 +150,16 @@ struct SNESCompatibilityObjects {
         guard objects.values.reduce(0, { $0 + $1.count }) <= 128 * 1024 * 1024 else { throw SNESLibraryMenu.failure() }
         for source in sources { try source.verify() }
         for code in requests.keys.sorted() { guard let request = requests[code] else { throw SNESLibraryMenu.failure() }; try request.verifySource() }
-        return .init(items: items, objects: objects, sources: sources)
+        let controller = try requests.isEmpty ? nil : SNESCompatibilityControllerProfile.prepare()
+        let core = try requests.isEmpty ? nil : SNESCompatibilityCorePackage.loadBundled()
+        let frontend = try requests.isEmpty ? nil : SNESCompatibilityFrontendPackage.loadBundled()
+        let support: SNESCompatibilitySupportPayload?
+        if let controller, let core, let frontend {
+            support = try SNESCompatibilitySupportPayload(controller: controller, core: core, frontend: frontend)
+        } else {
+            support = nil
+        }
+        return .init(items: items, objects: objects, sources: sources, controllerProfile: controller, corePackage: core, frontendPackage: frontend, supportPayload: support)
     }
     /// Mac-only menu candidate. It may be saved for offline review but cannot be transferred or synced.
     func compatibilityMenuCandidate(sessions: [String: Data], epoch: UInt64, artwork: SNESLibraryMenu.NavigationArtwork) throws -> SNESLibraryMenu {

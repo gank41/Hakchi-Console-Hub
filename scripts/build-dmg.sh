@@ -8,14 +8,12 @@ codesign --verify --deep --strict "$app"
 product="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$app/Contents/Info.plist")"
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
 build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")"
-output="$(pwd)/Distributions"
+output="${HAKCHI_DMG_OUTPUT:-$(cd .. && pwd)/Distributions}"
 mkdir -p "$output"
 image="$output/$product-$version-build$build.dmg"
 [[ ! -e "$image" ]] || { printf 'Refusing to overwrite %s\n' "$image" >&2; exit 1; }
 stage="$(mktemp -d "$output/.dmg-stage.XXXXXX")"
 trap 'rm -rf -- "$stage"' EXIT
-ditto "$app" "$stage/$(basename "$app")"
-ln -s /Applications "$stage/Applications"
 cat > "$stage/Read Me.txt" <<TEXT
 $product $version (build $build)
 
@@ -26,8 +24,13 @@ Use Add Game Files to copy your files into the Mac library. Settings > Storage s
 
 Hardware testing so far: NES library sync on an already modified NES, and native US SNES setup and library sync. First-time setup on a stock NES and other console models still need independent hardware testing.
 
-This local development image has not been notarized or published. It is not the public release package. Any personal offline catalog snapshot in this app remains part of this private development build.
+This preview is not signed with a Developer ID or notarized by Apple. macOS may warn you before opening it. Check the project page for current console support and instructions.
 TEXT
-hdiutil create -volname "$product" -srcfolder "$stage" -format UDZO -imagekey zlib-level=9 "$image"
+python="${DMGBUILD_PYTHON:-python3}"
+if ! "$python" -c 'import importlib.metadata, sys; import dmgbuild; sys.exit(importlib.metadata.version("dmgbuild") != "1.6.7")' >/dev/null 2>&1; then
+    printf 'Install dmgbuild 1.6.7 for Python 3.10 or later before building the installer.\n' >&2
+    exit 1
+fi
+"$python" -m dmgbuild -s scripts/dmg-layout.py -D "app=$app" -D "readme=$stage/Read Me.txt" "$product" "$image"
 hdiutil verify "$image"
 printf '\nDMG_PATH=%s\n' "$image"

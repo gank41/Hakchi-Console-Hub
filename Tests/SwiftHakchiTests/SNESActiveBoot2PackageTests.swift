@@ -16,6 +16,24 @@ actor SNESPhysicalSnapshotFixtureCache {
 }
 @Suite(.serialized)
 struct SNESActiveBoot2PackageTests {
+    @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_ACTIVE_READER"] != nil))
+    func returnsExactReceiptAndRemovesCompletionWhenFinalCheckChangesFiles() async throws {
+        let snapshot = try await SNESPhysicalSnapshotFixtureCache.shared.snapshot(), root = try testDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try RecoveryBootSnapshotStore(root: root)
+        let receipt = try await store.saveSNESActiveBoot2WithReceipt(snapshot)
+        #expect(receipt.kind == .activeBoot2)
+        let loaded = try SNESActiveBoot2Package.load(directory: receipt.directory, source: snapshot.source)
+        #expect(loaded.manifestSHA256 == receipt.manifestSHA256 && loaded.active == snapshot.active)
+        await #expect(throws: (any Error).self) {
+            try await store.saveSNESActiveBoot2WithReceipt(snapshot, verify: { directory in
+                try Data(count: 24).write(to: directory.appendingPathComponent("geometry.bin"))
+            })
+        }
+        let folders = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        let incomplete = try #require(folders.first { $0 != receipt.directory })
+        #expect(!FileManager.default.fileExists(atPath: incomplete.appendingPathComponent("manifest.json").path))
+    }
     @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_ACTIVE_READER"] != nil),arguments:["none","flag","geometry","active","extra","unknown","challenges","source","range"])
     func reopensOnlyCompleteExactSourceBoundPreimage(_ fault:String) async throws {
         let snapshot=try await SNESPhysicalSnapshotFixtureCache.shared.snapshot(),root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}

@@ -5,6 +5,14 @@ nes_launch_work="$(cd -- "$nes_launch_repo/.." && pwd)/work/snes-compatibility-l
 mkdir -p "$nes_launch_work"
 cd -- "$nes_launch_repo"
 clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+  tools/snes-compatibility-launch/playtime.c tools/snes-compatibility-launch/test_playtime.c \
+  -o "$nes_launch_work/test-playtime"
+"$nes_launch_work/test-playtime"
+clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+  tools/snes-compatibility-launch/state_codec.c tools/snes-compatibility-launch/test_state_codec.c \
+  -lz -o "$nes_launch_work/test-state-codec"
+"$nes_launch_work/test-state-codec"
+clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   tools/snes-compatibility-launch/test_transitions.c -o "$nes_launch_work/test-transitions"
 "$nes_launch_work/test-transitions"
 clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
@@ -83,6 +91,10 @@ clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
 "$nes_launch_work/test-child-confirmed"
 "$nes_launch_work/test-child-verified"
 "$nes_launch_work/test-child-process"
+clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+  tools/snes-compatibility-launch/control_pipe.c tools/snes-compatibility-launch/child_process.c \
+  tools/snes-compatibility-launch/test_child_stock_receipt.c -o "$nes_launch_work/test-child-stock-receipt"
+"$nes_launch_work/test-child-stock-receipt"
 clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Dwaitpid=hc_test_waitpid \
   tools/snes-compatibility-launch/control_pipe.c tools/snes-compatibility-launch/child_process.c \
   tools/snes-compatibility-launch/test_child_wait_interruption.c -o "$nes_launch_work/test-child-wait-interruption"
@@ -124,7 +136,7 @@ clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -lz -o "$nes_launch_work/test-runtime-checkpoint"
 "$nes_launch_work/test-runtime-checkpoint"
 if [[ -n "${HAKCHI_ARM_CC:-}" ]]; then
-  for nes_launch_component in transitions arguments isolated_saves control_pipe owned_directory child_process control_command screenshot_png checkpoint_receipt screenshot_completion save_completion runtime_checkpoint shutdown_gate autosave_watch autosave_verify autosave_publish autosave_target admission_barrier core_deletion; do
+  for nes_launch_component in transitions arguments isolated_saves control_pipe owned_directory child_process control_command screenshot_png state_codec checkpoint_receipt screenshot_completion save_completion runtime_checkpoint shutdown_gate autosave_watch autosave_verify autosave_publish autosave_target admission_barrier core_deletion; do
     "$HAKCHI_ARM_CC" -std=c11 -Wall -Wextra -Werror -O2 -Ivendor/mbedtls/include -c \
       "tools/snes-compatibility-launch/$nes_launch_component.c" \
       -o "$nes_launch_work/$nes_launch_component.arm.o"

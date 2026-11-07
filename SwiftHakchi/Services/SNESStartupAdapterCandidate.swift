@@ -20,6 +20,13 @@ struct SNESStartupAdapterCandidate: Sendable {
     var hasNativeArtworkSupport:Bool {recipeVersion>=10}
     var libraryRecipeVersion:Int {recipeVersion}
     var managementVersion:UInt16 {recipeVersion>=10 ? 0x6a0b:recipeVersion>=9 ? 0x6a0a:recipeVersion>=8 ? 0x6a09:recipeVersion>=7 ? 0x6a08:recipeVersion>=6 ? 0x6a07:recipeVersion==5 ? 0x6a06:recipeVersion==4 ? 0x6a05:0x6a04}
+    /// Bind the same startup image to a newer verified snapshot from this setup.
+    static func withCurrentBackup(_ candidate:Self,receipt:SNESDataSnapshotReceipt)throws->Self {
+        let source=try SNESPreparationSource.load(candidate.material.support.setup)
+        let backup=try SNESDataSnapshotPackage.load(receipt:receipt,source:source)
+        let rebound=Self(image:candidate.image,material:candidate.material,backup:backup,recipeVersion:candidate.recipeVersion)
+        _=try rebound.checkedExport();try backup.revalidate();return rebound
+    }
     static func withMenuSupport(_ candidate:Self) throws -> Self {
         _=try candidate.checkedExport()
         let source=try LegacyBootImageBuilder.inspect(candidate.image)
@@ -44,7 +51,7 @@ struct SNESStartupAdapterCandidate: Sendable {
         let daemon=try RecoveryPayloadValidator.member("bin/clovershell",entries:TarContainer.open(container:tar))
         return try assemble(material:material,daemon:daemon,busybox:busybox,backup:backup,recipeVersion:3)
     }
-    private static func assemble(material: SNESOriginalMenuMaterial, daemon: Data, busybox: Data, backup: SNESDataSnapshotPackage, recipeVersion:Int) throws -> Self {
+    private static func assemble(material: SNESOriginalMenuMaterial, daemon: Data, busybox: Data, backup: SNESDataSnapshotPackage, recipeVersion:Int, validatingImage:Data? = nil) throws -> Self {
         guard [1,2,3,4,5,6,7,8,9,10].contains(recipeVersion) else { throw SNESRuntimeBinding.failure() }
         try Task.checkCancellation();try material.revalidate();try backup.revalidate()
         let matched=try SNESDataSnapshotPackage.load(directory:backup.directory,expectedHWID:material.binding.expectedHWID)
@@ -106,7 +113,13 @@ struct SNESStartupAdapterCandidate: Sendable {
         for name in assets.keys.sorted() { add("swifthakchi/"+name,executable.contains(name) ? 0o100700:0o100600,assets[name]!) }
         let archive=try original.archive.updating(replacements:["sbin/init":changedInit],additions:additions)
         let encoding:LegacyBootImageBuilder.RamdiskEncoding=recipeVersion==1 ? .lzopStored:recipeVersion==2 ? .xz:.lzopCompressed
-        let image=try LegacyBootImageBuilder.build(source:source.stock,kernel:original.kernel,archive:archive,ramdiskEncoding:encoding)
+        let image:Data
+        if let existing = validatingImage, recipeVersion >= 2 {
+            guard try LegacyBootImageBuilder.matchesRebuild(existing,source:source.stock,kernel:original.kernel,archive:archive) else { throw SNESRuntimeBinding.failure() }
+            image=existing
+        } else {
+            image=try LegacyBootImageBuilder.build(source:source.stock,kernel:original.kernel,archive:archive,ramdiskEncoding:encoding)
+        }
         let checked=try LegacyBootImageBuilder.inspect(image)
         guard checked.kernel==original.kernel,checked.archive==archive,checked.header[64..<576]==original.header[64..<576] else { throw SNESRuntimeBinding.failure() }
         for entry in original.archive.entries where entry.name != "sbin/init" {
@@ -145,7 +158,7 @@ struct SNESStartupAdapterCandidate: Sendable {
         func member(_ name:String) throws -> Data {
             guard let entry=parsed.archive.entries.first(where: { $0.name=="swifthakchi/"+name }),entry.fields[1]&0xf000==0x8000 else { throw SNESRuntimeBinding.failure() };return entry.data
         }
-        let rebuilt=try Self.assemble(material:material,daemon:member("clovershell"),busybox:member("busybox"),backup:backup,recipeVersion:recipeVersion)
+        let rebuilt=try Self.assemble(material:material,daemon:member("clovershell"),busybox:member("busybox"),backup:backup,recipeVersion:recipeVersion,validatingImage:image)
         guard try Self.sameImage(image,rebuilt:rebuilt),let runtime=material.runtime.directoryURL else { throw SNESRuntimeBinding.failure() }
         let support=material.support
         let m=Manifest(schemaVersion:recipeVersion,complete:true,bootEligible:false,firmwareInstallEligible:false,firmwareWritten:false,firmwareRestoreEligible:false,
@@ -156,11 +169,12 @@ struct SNESStartupAdapterCandidate: Sendable {
         let encoder=JSONEncoder();encoder.outputFormatting=[.prettyPrinted,.sortedKeys]
         return (["startup.img":image],try encoder.encode(m))
     }
-    static func load(directory:URL) throws -> Self {
+    static func load(directory:URL,expectedManifestSHA256:String?=nil) throws -> Self {
         let dir=try RestoreDirectory(directory),prefix="SNES-Startup-Candidate-"
         guard dir.url.lastPathComponent.hasPrefix(prefix),UUID(uuidString:String(dir.url.lastPathComponent.dropFirst(prefix.count))) != nil,
               Set(try dir.names())==Set(["startup.img","manifest.json"]) else { throw SNESRuntimeBinding.failure() }
         let raw=try dir.read("manifest.json",maximum:65536),m=try JSONDecoder().decode(Manifest.self,from:raw)
+        if let expectedManifestSHA256, BackupManifest.digest(raw) != expectedManifestSHA256 { throw SNESRuntimeBinding.failure() }
         guard [1,2,3,4,5,6,7,8,9,10].contains(m.schemaVersion),m.complete,!m.bootEligible,!m.firmwareInstallEligible,!m.firmwareWritten,!m.firmwareRestoreEligible,
               m.scope=="snes-original-profile-startup",m.profilePolicy=="original-existing-data",m.managementStorage=="ram-tmpfs-8MiB",
               [m.setupPath,m.preparationPath,m.supportPath,m.componentsPath,m.runtimePath,m.currentDataPath].allSatisfy({ $0.hasPrefix("/") && !$0.contains("\0") && $0.utf8.count<=4096 }) else { throw SNESRuntimeBinding.failure() }
@@ -177,7 +191,7 @@ struct SNESStartupAdapterCandidate: Sendable {
         func member(_ name:String) throws -> Data {
             guard let entry=parsed.archive.entries.first(where: { $0.name=="swifthakchi/"+name }),entry.fields[1]&0xf000==0x8000 else { throw SNESRuntimeBinding.failure() };return entry.data
         }
-        let rebuilt=try Self.assemble(material:material,daemon:member("clovershell"),busybox:member("busybox"),backup:backup,recipeVersion:m.schemaVersion)
+        let rebuilt=try Self.assemble(material:material,daemon:member("clovershell"),busybox:member("busybox"),backup:backup,recipeVersion:m.schemaVersion,validatingImage:image)
         guard try Self.sameImage(image,rebuilt:rebuilt),BackupManifest.digest(image)==m.imageSHA256 else { throw SNESRuntimeBinding.failure() }
         let restored=Self(image:image,material:material,backup:backup,recipeVersion:m.schemaVersion)
         let export=try restored.checkedExport()

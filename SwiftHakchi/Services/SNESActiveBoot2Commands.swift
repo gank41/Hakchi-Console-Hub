@@ -45,20 +45,32 @@ enum SNESActiveBoot2Commands {
         test "$("$B" cat "$d/owner")" = '\#(id.uuidString)' || exit 47
         """# + "\n"
     }
-    private static let helperChecks = #"""
-    test "$("$B" wc -c < "$H" | "$B" tr -d '[:space:]')" = 11928 || exit 48
+    private static func helperChecks(byteCount:Int,digest:String)->String { #"""
+    test "$("$B" wc -c < "$H" | "$B" tr -d '[:space:]')" = \#(byteCount) || exit 48
     value=$("$B" sha256sum "$H") || exit 48
-    test "${value%% *}" = '59dc6f084106cb4d08b56d9bbb6abcd9a1f9f09de3c668018432eabdb9066ae0' || exit 48
+    test "${value%% *}" = '\#(digest)' || exit 48
     test "$("$B" stat -c '%a' "$H")" = 500 || exit 48
-    """#
+    """# }
     static func validation(id:UUID)->String {
-        owned(id:id)+"chmod 500 \"$H\" || exit 48\n"+helperChecks+"\n" + #"""
+        validation(id:id,byteCount:11928,digest:SNESBoundedReadHelper.sha256)
+    }
+    static func validation(id:UUID,helper:SNESBoundedReadHelper)->String {
+        validation(id:id,byteCount:helper.bytes.count,digest:helper.digest)
+    }
+    private static func validation(id:UUID,byteCount:Int,digest:String)->String {
+        owned(id:id)+"chmod 500 \"$H\" || exit 48\n"+helperChecks(byteCount:byteCount,digest:digest)+"\n" + #"""
         printf '%s\n' 'SWIFTHAKCHI_SNES_PHYSICAL_HELPER_V1 \#(id.uuidString)'
         """# + "\n"
     }
     static func read(id:UUID,kind:SNESPhysicalFrame.Kind,challenge:UUID)->String {
+        read(id:id,kind:kind,challenge:challenge,byteCount:11928,digest:SNESBoundedReadHelper.sha256)
+    }
+    static func read(id:UUID,kind:SNESPhysicalFrame.Kind,challenge:UUID,helper:SNESBoundedReadHelper)->String {
+        read(id:id,kind:kind,challenge:challenge,byteCount:helper.bytes.count,digest:helper.digest)
+    }
+    private static func read(id:UUID,kind:SNESPhysicalFrame.Kind,challenge:UUID,byteCount:Int,digest:String)->String {
         let invocation=kind == .geometry ? "\"$H\" geometry":"\"$H\" read-active 56"
-        return owned(id:id)+helperChecks+"\n" + #"""
+        return owned(id:id)+helperChecks(byteCount:byteCount,digest:digest)+"\n" + #"""
         f="$d/result-\#(challenge.uuidString)"
         test ! -e "$f" && test ! -L "$f" || exit 49
         trap '"$B" rm -f "$f"' EXIT

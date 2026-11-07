@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import SwiftHakchiCore
 
 /// Byte validation precedes/follows capture; immutable firmware buffers are separate.
 /// This detects source replacement/edits at each await without re-reading300MiB.
@@ -53,5 +54,28 @@ struct SNESFirmwareSourceSeal:Sendable {
             guard try Self.directoryInfo(d).sameParent(saved.parent),try Self.fileInfo(saved.url.lastPathComponent,in:d)==saved.signature else {throw RestoreDirectory.failure()}
             try d.check()
         }
+    }
+    /// Hash bytes through the same directory and file identities captured by this seal.
+    func requireFileDigest(_ url: URL, sha256: String, maximum: Int) throws {
+        guard url.isFileURL, url == url.standardizedFileURL, sha256.count == 64,
+              SNESRuntimeBinding.hex(sha256), maximum > 0 else { throw RestoreDirectory.failure() }
+        let parentURL = url.deletingLastPathComponent(), name = url.lastPathComponent
+        let d = try RestoreDirectory(parentURL), parent = try Self.directoryInfo(d)
+        let signature: Signature
+        if let saved = directories.first(where: { $0.url.path == parentURL.path }), let entry = saved.entries[name] {
+            guard parent == saved.signature else { throw RestoreDirectory.failure() }
+            signature = entry
+        } else if let saved = files.first(where: { $0.url.path == url.path }) {
+            guard parent.sameParent(saved.parent) else { throw RestoreDirectory.failure() }
+            signature = saved.signature
+        } else { throw RestoreDirectory.failure() }
+        guard try Self.fileInfo(name, in: d) == signature,
+              BackupManifest.digest(try d.read(name, maximum: maximum)) == sha256,
+              try Self.fileInfo(name, in: d) == signature else { throw RestoreDirectory.failure() }
+        try d.check()
+        let after = try Self.directoryInfo(d)
+        if directories.contains(where: { $0.url.path == parentURL.path }) {
+            guard after == parent else { throw RestoreDirectory.failure() }
+        } else { guard after.sameParent(parent) else { throw RestoreDirectory.failure() } }
     }
 }

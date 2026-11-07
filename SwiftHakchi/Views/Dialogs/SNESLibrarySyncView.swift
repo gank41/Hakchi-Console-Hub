@@ -5,6 +5,7 @@ import SwiftHakchiCore
 struct SNESLibrarySyncView: View {
     var originalsOnly = false
     var restoreSnapshot: SNESLibrarySnapshotReference? = nil
+    var replacementSnapshot: SNESLibrarySnapshotReference? = nil
     @EnvironmentObject private var app: AppState
     @Environment(\.dismiss) private var dismiss
     @State private var model: SNESLibrarySyncModel?
@@ -18,7 +19,7 @@ struct SNESLibrarySyncView: View {
         .frame(minWidth: 700, idealWidth: 800, maxWidth: 920, minHeight: 540, idealHeight: 680, maxHeight: 760)
         .task {
             guard model == nil else { return }
-            let value = SNESLibrarySyncModel(app: app, originalsOnly: originalsOnly, restoreSnapshot: restoreSnapshot); model = value; await value.start()
+            let value = SNESLibrarySyncModel(app: app, originalsOnly: originalsOnly, restoreSnapshot: restoreSnapshot, replacementSnapshot: replacementSnapshot); model = value; await value.start()
         }
         .interactiveDismissDisabled(model?.phase.isBusy == true)
         .onDisappear {
@@ -42,14 +43,25 @@ private struct SNESLibrarySyncBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label(model.isReturningPrevious ? "Recover Unfinished Sync — SNES Classic" : model.isRestoringSavedGames ? "Restore Games and Folders — SNES Classic" : model.originalsOnly ? "Return to Built-in Games — SNES Classic" : "Sync Library — SNES Classic", systemImage: "arrow.triangle.2.circlepath").font(.title2.bold())
+                Label(model.isReturningPrevious ? "Recover Unfinished Sync — SNES Classic" : model.isRestoringReplacement ? "Copy Games to Replacement — SNES Classic" : model.isRestoringSavedGames ? "Restore Games and Folders — SNES Classic" : model.originalsOnly ? "Return to Built-in Games — SNES Classic" : "Sync Library — SNES Classic", systemImage: "arrow.triangle.2.circlepath").font(.title2.bold())
                 Spacer()
                 Text(model.phase.isTerminal ? (model.phase == .cancelled ? "Cancelled" : "Finished") : model.isReturningPrevious ? "Review → Return → Remove unfinished copy" : "Review → Copy → Show → Finish").font(.callout).foregroundStyle(.secondary)
             }
             if model.phase.isBusy {
-                HStack(spacing: 10) { ProgressView().controlSize(.small); Text(model.phase.progressTitle) }
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Working…").font(.headline)
+                        Text(model.phase.progressTitle)
+                    }
+                }
                 Text("Leave the console powered and connected at its game menu. First turn off My Game Play Demo and Classic Demo in the SNES Options menu.").font(.callout).foregroundStyle(.secondary)
             } else {
+                if [.restart, .rollbackRestart, .testing, .readyToFinish, .readyToDiscard, .readyToRollback].contains(model.phase) {
+                    Label("Your turn", systemImage: "hand.raised.fill").font(.headline).foregroundStyle(.orange)
+                } else if model.phase == .interrupted || model.phase == .needsSetup {
+                    Label("Needs attention", systemImage: "exclamationmark.triangle.fill").font(.headline).foregroundStyle(.orange)
+                }
                 Text(model.message).fixedSize(horizontal: false, vertical: true)
             }
             capacity
@@ -83,7 +95,11 @@ private struct SNESLibrarySyncBody: View {
                 backupLink
                 Spacer()
             } else if model.phase.isTerminal {
-                Label(model.phase == .cancelled ? "Copy cancelled" : "Sync complete", systemImage: "checkmark.circle.fill").font(.title).foregroundStyle(.green)
+                if model.phase == .cancelled {
+                    Label("Copy cancelled", systemImage: "stop.circle").font(.title).foregroundStyle(.secondary)
+                } else {
+                    Label("Sync complete", systemImage: "checkmark.circle.fill").font(.title).foregroundStyle(.green)
+                }
                 backupLink
                 Spacer()
             } else {
@@ -186,7 +202,7 @@ private struct SNESLibrarySyncBody: View {
     @ViewBuilder private var review: some View {
         if model.isRestoringSavedGames {
             if let graph = model.graph { ConsoleLayoutPreview(graph: graph).frame(maxHeight: 200) }
-            Text("This restores \(model.selectedGameCount) added games and their saved folders and artwork. Your current saves and settings are kept. The library you replace is backed up on the Mac before copying.")
+            Text(model.isRestoringReplacement ? "This copies \(model.selectedGameCount) added games, folders and artwork. Saved-game progress is not copied yet. The replacement's current games and saves are backed up before copying." : "This restores \(model.selectedGameCount) added games and their saved folders and artwork. Your current saves and settings are kept. The library you replace is backed up on the Mac before copying.")
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
         } else if model.originalsOnly {

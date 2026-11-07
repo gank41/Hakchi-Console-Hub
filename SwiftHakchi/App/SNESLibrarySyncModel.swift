@@ -22,8 +22,10 @@ import SwiftHakchiCore
     private var rollbackReview:SNESLibraryInventory?
     let originalsOnly: Bool
     let restoreSnapshot: SNESLibrarySnapshotReference?
+    let replacementSnapshot: SNESLibrarySnapshotReference?
     private var restoredMenu: SNESLibraryMenu?, restoreSource: SNESLibraryBackup?
-    var isRestoringSavedGames: Bool { restoreSnapshot != nil }
+    var isRestoringReplacement: Bool { replacementSnapshot != nil }
+    var isRestoringSavedGames: Bool { restoreSnapshot != nil || replacementSnapshot != nil }
     var originalGameCount: Int { records?.installation.originals.frame.entries.count ?? 0 }
     private weak var app: AppState?
     private let workspace: WorkspacePaths
@@ -37,7 +39,11 @@ import SwiftHakchiCore
     private var reviewedFingerprint: String?
     private var navigation: SNESLibraryMenu.NavigationArtwork?
     private var ownsConnection = false, closed = false
-    init(app: AppState, originalsOnly: Bool = false, restoreSnapshot: SNESLibrarySnapshotReference? = nil) { self.app = app; self.originalsOnly = originalsOnly; self.restoreSnapshot = restoreSnapshot; workspace = AppConfig.shared.workspace }
+    init(app: AppState, originalsOnly: Bool = false, restoreSnapshot: SNESLibrarySnapshotReference? = nil,
+         replacementSnapshot: SNESLibrarySnapshotReference? = nil) {
+        self.app = app; self.originalsOnly = originalsOnly; self.restoreSnapshot = restoreSnapshot
+        self.replacementSnapshot = replacementSnapshot; workspace = AppConfig.shared.workspace
+    }
     var canRetryOpening: Bool { phase == .interrupted && journal == nil }
     var canInspectInterruptedSync: Bool { phase == .interrupted && journal != nil && plan != nil }
     var canReviewDiscard: Bool { [.interrupted, .copied].contains(phase) && journal != nil && plan != nil && !canReviewPreviousGames }
@@ -72,29 +78,32 @@ import SwiftHakchiCore
             records = try current.ownerRecords()
             if current.supportsLibraryRecovery, try await openPendingReview(current) { return }
             let originals = current.installation.originals.frame
-            if let restoreSnapshot {
+            guard restoreSnapshot == nil || replacementSnapshot == nil else { throw fail("Choose one saved library to review.") }
+            if let snapshot = replacementSnapshot ?? restoreSnapshot {
                 guard !originalsOnly else { throw fail("Choose either a saved library or the original games.") }
-                try SNESLibraryBackupHistory.requireLocation(restoreSnapshot.directory, workspace: workspace)
-                let saved = try restoreSnapshot.reopen()
-                let material = try SNESLibraryRestore.prepare(backup: saved, originals: originals, expectedHWID: current.installation.expected.hwid)
+                try SNESLibraryBackupHistory.requireLocation(snapshot.directory, workspace: workspace)
+                let saved = try snapshot.reopen()
+                let material = try SNESLibraryRestore.prepareForSync(backup: saved, originals: originals,
+                    destinationHWID: current.installation.expected.hwid, scope: isRestoringReplacement ? .replacementConsole : .sameConsole)
                 restoredMenu = try material.menu ?? SNESLibraryMenu.originalGames(originals: originals)
                 restoreSource = saved
             }
-            let games = originalsOnly || restoreSnapshot != nil ? [] : app.gameManager.games.filter { $0.source == .local && $0.consoleType == .snesUsa && $0.isSelected }
+            let games = originalsOnly || isRestoringSavedGames ? [] : app.gameManager.games.filter { $0.source == .local && $0.consoleType == .snesUsa && $0.isSelected }
             let compatibility = try SNESLibraryCompatibility.review(games: games, originals: originals)
             let cache = try SNESLibraryObjectCache.prepare(review: compatibility)
             draft = try .init(review: compatibility, originals: originals, cache: cache, selected: Set(games.filter(\.isSelected).map(\.code)),
                 structure: AppConfig.shared.structure(for: .snesUsa), order: .title)
             navigation = try SNESLibraryNavigationArtwork.standard()
             if !current.supportsLibrarySync || !current.supportsNativeArtwork {
-                phase = .needsSetup; message = "The SNES startup software needs an update. Close this review and choose Install Kernel to continue Console Setup."
+                phase = .needsSetup; message = "This SNES needs setup before games can be synced. Open Set Up SNES to review the preview setup steps. Your console has not been changed."
                 rebuildPreview(); return
             }
             await app.deviceManager.pauseForRecovery(); ownsConnection = true
             let (source, value) = try await binding()
             let observed = try await source.observe(value)
             observation = observed; freeBytes = observed.capacity.freeBytes
-            phase = .review; message = isRestoringSavedGames ? "Restore this saved game library and its folders. Keep the saves and settings currently on your console and leave your Mac library unchanged." : originalsOnly ? "Show only the console’s original games. Your added games are backed up on the Mac before this change; saves and your Mac library stay." : "Review your selected games and console folders."
+            phase = .review
+            message = isRestoringReplacement ? "Review games and folders from the other SNES. Saved-game progress is not copied yet; saves already on this console are kept." : isRestoringSavedGames ? "Restore this saved game library and its folders. Keep the saves and settings currently on your console and leave your Mac library unchanged." : originalsOnly ? "Show only the console’s original games. Your added games are backed up on the Mac before this change; saves and your Mac library stay." : "Review your selected games and console folders."
             rebuildPreview()
         } catch { phase = .interrupted; detail = error.localizedDescription; message = "The SNES review could not be opened." }
     }

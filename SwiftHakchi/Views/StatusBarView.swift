@@ -3,6 +3,7 @@ import SwiftUI
 /// Bottom status bar showing connection state, console type, and game count
 struct StatusBarView: View {
     @EnvironmentObject var appState: AppState
+    @AppStorage("showAdvancedFeatures") private var showAdvancedFeatures = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -25,7 +26,7 @@ struct StatusBarView: View {
                 Text(appState.deviceManager.consoleType.displayName)
                     .font(.caption)
 
-                if !appState.deviceManager.uniqueId.isEmpty {
+                if showAdvancedFeatures && !appState.deviceManager.uniqueId.isEmpty {
                     Text(appState.deviceManager.uniqueId)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -41,7 +42,7 @@ struct StatusBarView: View {
                     Image(systemName: "bolt.fill")
                         .font(.caption2)
                         .foregroundStyle(.orange)
-                    Text("Legacy / FEL USB")
+                    Text(showAdvancedFeatures ? "Legacy / FEL USB" : "Console USB detected")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -80,9 +81,9 @@ struct StatusBarView: View {
                 let projection = appState.legacyCapacityPreview
                 Text("\(free) free now on NES")
                     .font(.caption).foregroundStyle(.secondary)
-                if let projection, projection.freeBytes == report.freeBytes {
+                if let projection, projection.freeBytes == report.freeBytes, showAdvancedFeatures || projection.headroomBytes < 0 {
                     Divider().frame(height: 12)
-                    Text(projection.headroomBytes >= 0
+                    Text(!showAdvancedFeatures ? "Not enough room for this sync" : projection.headroomBytes >= 0
                          ? "≤\(ByteCountFormatter.string(fromByteCount: projection.headroomBytes, countStyle: .binary)) staging headroom"
                          : "Short \(ByteCountFormatter.string(fromByteCount: -projection.headroomBytes, countStyle: .binary)) for staging")
                         .font(.caption)

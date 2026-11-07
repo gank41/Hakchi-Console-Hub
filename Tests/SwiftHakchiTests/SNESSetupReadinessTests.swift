@@ -208,6 +208,22 @@ struct SNESSetupReadinessTests {
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
     }
 
+    @Test func setupReceiptRejectsChangesDuringFinalVerification() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let report = try await captureSetup(SNESSetupIO())
+        let store = try RecoveryBootSnapshotStore(root: root)
+        await #expect(throws: (any Error).self) {
+            try await store.saveSNESSetupWithReceipt(report, verify: { directory in
+                try Data([0]).write(to: directory.appendingPathComponent("boot1.bin"))
+            })
+        }
+        let folders = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        #expect(folders.count == 1 && !FileManager.default.fileExists(atPath: folders[0].appendingPathComponent("manifest.json").path))
+        let receipt = try await store.saveSNESSetupWithReceipt(report)
+        let manifest = try Data(contentsOf: receipt.directory.appendingPathComponent("manifest.json"))
+        #expect(receipt.kind == .backup && receipt.manifestSHA256 == BackupManifest.digest(manifest))
+    }
+
     @Test func incompleteExportHasNoCompletedManifestAndPriorBackupSurvives() async throws {
         let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
         let report = try await captureSetup(SNESSetupIO())

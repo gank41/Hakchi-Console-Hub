@@ -1,0 +1,8 @@
+RetroArch 1.7.0
+
+Source: https://github.com/libretro/RetroArch
+Revision: 0a2b44273da17d1b2372cd16469bb74791f7ac95
+The included ARM build modifies four files for shutdown and save reporting.
+The source archive is retained in tools/snes-compatibility-launch/frontend-source,
+and the corresponding patch is in the SNESCompatibilityFrontend resources.
+See RetroArch-GPLv3.txt for the applicable license.

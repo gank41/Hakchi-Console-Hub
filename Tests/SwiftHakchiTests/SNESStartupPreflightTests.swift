@@ -47,6 +47,64 @@ actor SNESStartupPreflightFakeIO:SNESStartupPreflightIO {
 }
 @Suite(.serialized)
 struct SNESStartupPreflightTests {
+    @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_CURRENT_DATA"] != nil), arguments: ["none", "stale-backup"])
+    @MainActor func appPreflightBindsCandidateAndReportsBackupMatch(_ fault: String) async throws {
+        let candidate = try await SNESStartupPreflightFixtureCache.shared.candidate()
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = try RecoveryBootSnapshotStore(root: root)
+        let original = try await store.saveSNESStartupCandidateWithReceipt(candidate)
+        let io = try SNESStartupPreflightFakeIO(candidate: candidate, fault: fault), calls = ConnectionCallCounter()
+        let config = AppConfig(); config.workspacePath = root.path; config.backupDirectoryPath = root.path; config.lastConsoleType = .snesUsa
+        let app = AppState(startDeviceMonitoring: false, config: config, saveConfiguration: {},
+            checkRecoveryHost: { await calls.record(1) }, makeSNESStartupPreflightIO: { _ in io })
+        app.isPreparingSync = true
+        let invalid = SNESSetupRecordReceipt(kind: .candidate, directory: original.directory, manifestSHA256: String(repeating: "0", count: 64))
+        await #expect(throws: (any Error).self) { try await app.checkSNESStartupCandidate(invalid, progress: { _ in }) }
+        #expect(await calls.ids.isEmpty); #expect(await io.base.events.isEmpty)
+        let result = try await app.checkSNESStartupCandidate(original, progress: { _ in })
+        #expect(result.record.kind == .preflight && result.backupMatches == (fault == "none"))
+        let saved = try SNESStartupPreflightEvidence.load(directory: result.record.directory, candidate: candidate)
+        #expect(saved.manifestSHA256 == result.record.manifestSHA256)
+        #expect(saved.backupMatches == (fault == "none"))
+        try saved.requireReceipt(result, candidate: candidate)
+        let wrong = SNESStartupPreflightReceipt(record: result.record, backupMatches: !result.backupMatches)
+        #expect(throws: (any Error).self) { try saved.requireReceipt(wrong, candidate: candidate) }
+        let wrongRecord = SNESSetupRecordReceipt(kind: .preflight, directory: result.record.directory, manifestSHA256: String(repeating: "0", count: 64))
+        #expect(throws: (any Error).self) { try saved.requireReceipt(SNESStartupPreflightReceipt(record: wrongRecord, backupMatches: result.backupMatches), candidate: candidate) }
+        let pinned = try PinnedFELInputs.load()
+        let recovery = RecoveryBootInputs(fes1: pinned.fes1, uboot: pinned.uboot, bootImage: pinned.bootImage)
+        if result.backupMatches {
+            let trial = try PreparedSNESStartupTrial.prepare(candidate: candidate, receipt: result, recovery: recovery)
+            let manifest = result.record.directory.appendingPathComponent("manifest.json")
+            var bytes = try Data(contentsOf: manifest); bytes.append(32); try bytes.write(to: manifest)
+            #expect(throws: (any Error).self) { try trial.validateCurrent() }
+        } else {
+            #expect(throws: (any Error).self) { try PreparedSNESStartupTrial.prepare(candidate: candidate, receipt: result, recovery: recovery) }
+        }
+        #expect(await calls.ids.count == 1); #expect(await io.stages == 1)
+        #expect(await io.base.events.filter { $0 == "disconnect" }.count == 1)
+    }
+    @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_CURRENT_DATA"] != nil))
+    func preflightExportRemovesCompletionIfFinalVerificationFails() async throws {
+        let candidate = try await SNESStartupPreflightFixtureCache.shared.candidate(), pinned = try PinnedFELInputs.load()
+        let io = try SNESStartupPreflightFakeIO(candidate: candidate, fault: "none")
+        let result = try await SNESStartupPreflightService(wait: {}).capture(candidate: candidate,
+            inputs: .init(fes1: pinned.fes1, uboot: pinned.uboot, bootImage: pinned.bootImage), io: io)
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = try RecoveryBootSnapshotStore(root: root)
+        await #expect(throws: (any Error).self) { try await store.saveSNESStartupPreflightWithReceipt(result, verify: { _ in throw SNESRuntimeBinding.failure() }) }
+        await #expect(throws: (any Error).self) {
+            try await store.saveSNESStartupPreflightWithReceipt(result, verify: { directory in
+                let file = directory.appendingPathComponent("data-header.bin")
+                var bytes = try Data(contentsOf: file); bytes[0] ^= 1; try bytes.write(to: file)
+            })
+        }
+        let directories = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        #expect(directories.count == 2)
+        for incomplete in directories {
+            #expect(!FileManager.default.fileExists(atPath: incomplete.appendingPathComponent("manifest.json").path))
+        }
+    }
     @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_CURRENT_DATA"] != nil),
           arguments:["none","inventory","boot","connect","identity","mounted-data","kernel","second-kernel","boot1","partitions","header","stale-backup","stage","cancel","attachment","changed-data"])
     func checksCurrentBackupAndPreimageBeforeOneRAMStage(_ fault:String) async throws {

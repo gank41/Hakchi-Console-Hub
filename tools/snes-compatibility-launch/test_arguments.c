@@ -94,6 +94,37 @@ int main(void){
  assert(menu_out.checkpoint.have_save && menu_out.checkpoint.have_image);
  assert(!strcmp(menu_out.checkpoint.save,"/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/rollback/savestate"));
  assert(!strcmp(menu_out.checkpoint.image,"/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/state.png"));
+ /* A manager time file must never alias an SRAM, clock, state, or image
+  * destination. Load and save time may be the same file on resume. */
+ HCCompatibilityMenuCommand accepted=menu_out;
+ const char *collisions[]={menu[15],accepted.saves.sram,accepted.saves.rtc,accepted.checkpoint.save,accepted.checkpoint.image,
+  "/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/STATE.PNG"};
+ for(size_t i=0;i<sizeof collisions/sizeof collisions[0];i++){
+  const char *bad[24];memcpy(bad,menu,sizeof bad);bad[23]=collisions[i];menu_out=menu_prior;
+  assert(hc_parse_compatibility_menu_command(24,bad,&menu_out)<0&&!memcmp(&menu_out,&menu_prior,sizeof menu_out));
+ }
+ const char *resume[26];memcpy(resume,menu,sizeof menu);resume[24]="--load-time-path";resume[25]=menu[23];
+ assert(!hc_parse_compatibility_menu_command(26,resume,&menu_out));
+ assert(menu_out.time.have_load&&menu_out.time.have_save&&!strcmp(menu_out.time.load,menu_out.time.save));
+ assert(!strcmp(menu_out.time.save,"/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/state.time"));
+ for(size_t i=0;i<sizeof collisions/sizeof collisions[0];i++){
+  resume[25]=collisions[i];menu_out=menu_prior;
+  assert(hc_parse_compatibility_menu_command(26,resume,&menu_out)<0&&!memcmp(&menu_out,&menu_prior,sizeof menu_out));
+ }
+ const char *rollback[28];memcpy(rollback,menu,sizeof menu);
+ rollback[24]="--rollback-input-dir";rollback[25]="/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint1/rollback";
+ rollback[26]="--load-time-path";rollback[27]="/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint1/rollback/savestate";
+ menu_out=menu_prior;assert(hc_parse_compatibility_menu_command(28,rollback,&menu_out)<0&&!memcmp(&menu_out,&menu_prior,sizeof menu_out));
+ rollback[27]="/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint1/old.time";
+ assert(!hc_parse_compatibility_menu_command(28,rollback,&menu_out));
+ assert(menu_out.checkpoint.have_load&&!strcmp(menu_out.checkpoint.load,"/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint1/rollback/savestate"));
+ const char *direct[26];memcpy(direct,menu,sizeof menu);direct[24]="--load-state-file";direct[25]="/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint1/saved.state";
+ assert(!hc_parse_compatibility_menu_command(26,direct,&menu_out));
+ assert(menu_out.checkpoint.have_load&&!strcmp(menu_out.checkpoint.load,direct[25]));
+ direct[25]=menu[21];menu_out=menu_prior;
+ assert(hc_parse_compatibility_menu_command(26,direct,&menu_out)<0&&!memcmp(&menu_out,&menu_prior,sizeof menu_out));
+ direct[25]=accepted.saves.sram;menu_out=menu_prior;
+ assert(hc_parse_compatibility_menu_command(26,direct,&menu_out)<0&&!memcmp(&menu_out,&menu_prior,sizeof menu_out));
  menu[18]="--save-on-quit";menu[19]="/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/direct.state";
  assert(!hc_parse_compatibility_menu_command(24,menu,&menu_out));
  assert(!strcmp(menu_out.checkpoint.save,menu[19])&&!strcmp(menu_out.checkpoint.image,"/var/cache/clover/volatile/CLV-U-ABCDE/suspendpoint0/state.png"));

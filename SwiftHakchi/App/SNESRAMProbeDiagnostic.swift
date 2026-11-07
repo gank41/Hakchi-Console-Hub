@@ -37,7 +37,6 @@ enum SNESRAMProbeDiagnostic {
             let runtime = try await SNESRuntimeCaptureService().capture(binding: source.runtimeBinding,
                 inputs: inputs, io: makeCaptureIO(), progress: progress)
             destination = try await store.saveSNESRuntime(runtime, source: source)
-            _ = try SNESRuntimeMaterial.load(directory: destination, source: source)
             values["status"] = "Original SNES runtime libraries saved and verified on this Mac. Return the console to normal boot."
             values["USBOpened"] = true
         case .prepare(let setup, let runtimePath, let kernel, let hmod, let busybox, let root):

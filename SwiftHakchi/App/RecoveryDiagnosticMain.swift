@@ -117,6 +117,7 @@ struct RecoveryDiagnosticMain {
             }, detail: {
                 FileHandle.standardError.write(Data(($0 + "\n").utf8))
             }) { print(result); return }
+            if let result = try await SNESRAMMenuDiagnostic.runIfPresent(arguments) { print(result); return }
             if let result = try await SNESAlienTrialDiagnostic.runIfPresent(arguments) { print(result); return }
             if let result = try await SNESOriginalMenuDiagnostic.runIfPresent(arguments, progress: {
                 FileHandle.standardError.write(Data(($0.title + "\n").utf8))
@@ -170,6 +171,99 @@ struct RecoveryDiagnosticMain {
             }
             if arguments.count == 3, arguments[0] == "--stage-legacy-trial" {
                 print(try await LegacyTrialStageDiagnostic.run(code: arguments[1], backup: URL(fileURLWithPath: arguments[2])))
+                return
+            }
+            if let nonce = try SNESRAMMenuLogRequest.parse(arguments) {
+                try RecoveryProbeUSBRegistry.requireOrdinaryAppClosed()
+                let devices = try RecoveryProbeUSBRegistry.inventory()
+                guard devices.count == 1, let device = devices.first else {
+                    throw RecoveryProbeError.refused("Connect exactly one temporary SNES menu test. No console command was sent.")
+                }
+                _ = try SNESOriginalMenuUSBPolicy.nativeIdentity(device)
+                let client = LegacyInspectionClient(transport: SNESOriginalMenuUSBTransport(expected: device), maximumOutputBytes: 65536)
+                try await client.connect(timeoutMilliseconds: 5000)
+                do {
+                    let result = try await client.execute(.snesOriginalMenuDiagnostics, timeoutMilliseconds: 10000)
+                    guard result.succeeded else { throw RecoveryProbeError.refused("The temporary menu log capture failed.") }
+                    _ = try SNESOriginalMenuDiagnostics(result.stdoutData, nonce: nonce.uuidString)
+                    await client.disconnect()
+                    FileHandle.standardOutput.write(result.stdoutData)
+                } catch { await client.disconnect(); throw error }
+                return
+            }
+            if arguments == ["--read-snes-ram-menu-lifecycle"] {
+                try RecoveryProbeUSBRegistry.requireOrdinaryAppClosed()
+                let devices = try RecoveryProbeUSBRegistry.inventory()
+                guard devices.count == 1, let device = devices.first else {
+                    throw RecoveryProbeError.refused("Connect exactly one temporary SNES menu test. No console command was sent.")
+                }
+                _ = try SNESOriginalMenuUSBPolicy.nativeIdentity(device)
+                let client = LegacyInspectionClient(transport: SNESOriginalMenuUSBTransport(expected: device), maximumOutputBytes: 4096)
+                try await client.connect(timeoutMilliseconds: 5000)
+                do {
+                    let result = try await client.readSNESRAMLifecycle()
+                    guard result.succeeded else { throw RecoveryProbeError.refused("The temporary owner lifecycle capture failed.") }
+                    _ = try SNESRAMLifecycleObservation.parse(result.stdoutData)
+                    await client.disconnect()
+                    print(String(decoding: result.stdoutData, as: UTF8.self), terminator: "")
+                } catch { await client.disconnect(); throw error }
+                return
+            }
+            if arguments == ["--read-snes-ram-menu-processes"] {
+                try RecoveryProbeUSBRegistry.requireOrdinaryAppClosed()
+                let devices = try RecoveryProbeUSBRegistry.inventory()
+                guard devices.count == 1, let device = devices.first else {
+                    throw RecoveryProbeError.refused("Connect exactly one temporary SNES menu test. No console command was sent.")
+                }
+                _ = try SNESOriginalMenuUSBPolicy.nativeIdentity(device)
+                let client = LegacyInspectionClient(transport: SNESOriginalMenuUSBTransport(expected: device), maximumOutputBytes: 65536)
+                try await client.connect(timeoutMilliseconds: 5000)
+                do {
+                    let launch = try await client.readSNESRAMLaunchObservation()
+                    guard launch.succeeded else { throw RecoveryProbeError.refused("The temporary launch observation is unavailable.") }
+                    _ = try SNESRAMLaunchObservation.parse(launch.stdoutData)
+                    let result = try await client.readSNESRAMTrialProcesses()
+                    guard result.succeeded else { throw RecoveryProbeError.refused("The read-only temporary process snapshot failed.") }
+                    _ = try SNESNativeProcessSnapshot.parse(result.stdoutData, allowTemporaryTrial: true)
+                    await client.disconnect()
+                    print(String(decoding: launch.stdoutData, as: UTF8.self), terminator: "")
+                    print(String(decoding: result.stdoutData, as: UTF8.self), terminator: "")
+                } catch { await client.disconnect(); throw error }
+                return
+            }
+            if arguments == ["--read-snes-native-time-inventory"] {
+                try RecoveryProbeUSBRegistry.requireOrdinaryAppClosed()
+                let devices = try RecoveryProbeUSBRegistry.inventory()
+                guard devices.count == 1, let device = devices.first, ConsoleAttachmentPolicy.kind(of: device) == .nativeSNES else {
+                    throw RecoveryProbeError.refused("Connect exactly one normally booted SNES Classic. No console command was sent.")
+                }
+                let client = LegacyInspectionClient()
+                try await client.connect(timeoutMilliseconds: 5000)
+                do {
+                    let result = try await client.readSNESNativeTimeInventory()
+                    guard result.succeeded else { throw RecoveryProbeError.refused("The read-only play-time inventory failed.") }
+                    _ = try SNESNativeTimeInventory.parse(result.stdoutData)
+                    await client.disconnect()
+                    print(String(decoding: result.stdoutData, as: UTF8.self), terminator: "")
+                } catch { await client.disconnect(); throw error }
+                return
+            }
+            if arguments == ["--read-snes-native-processes"] || arguments == ["--read-snes-native-launch-options"] {
+                let additionalOptions = arguments == ["--read-snes-native-launch-options"]
+                try RecoveryProbeUSBRegistry.requireOrdinaryAppClosed()
+                let devices = try RecoveryProbeUSBRegistry.inventory()
+                guard devices.count == 1, let device = devices.first, ConsoleAttachmentPolicy.kind(of: device) == .nativeSNES else {
+                    throw RecoveryProbeError.refused("Connect exactly one normally booted SNES Classic. No console command was sent.")
+                }
+                let client = LegacyInspectionClient()
+                try await client.connect(timeoutMilliseconds: 5000)
+                do {
+                    let result = try await (additionalOptions ? client.readSNESNativeLaunchOptionNames() : client.readSNESNativeProcessSnapshot())
+                    guard result.succeeded else { throw RecoveryProbeError.refused("The read-only process snapshot failed.") }
+                    _ = try SNESNativeProcessSnapshot.parse(result.stdoutData, allowAdditionalOptions: additionalOptions)
+                    await client.disconnect()
+                    print(String(decoding: result.stdoutData, as: UTF8.self), terminator: "")
+                } catch { await client.disconnect(); throw error }
                 return
             }
             if arguments == ["--read-legacy-identity"] {

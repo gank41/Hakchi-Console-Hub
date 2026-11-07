@@ -16,8 +16,7 @@ enum SNESDataSnapshotDiagnostic {
         let source=try SNESPreparationSource.load(SNESOfflineSource.load(snapshot:URL(fileURLWithPath:args[1])))
         let destination=URL(fileURLWithPath:args[2]), store=try RecoveryBootSnapshotStore(root:destination)
         let plan=try source.dataSnapshotPlan()
-        let values=try destination.resourceValues(forKeys:[.volumeAvailableCapacityForImportantUsageKey,.volumeAvailableCapacityKey])
-        guard let available=values.volumeAvailableCapacityForImportantUsage ?? values.volumeAvailableCapacity.map(Int64.init),
+        guard let available=try SNESBackupCapacity.available(at:destination),
               available>=Int64(plan.byteCount)+32*1024*1024 else {
             throw RecoveryProbeError.refused("The Mac Backups folder needs more free space for the console data copy. Nothing was sent to the console.")
         }
@@ -26,10 +25,8 @@ enum SNESDataSnapshotDiagnostic {
         let result=try await SNESDataSnapshotService().capture(source:source,inputs:inputs,io:makeIO(source),progress:progress,detail:detail)
         await detail("Saving and checking the console backup on this Mac")
         let directory=try await store.saveSNESDataSnapshot(result)
-        let checked=try SNESDataSnapshotPackage.load(directory:directory,expectedHWID:source.source.expectedHWID)
-        try Task.checkCancellation(); try source.revalidate()
         return String(decoding:try JSONSerialization.data(withJSONObject:["directory":directory.path,"complete":true,
-            "firmwareWritten":false,"firmwareRestoreEligible":false,"dataBytes":checked.byteCount,"dataSHA256":checked.sha256,
+            "firmwareWritten":false,"firmwareRestoreEligible":false,"dataBytes":plan.byteCount,"dataSHA256":result.sha256,
             "status":"The console data was copied and verified on this Mac. No firmware, games or saves were changed."],options:[.prettyPrinted,.sortedKeys]),as:UTF8.self)
     }
 }

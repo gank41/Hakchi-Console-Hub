@@ -64,12 +64,24 @@ struct SNESCompatibilityRecoveryCommand: Sendable {
                      input: checked.input)
     }
     static func prepareRetainedImage(request: SNESCompatibilityLaunchRequest, helperSHA256: String,
-                                     paired: Bool) throws -> Self {
+                                     paired: Bool, retired: Bool = false) throws -> Self {
         let checked = try prepare(request: request, helperSHA256: helperSHA256)
         let suffix = "--observe-recovery"
         guard checked.command.hasSuffix(suffix) else { throw SNESLibraryMenu.failure() }
-        return .init(command: String(checked.command.dropLast(suffix.count)) + "--observe-retained-image " + (paired ? "paired" : "image"),
+        return .init(command: String(checked.command.dropLast(suffix.count)) + (retired ? "--observe-retired-image " : "--observe-retained-image ") + (paired ? "paired" : "image"),
                      input: checked.input)
+    }
+    static func prepareRetainedTime(request: SNESCompatibilityLaunchRequest, helperSHA256: String) throws -> Self {
+        let checked = try prepare(request: request, helperSHA256: helperSHA256)
+        let suffix = "--observe-recovery"
+        guard checked.command.hasSuffix(suffix) else { throw SNESLibraryMenu.failure() }
+        return .init(command: String(checked.command.dropLast(suffix.count)) + "--observe-retained-time", input: checked.input)
+    }
+    static func prepareStateArchive(request: SNESCompatibilityLaunchRequest, helperSHA256: String) throws -> Self {
+        let checked = try prepare(request: request, helperSHA256: helperSHA256)
+        let suffix = "--observe-recovery"
+        guard checked.command.hasSuffix(suffix) else { throw SNESLibraryMenu.failure() }
+        return .init(command: String(checked.command.dropLast(suffix.count)) + "--observe-state-archive", input: checked.input)
     }
 }
 

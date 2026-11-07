@@ -53,10 +53,21 @@ int hc_autosave_target_prepare(HCAutosaveTarget *t,int parent,uid_t uid,const ui
  if(hc_autosave_target_init(t,parent,workspace,temp,uid,identity,destination,"save.tmp")!=0){close(temp);close(workspace);return -1;}
  t->owns_fds=1;memcpy(t->workspace_name,name,sizeof name);return 0;
 }
+/* Caller excludes all concurrent descriptor-table use through cleanup. */
+static int target_close_owned(int *slot){
+ if(*slot<0)return 0;
+ int fd=*slot;*slot=-1;
+ if(!close(fd))return 0;
+ int saved=errno;errno=0;
+ if(fcntl(fd,F_GETFD)!=-1||errno!=EBADF)*slot=fd;
+ errno=saved?saved:EIO;return -1;
+}
 int hc_autosave_target_close(HCAutosaveTarget *t){
  if(!t||!t->ready||!t->owns_fds||t->busy){errno=EINVAL;return -1;}
- int a=close(t->temporary),b=close(t->workspace);t->ready=0;t->owns_fds=0;
- return a==0&&b==0?0:-1;
+ /* A partially closed target is usable only for another cleanup attempt. */
+ t->consumed=1;
+ if(target_close_owned(&t->temporary)||target_close_owned(&t->workspace))return -1;
+ t->ready=0;t->owns_fds=0;return 0;
 }
 int hc_autosave_target_acquire(HCAutosaveTarget *t){if(!t||!t->ready||t->busy||t->consumed){errno=EINVAL;return -1;}t->busy=1;return 0;}
 int hc_autosave_target_release(HCAutosaveTarget *t){if(!t||!t->ready||!t->busy){errno=EINVAL;return -1;}t->busy=0;return 0;}

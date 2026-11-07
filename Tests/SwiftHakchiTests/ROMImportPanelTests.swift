@@ -13,7 +13,7 @@ struct ROMImportPanelTests {
             #expect(frame.minY>=display.minY+12 && frame.maxY<=display.maxY-12)
         }
     }
-    @MainActor @Test(.enabled(if: ProcessInfo.processInfo.environment["CI"] != "true", "Requires an interactive WindowServer")) func panelUsesConsoleSpecificGuidanceAndCapsAnOversizedFrame() {
+    @MainActor @Test func panelUsesConsoleSpecificGuidanceAndCapsAnOversizedFrame() {
         _=NSApplication.shared
         let panel=NSOpenPanel()
         panel.setFrame(NSRect(x:-2000,y:-2000,width:2400,height:1800),display:false)

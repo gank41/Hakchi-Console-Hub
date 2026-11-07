@@ -50,9 +50,9 @@ enum SNESOriginalMenuDiagnostic {
             else { result = try await service.start(menu: menu, store: store, io: io, progress: progress) }
             completed = result
             let directory = try await store.saveSNESOriginalMenuResult(result, menu: menu)
-            if started == nil { _ = try SNESOriginalMenuResult.loadStarted(directory: directory, menu: menu) }
             return try json(directory: directory, status: "The temporary SNES connection passed its machine checks. Check the TV, sound, controls and a built-in game. Nothing was installed.")
         } catch {
+            if error is RecoverySnapshotCleanupError { throw error }
             if error is CancellationError || Task.isCancelled { throw CancellationError() }
             let failure: SNESOriginalMenuFailure
             if let existing = error as? SNESOriginalMenuFailure { failure = existing }

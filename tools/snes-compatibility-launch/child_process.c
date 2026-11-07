@@ -11,7 +11,7 @@
 #include <unistd.h>
 
 static int child_start(HCChild *c, const char *path, char *const argv[], char *const envp[], int report_fd, int target, int save_fd, int save_target, int image_fd, int image_target,int startup_fd,int startup_target,int exit_fd,int exit_target,int rom_fd,int rom_target,int confirm_fd,int confirm_target,int lock_fd,int lock_target) {
-    if (!c || c->pid != -1 || c->input != -1 || !path || path[0] != '/' ||
+    if (!c || c->pid != -1 || c->input != -1 || c->reaped_pending || !path || path[0] != '/' ||
         !argv || !argv[0] || !envp) { errno = EINVAL; return -1; }
     if (report_fd != -1 || target != -1) {
         struct stat st;
@@ -81,8 +81,15 @@ static int child_start(HCChild *c, const char *path, char *const argv[], char *c
         struct stat p,other;int flags=fcntl(confirm_fd,F_GETFL),fdflags=fcntl(confirm_fd,F_GETFD);
         if(rom_fd<3||confirm_fd<3||confirm_target<3||confirm_target>255||flags<0||fdflags<0||
            (flags&O_ACCMODE)!=O_WRONLY||!(flags&O_NONBLOCK)||!(fdflags&FD_CLOEXEC)||fstat(confirm_fd,&p)||!S_ISFIFO(p.st_mode)){errno=EINVAL;return -1;}
-        for(int i=0;i<7;i++)for(int j=0;j<7;j++)if(targets[i]==sources[j]||(i!=j&&(targets[i]==targets[j]||sources[i]==sources[j]))){errno=EINVAL;return -1;}
-        int pipes[3]={report_fd,startup_fd,exit_fd};for(int i=0;i<3;i++)if(fstat(pipes[i],&other)||(p.st_dev==other.st_dev&&p.st_ino==other.st_ino)){errno=EINVAL;return -1;}
+        int stock=save_fd==-1&&image_fd==-1&&startup_fd==-1&&exit_fd==-1&&report_fd>=3&&lock_fd>=3;
+        if(stock){
+            int src[3]={report_fd,rom_fd,confirm_fd},dst[3]={target,rom_target,confirm_target};
+            for(int i=0;i<3;i++)for(int j=0;j<3;j++)if(dst[i]==src[j]||(i!=j&&(dst[i]==dst[j]||src[i]==src[j]))){errno=EINVAL;return -1;}
+            if(fstat(report_fd,&other)||(p.st_dev==other.st_dev&&p.st_ino==other.st_ino)){errno=EINVAL;return -1;}
+        }else{
+            for(int i=0;i<7;i++)for(int j=0;j<7;j++)if(targets[i]==sources[j]||(i!=j&&(targets[i]==targets[j]||sources[i]==sources[j]))){errno=EINVAL;return -1;}
+            int pipes[3]={report_fd,startup_fd,exit_fd};for(int i=0;i<3;i++)if(fstat(pipes[i],&other)||(p.st_dev==other.st_dev&&p.st_ino==other.st_ino)){errno=EINVAL;return -1;}
+        }
         errno=0;if(fcntl(confirm_target,F_GETFD)!=-1||errno!=EBADF){errno=EINVAL;return -1;}
     }
     if(lock_fd!=-1||lock_target!=-1){
@@ -155,6 +162,10 @@ int hc_child_start_rom_reporting_lock(HCChild *c,const char *p,char *const a[],c
     if(rom<0||rt<0||report<0||report_target<0||lock<0||lock_target<0){errno=EINVAL;return -1;}
     return child_start(c,p,a,e,report,report_target,-1,-1,-1,-1,-1,-1,-1,-1,rom,rt,-1,-1,lock,lock_target);
 }
+int hc_child_start_rom_reporting_lock_receipt(HCChild *c,const char *p,char *const a[],char *const e[],int rom,int rt,int report,int report_target,int lock,int lock_target,int receipt,int receipt_target) {
+    if(rom<0||rt<0||report<0||report_target<0||lock<0||lock_target<0||receipt<0||receipt_target<0){errno=EINVAL;return -1;}
+    return child_start(c,p,a,e,report,report_target,-1,-1,-1,-1,-1,-1,-1,-1,rom,rt,receipt,receipt_target,lock,lock_target);
+}
 int hc_child_start_rom_lock(HCChild *c,const char *p,char *const a[],char *const e[],int rom,int rt,int lock,int lock_target) {
     if(rom<0||rt<0||lock<0||lock_target<0){errno=EINVAL;return -1;}
     return child_start(c,p,a,e,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,rom,rt,-1,-1,lock,lock_target);
@@ -169,6 +180,15 @@ int hc_child_close_input(HCChild *c) {
     errno = saved ? saved : EIO;
     return -1;
 }
+int hc_child_take_reaped(HCChild *c, int *status) {
+    if (!c || !status) { errno = EINVAL; return -1; }
+    if (c->pid != -1 || c->input != -1) { errno = EBUSY; return -1; }
+    if (!c->reaped_pending) return 0;
+    if (c->reaped_pending != 1) { errno = EINVAL; return -1; }
+    *status = c->reaped_status;
+    c->reaped_pending = 0; c->reaped_status = 0;
+    return 1;
+}
 int hc_child_poll(HCChild *c, int *status) {
     if (!c || c->pid <= 0 || c->input < 0 || !status) { errno = EINVAL; return -1; }
     int child_status;
@@ -176,13 +196,16 @@ int hc_child_poll(HCChild *c, int *status) {
     unsigned attempts = 0;
     do { result = waitpid(c->pid, &child_status, WNOHANG); }
     while (result < 0 && errno == EINTR && ++attempts < 4);
-    if (result == 0) return 0;
+    /* Repeated EINTR establishes no child status. Leave the child owned and
+     * let the caller retry instead of turning a transient interruption into
+     * a failed session. The bounded attempts keep each poll responsive. */
+    if (result == 0 || (result < 0 && errno == EINTR)) return 0;
     if (result < 0) {
         if (errno == ECHILD) { c->pid = -1; (void)hc_child_close_input(c); errno = ECHILD; }
         return -1;
     }
     c->pid = -1;
-    if (hc_child_close_input(c)) return -1;
+    if (hc_child_close_input(c)) { c->reaped_pending = 1; c->reaped_status = child_status; return -1; }
     *status = child_status;
     return 1;
 }

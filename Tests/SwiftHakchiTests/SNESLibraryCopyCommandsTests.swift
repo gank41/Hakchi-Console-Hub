@@ -128,7 +128,7 @@ struct SNESLibraryCopyCommandsTests {
             case "$3" in
               %u) printf '0\\n';;
               %h) exec /usr/bin/stat -f '%l' "$4";;
-              %d) exec /usr/bin/stat -f '%d' "$4";;
+              %d) if test '\(fault)' = foreign-device; then case "$4" in */save-staging/*/0000) printf '0\\n'; exit;; esac; fi; exec /usr/bin/stat -f '%d' "$4";;
               %s) exec /usr/bin/stat -f '%z' "$4";;
               '%d %i %a') exec /usr/bin/stat -f '%d %i %Lp' "$4";;
               '%d %i %Y %Z %a %s') exec /usr/bin/stat -f '%d %i %m %c %Lp %z' "$4";;

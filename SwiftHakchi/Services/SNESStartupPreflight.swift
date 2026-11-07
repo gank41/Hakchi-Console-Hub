@@ -5,6 +5,10 @@ protocol SNESStartupPreflightIO: RecoveryProbeIO {
     func dataHash(challenge:UUID) async throws -> Data
     func stageStartup(_ image:Data,stock:Data,id:UUID) async throws
 }
+struct SNESStartupPreflightReceipt: Sendable {
+    let record: SNESSetupRecordReceipt
+    let backupMatches: Bool
+}
 struct SNESStartupPreflightResult:Sendable {
     let candidate:SNESStartupAdapterCandidate,context:RecoverySessionContext,id:UUID,header:Data,dataSHA256:String
     let parent:SNESMenuStartupParent?
@@ -37,6 +41,11 @@ struct SNESStartupPreflightResult:Sendable {
         return (["data-header.bin":header],manifest)
     }
     private var materialBinding:SNESRuntimeBinding { candidate.material.binding }
+    func backupMatches() throws -> Bool {
+        try candidate.backup.revalidate()
+        let saved = try RestoreDirectory(candidate.backup.directory).read("data-header.bin", maximum: 2048)
+        return header == saved && dataSHA256 == candidate.backup.sha256
+    }
 }
 private actor SNESStartupPreflightConnection:SNESStartupPreflightIO {
     let base:any SNESStartupPreflightIO

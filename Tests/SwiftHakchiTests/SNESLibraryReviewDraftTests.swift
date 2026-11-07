@@ -118,6 +118,8 @@ import SwiftHakchiCore
         #expect(throws: (any Error).self) { try draft.compatibilityLayoutPreview() }
         draft.setAllowSkippingUnavailable(false)
         try draft.setSelected(game.code, selected: false)
+        let emptyContent = try draft.prepareCompatibilityObjects(sessions: [:], epoch: 4)
+        #expect(emptyContent.controllerProfile == nil && emptyContent.corePackage == nil && emptyContent.frontendPackage == nil && emptyContent.supportPayload == nil && emptyContent.items.isEmpty && emptyContent.objects.isEmpty)
         #expect(throws: (any Error).self) { try draft.prepareCompatibilityLaunch(code: game.code, session: token, epoch: 4) }
         #expect(throws: (any Error).self) { try draft.prepareCompatibilityLaunches(sessions: [game.code: token], epoch: 4) }
         #expect(try draft.prepareCompatibilityLaunches(sessions: [:], epoch: 4).isEmpty)
@@ -293,6 +295,27 @@ import SwiftHakchiCore
             let request = try draft.prepareCompatibilityLaunch(code: first.game.code, session: token, epoch: 4)
             try request.frame.write(to: URL(fileURLWithPath: fixture), options: .atomic)
         }
+        let material = try draft.prepareCompatibilityObjects(sessions: [first.game.code: token], epoch: 4)
+        let controller = try #require(material.controllerProfile)
+        #expect(controller.name == "clovercon.cfg")
+        let expectedController = try SNESCompatibilityControllerProfile.load()
+        #expect(controller.bytes == expectedController)
+        #expect(material.objects[controller.name] == nil)
+        let support = try #require(material.supportPayload)
+        #expect(support.files.map(\.relativePath) == ["autoconfig/clovercon.cfg", "retroarch", "snes9x2010_libretro.so", "size-probe"])
+        #expect(support.totalBytes == 1_459 + 2_657_408 + 3_385_720 + 5_428)
+        #expect(support.files.allSatisfy { $0.sha256 == BackupManifest.digest($0.bytes) })
+        #expect(support.runtimeRoot == "/mnt/swifthakchi/snes-compat")
+        let frontend = try #require(material.frontendPackage)
+        #expect(frontend.frontend.count == 2_657_408)
+        #expect(material.objects["retroarch"] == nil)
+        let bundledCore = try #require(material.corePackage)
+        #expect(bundledCore.core.count == 3_385_720)
+        #expect(material.objects["snes9x2010_libretro.so"] == nil)
+        let wrongName = SNESCompatibilityControllerProfile.Prepared(name: "other.cfg", bytes: controller.bytes)
+        #expect(throws: (any Error).self) { try SNESCompatibilitySupportPayload(controller: wrongName, core: bundledCore, frontend: frontend) }
+        let wrongBytes = SNESCompatibilityControllerProfile.Prepared(name: controller.name, bytes: controller.bytes + Data([0]))
+        #expect(throws: (any Error).self) { try SNESCompatibilitySupportPayload(controller: wrongBytes, core: bundledCore, frontend: frontend) }
         let art = SNESLibraryMenu.NavigationArtwork(more: oneGameSyntheticArt(), back: oneGameSyntheticArt(), custom: [:])
         let candidate = try draft.compatibilityMenuCandidate(sessions: [first.game.code: token], epoch: 4, artwork: art)
         #expect(candidate.description.version == 3)

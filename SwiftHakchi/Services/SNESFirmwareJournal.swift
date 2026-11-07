@@ -2,9 +2,22 @@ import Foundation
 import Darwin
 import SwiftHakchiCore
 
+private final class SNESFirmwarePermitUse: @unchecked Sendable {
+    private let lock = NSLock()
+    private var used = false
+
+    func claim() throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !used else { throw SNESRuntimeBinding.failure() }
+        used = true
+    }
+}
+
 struct SNESFirmwareWritePermit:Sendable {
     let id:UUID,reviewSHA256:String
-    fileprivate init(id:UUID,reviewSHA256:String){self.id=id;self.reviewSHA256=reviewSHA256}
+    private let use:SNESFirmwarePermitUse
+    fileprivate init(id:UUID,reviewSHA256:String){self.id=id;self.reviewSHA256=reviewSHA256;self.use=SNESFirmwarePermitUse()}
+    func claim() throws { try use.claim() }
 }
 struct SNESFirmwareAcceptedInstall:Sendable {
     let material:SNESFirmwareMaterial,reviewSHA256:String
@@ -23,27 +36,51 @@ struct SNESFirmwareRestorableInstall:Sendable {
     }
 }
 enum SNESFirmwareJournalError:Error {case unresolved}
+struct SNESFirmwarePreparationCleanupError: Error, LocalizedError, Sendable {
+    let operation: URL
+    var errorDescription: String? {
+        "The local installation review could not be safely completed and was kept for inspection: \(operation.path). Do not use it until it is inspected. No console operation was requested."
+    }
+}
+struct SNESFirmwarePublicationUncertainError: Error, LocalizedError, Sendable {
+    let operation: URL
+    var errorDescription: String? {
+        "The local installation review may have been published but could not be fully verified: \(operation.path). Keep these files for inspection. Do not use them to update the console. No console operation was requested."
+    }
+}
 actor SNESFirmwareJournal {
     enum Phase:String,Codable,Sendable {
         case prepared,preflightVerified,writeIntent,readbackVerified,startupVerified,menuAccepted,stoppedBeforeWrite,uncertain
         var unresolved:Bool {[.writeIntent,.readbackVerified,.startupVerified,.uncertain].contains(self)}
-        func permits(_ next:Self,direction:SNESFirmwareMaterial.Direction)throws {
+        func permits(_ next:Self,direction:SNESFirmwareMaterial.Direction,reviewedFirstInstall:Bool=false)throws {
             let valid:Bool
             switch (self,next) {
             case (.prepared,.preflightVerified),(.prepared,.stoppedBeforeWrite),(.preflightVerified,.writeIntent),(.preflightVerified,.stoppedBeforeWrite),
                  (.writeIntent,.readbackVerified),(.writeIntent,.uncertain),(.readbackVerified,.startupVerified),(.startupVerified,.menuAccepted):valid=true
             case (.readbackVerified,.menuAccepted):valid=direction == .restore
+            case (.prepared,.writeIntent),(.readbackVerified,.uncertain):valid=direction == .install && reviewedFirstInstall
             default:valid=false
             }
             guard valid else {throw RestoreDirectory.failure()}
         }
     }
     struct Prepared:Sendable {let operation:URL,reviewSHA256:String}
-    private struct Record:Codable {let phase:Phase,planSHA256:String,previousSHA256:String?}
+    private struct Record:Codable {
+        let phase:Phase,planSHA256:String,previousSHA256:String?
+        // Absent on older journals. New prepared records require a marker even
+        // if a backup or manual cleanup has omitted that marker.
+        let markerRequired:Bool?
+        init(phase:Phase,planSHA256:String,previousSHA256:String?,markerRequired:Bool?=nil) {
+            self.phase=phase;self.planSHA256=planSHA256;self.previousSHA256=previousSHA256;self.markerRequired=markerRequired
+        }
+    }
     private struct State {let phase:Phase,count:Int,lastSHA256:String}
     private let storage:RestoreJournalStorage,material:SNESFirmwareMaterial,plan:Data
+    private struct ReviewedReservation {let id:UUID;var verified=false;var proof:SNESReviewedPreflightProof?}
+    private var reviewedReservation:ReviewedReservation?
+    private let afterRecordRead:@Sendable () throws -> Void
     let reviewSHA256:String
-    init(operation:URL,reviewSHA256:String,material:SNESFirmwareMaterial,guard guardValue:SNESFirmwareGuard?=nil,synchronize:@escaping @Sendable(Int32)->Int32={Darwin.fsync($0)})throws {
+    init(operation:URL,reviewSHA256:String,material:SNESFirmwareMaterial,guard guardValue:SNESFirmwareGuard?=nil,synchronize:@escaping @Sendable(Int32)->Int32={Darwin.fsync($0)},afterRecordRead:@escaping @Sendable () throws -> Void = {})throws {
         if let guardValue {try guardValue.require(material)} else {try material.validateCurrent()}
         let raw=try material.planData()
         guard BackupManifest.digest(raw)==reviewSHA256 else {throw RestoreDirectory.failure()}
@@ -51,7 +88,7 @@ actor SNESFirmwareJournal {
         try Self.checkParent(material,in:storage.root)
         try Self.checkOthers(storage,excluding:operation.lastPathComponent,recoveryParent:material.parentOperationID)
         _=try Self.load(storage.operation!,review:reviewSHA256,expectedPlan:raw)
-        self.storage=storage;self.material=material;plan=raw;self.reviewSHA256=reviewSHA256
+        self.storage=storage;self.material=material;plan=raw;self.reviewSHA256=reviewSHA256;self.afterRecordRead=afterRecordRead
     }
     static func reopen(operation:URL,reviewSHA256:String,recovery:RecoveryBootInputs) async throws->SNESFirmwareJournal {
         let directory=try RestoreDirectory(operation),material=try rebuild(directory,review:reviewSHA256,recovery:recovery,visited:[])
@@ -71,7 +108,9 @@ actor SNESFirmwareJournal {
         try requireRebuildAncestry(id:saved.id,visited:visited)
         let material:SNESFirmwareMaterial
         if saved.direction == .install,saved.parentOperationID==nil {
-            material=try SNESFirmwareMaterial.install(paths:saved.paths,recovery:recovery,id:saved.id)
+            let rebuilt=try SNESFirmwareMaterial.install(paths:saved.paths,recovery:recovery,id:saved.firstInstall?.startupPlanID ?? saved.id)
+            let base=try saved.firstInstall?.startupPlanData.map {try rebuilt.adoptingSavedPlan($0)} ?? rebuilt
+            material=try saved.firstInstall.map {try base.bindingFirstInstall($0,operationID:saved.id)} ?? base
         } else {
             guard let parentID=saved.parentOperationID,let parentReview=saved.parentReviewSHA256,parentID != saved.id else {throw RestoreDirectory.failure()}
             let parentDirectory=try RestoreDirectory(directory.url.deletingLastPathComponent().appendingPathComponent("SNESFirmware-"+parentID.uuidString))
@@ -81,12 +120,15 @@ actor SNESFirmwareJournal {
             guard parent.direction == .install,parent.id==parentID else {throw RestoreDirectory.failure()}
             if saved.direction == .install {
                 let targetCandidate=try SNESStartupAdapterCandidate.load(directory:URL(fileURLWithPath:saved.paths.candidate))
-                let context=try parent.trial.candidate.hasMenuSupport ? libraryParent(material:parent,review:parentReview,directory:parentDirectory.url,legacy:!targetCandidate.hasCorrectedLibrarySupport,targetRecipe:targetCandidate.libraryRecipeVersion):menuParent(material:parent,review:parentReview,directory:parentDirectory.url)
+                let previous=parent.trial.candidate.backup, next=targetCandidate.backup
+                let currentData:SNESDataSnapshotReceipt? = previous.directory.path == next.directory.path && previous.sha256 == next.sha256 && previous.manifestSHA256 == next.manifestSHA256 ? nil : .init(directory:next.directory,manifestSHA256:next.manifestSHA256)
+                let context=try parent.trial.candidate.hasMenuSupport ? libraryParent(material:parent,review:parentReview,directory:parentDirectory.url,legacy:!targetCandidate.hasCorrectedLibrarySupport,targetRecipe:targetCandidate.libraryRecipeVersion,currentData:currentData):menuParent(material:parent,review:parentReview,directory:parentDirectory.url,currentData:currentData)
                 material=try .upgrade(parent:context,paths:saved.paths,recovery:recovery,id:saved.id)
             } else {material=try .restore(installed:.init(material:parent,reviewSHA256:parentReview,directory:parentDirectory.url),id:saved.id)}
         }
-        guard try material.planData()==raw else {throw RestoreDirectory.failure()}
-        return material
+        // Preserve exact historical bytes for every schema after checking all
+        // decoded fields against material rebuilt from the saved sources.
+        return try material.adoptingSavedPlan(raw)
     }
     /// Bounded Mac discovery only. Every returned hint must still be fully reconstructed.
     static func acceptedReferences(root:URL,hwid:String)throws->[SNESLibraryFirmwareReference] {
@@ -113,73 +155,176 @@ actor SNESFirmwareJournal {
             try storage.closeLease();return result
         } catch {try? storage.closeLease();throw error}
     }
-    static func prepare(material:SNESFirmwareMaterial,root:URL,guard guardValue:SNESFirmwareGuard?=nil)throws->Prepared {
+    static func prepare(material:SNESFirmwareMaterial,root:URL,guard guardValue:SNESFirmwareGuard?=nil,
+                        afterCreate:@Sendable () throws -> Void = {},
+                        verifyFinal:@Sendable () throws -> Void = {},
+                        synchronize:@escaping @Sendable (Int32)->Int32 = { Darwin.fsync($0) })throws->Prepared {
         let input:Data
+        let reviewedSeal:SNESFirmwareSourceSeal?
+        if material.firstInstall != nil {reviewedSeal=try material.validateReviewedFirstInstall()} else {reviewedSeal=nil}
         if let guardValue {try guardValue.require(material);input=material.geometry+material.preimage+material.target} else {input=try material.input()}
         let plan=try material.planData(),review=BackupManifest.digest(plan)
-        let storage=try RestoreJournalStorage(root:root);try checkParent(material,in:storage.root);try checkOthers(storage,excluding:nil,recoveryParent:material.parentOperationID)
+        // Refuse oversized plans before creating a journal or completion marker.
+        guard !plan.isEmpty,plan.count<=65536 else {throw SNESRuntimeBinding.failure()}
+        let storage=try RestoreJournalStorage(root:root,synchronize:synchronize);try checkParent(material,in:storage.root);try checkOthers(storage,excluding:nil,recoveryParent:material.parentOperationID)
         let name="SNESFirmware-"+material.id.uuidString
         guard mkdirat(storage.root.fd,name,0o700)==0 else {throw RestoreDirectory.failure()}
-        let directory=try RestoreDirectory(storage.root.url.appendingPathComponent(name))
+        let operationURL = storage.root.url.appendingPathComponent(name)
+        var createdDirectory = stat()
+        guard fstatat(storage.root.fd, name, &createdDirectory, AT_SYMLINK_NOFOLLOW) == 0,
+              createdDirectory.st_mode & S_IFMT == S_IFDIR else { throw SNESFirmwarePreparationCleanupError(operation: operationURL) }
+        let directory: RestoreDirectory
         do {
-            guard fchmod(directory.fd,0o700)==0 else {throw RestoreDirectory.failure()}
+            try afterCreate(); directory = try RestoreDirectory(operationURL)
+            var opened = stat()
+            guard fstat(directory.fd, &opened) == 0, opened.st_dev == createdDirectory.st_dev,
+                  opened.st_ino == createdDirectory.st_ino, opened.st_uid == geteuid(),
+                  opened.st_mode & 0o777 == 0o700 else { throw RestoreDirectory.failure() }
+        }
+        catch { throw SNESFirmwarePreparationCleanupError(operation: operationURL) }
+        var published = false
+        do {
+            guard try directory.names().isEmpty else { throw RestoreDirectory.failure() }
+            // Make an interrupted preparation visible before publishing any record.
+            // Older completed journals have no marker and remain readable.
+            try storage.write(Data(review.utf8),name:"preparation.pending",directory:directory)
+            try storage.sync(directory);try storage.sync(storage.root)
             try storage.write(input,name:"input.bin",directory:directory)
             try storage.write(plan,name:"plan.json",directory:directory)
             if let guardValue {try guardValue.require(material)} else {try material.validateCurrent()}
-            try storage.write(encode(Record(phase:.prepared,planSHA256:review,previousSHA256:nil)),name:"0000.json",directory:directory)
+            try storage.write(encode(Record(phase:.prepared,planSHA256:review,previousSHA256:nil,markerRequired:true)),name:"0000.pending",directory:directory)
             try storage.sync(directory);try storage.sync(storage.root)
+            _=try load(directory,review:review,expectedPlan:plan,pending:true,preparing:true)
+            try verifyFinal()
+            try reviewedSeal?.validate()
+            if let guardValue {try guardValue.require(material)} else {try material.validateCurrent()}
+            if material.firstInstall != nil {try material.validateReviewedFirstInstall()}
+            try reviewedSeal?.validate()
+            _=try load(directory,review:review,expectedPlan:plan,pending:true,preparing:true)
+            try Task.checkCancellation()
+            try storage.checkLock(); try directory.check()
+            var staged = stat(), final = stat()
+            guard fstatat(directory.fd,"0000.pending",&staged,AT_SYMLINK_NOFOLLOW)==0,
+                  staged.st_mode & S_IFMT == S_IFREG,staged.st_nlink==1,
+                  renameatx_np(directory.fd,"0000.pending",directory.fd,"0000.json",UInt32(RENAME_EXCL))==0 else {throw RestoreDirectory.failure()}
+            published = true
+            guard fstatat(directory.fd,"0000.json",&final,AT_SYMLINK_NOFOLLOW)==0,
+                  final.st_mode & S_IFMT == S_IFREG,final.st_nlink==1,
+                  staged.st_dev==final.st_dev,staged.st_ino==final.st_ino else {throw RestoreDirectory.failure()}
+            _=try load(directory,review:review,expectedPlan:plan,preparing:true)
+            if let guardValue {try guardValue.require(material)} else {try material.validateCurrent()}
+            try storage.sync(directory);try reviewedSeal?.validate();try storage.sync(storage.root);try reviewedSeal?.validate()
+            // Only mark the operation complete after the published record and its
+            // containing directories have been verified and synchronized.
+            var marker = stat(), completed = stat()
+            guard fstatat(directory.fd,"preparation.pending",&marker,AT_SYMLINK_NOFOLLOW)==0,
+                  marker.st_mode & S_IFMT == S_IFREG,marker.st_nlink==1,
+                  try directory.read("preparation.pending",maximum:64)==Data(review.utf8),
+                  renameatx_np(directory.fd,"preparation.pending",directory.fd,"preparation.complete",UInt32(RENAME_EXCL))==0,
+                  fstatat(directory.fd,"preparation.complete",&completed,AT_SYMLINK_NOFOLLOW)==0,
+                  completed.st_mode & S_IFMT == S_IFREG,completed.st_nlink==1,
+                  marker.st_dev==completed.st_dev,marker.st_ino==completed.st_ino else {throw RestoreDirectory.failure()}
+            try reviewedSeal?.validate();try storage.sync(directory);try storage.sync(storage.root);try reviewedSeal?.validate()
             _=try load(directory,review:review,expectedPlan:plan)
+            try reviewedSeal?.validate()
             try storage.closeLease();return .init(operation:directory.url,reviewSHA256:review)
         } catch {
-            // This newly owned local preparation has never authorized console I/O.
-            // Only its own three leaves may be removed on preparation failure.
-            if (try? directory.check()) != nil,(try? storage.root.check()) != nil {
-                for leaf in ["0000.json","plan.json","input.bin"] {_=unlinkat(directory.fd,leaf,0)}
-                _=unlinkat(storage.root.fd,name,AT_REMOVEDIR)
-                _=try? storage.sync(storage.root)
-            }
-            throw error
+            // The directory or a leaf can be replaced between any identity check
+            // and unlink. Preserve all files rather than deleting uncertain data.
+            if published { throw SNESFirmwarePublicationUncertainError(operation: operationURL) }
+            throw SNESFirmwarePreparationCleanupError(operation: operationURL)
         }
     }
     func phase()throws->Phase {try state().phase}
+    func requiresReviewedPreflight()->Bool {material.firstInstall != nil}
     func verifiedMaterial()throws->SNESFirmwareMaterial {_=try state();try material.validateCurrent();return material}
     func verifiedMaterial(guard guardValue:SNESFirmwareGuard)throws->SNESFirmwareMaterial {
         _=try state();try guardValue.require(material);return material
     }
-    func preflightVerified()throws {try append(.preflightVerified)}
+    func preflightVerified()throws {
+        // The legacy preflight does not compare the independent reviewed data.
+        // Reviewed installs use a fresh owned-session check instead.
+        guard material.firstInstall==nil else {throw RestoreDirectory.failure()}
+        try append(.preflightVerified)
+    }
+    /// Reserve one read-only reviewed session. No persistent success record is
+    /// written; every future installation must check the live backup again.
+    func reserveReviewedPreflight()throws->UUID {
+        try Task.checkCancellation()
+        guard material.firstInstall != nil,reviewedReservation==nil,try state().phase == .prepared else {throw RestoreDirectory.failure()}
+        let id=UUID();reviewedReservation=ReviewedReservation(id:id);return id
+    }
+    func verifyReviewedPreflight(_ proof:SNESReviewedPreflightProof,reservation:UUID)throws {
+        guard material.firstInstall != nil,reviewedReservation?.id==reservation,reviewedReservation?.verified==false else {throw RestoreDirectory.failure()}
+        try proof.consume(operation:material.id,review:reviewSHA256,reservation:reservation) {
+            guard try state().phase == .prepared else {throw RestoreDirectory.failure()}
+        }
+        reviewedReservation?.verified=true;reviewedReservation?.proof=proof
+    }
+    func finishReviewedPreflight(_ id:UUID,verify:@Sendable () throws -> Void)throws {
+        guard reviewedReservation?.id==id,reviewedReservation?.verified==true,try state().phase == .prepared else {throw RestoreDirectory.failure()}
+        try verify()
+        reviewedReservation=nil
+    }
+    /// Issue one permit only while the same live session still owns its verified backup proof.
+    func beginReviewedWrite(_ id:UUID,proof:SNESReviewedPreflightProof)throws->SNESFirmwareWritePermit {
+        guard material.firstInstall != nil,reviewedReservation?.id==id,reviewedReservation?.verified==true,
+              reviewedReservation?.proof === proof,try state().phase == .prepared else {throw RestoreDirectory.failure()}
+        try proof.validate();try append(.writeIntent,reservation:id);try proof.validate()
+        return .init(id:material.id,reviewSHA256:reviewSHA256)
+    }
+    /// A successful readback is recorded only after the owned connection has closed.
+    func finishReviewedWrite(_ id:UUID,verify:@Sendable () throws -> Void)throws {
+        guard reviewedReservation?.id==id,reviewedReservation?.verified==true,try state().phase == .writeIntent else {throw RestoreDirectory.failure()}
+        try verify();try append(.readbackVerified,reservation:id);try verify()
+    }
+    /// Preserve an interrupted intent even when the calling task was cancelled.
+    func failReviewedWrite(_ id:UUID)throws {
+        guard reviewedReservation?.id==id else {throw RestoreDirectory.failure()}
+        defer {reviewedReservation=nil}
+        let current=try state().phase
+        if current == .writeIntent || current == .readbackVerified {try append(.uncertain,reservation:id)}
+    }
+    /// Cleanup is cancellation-independent and cannot release a newer owner.
+    func releaseReviewedPreflight(_ id:UUID) {if reviewedReservation?.id==id {reviewedReservation=nil}}
     /// Only this transition can construct a permit. Reopened intent can never issue another.
     func beginWrite()throws->SNESFirmwareWritePermit {
+        // Reviewed installs must use beginReviewedWrite with the same-session
+        // backup proof; the legacy permit cannot authorize them.
+        guard material.firstInstall==nil else {throw RestoreDirectory.failure()}
         guard try state().phase == .preflightVerified else {throw RestoreDirectory.failure()}
         try append(.writeIntent);return .init(id:material.id,reviewSHA256:reviewSHA256)
     }
     func readbackVerified()throws {try append(.readbackVerified)}
     func startupVerified()throws {try append(.startupVerified)}
     func acceptMenu()throws {try append(.menuAccepted)}
-    func menuStartupParent()throws->SNESMenuStartupParent {
-        let accepted=try acceptedInstall(),value=try Self.menuParent(material:accepted.material,review:accepted.reviewSHA256,directory:storage.operation!.url)
+    func menuStartupParent(currentData:SNESDataSnapshotReceipt?=nil)throws->SNESMenuStartupParent {
+        let accepted=try acceptedInstall(),value=try Self.menuParent(material:accepted.material,review:accepted.reviewSHA256,directory:storage.operation!.url,currentData:currentData)
         _=try acceptedInstall();try value.validate();return value
     }
-    func libraryStartupParent()throws->SNESMenuStartupParent {
-        let accepted=try acceptedInstall(),value=try Self.libraryParent(material:accepted.material,review:accepted.reviewSHA256,directory:storage.operation!.url)
+    func libraryStartupParent(currentData:SNESDataSnapshotReceipt?=nil)throws->SNESMenuStartupParent {
+        let accepted=try acceptedInstall(),value=try Self.libraryParent(material:accepted.material,review:accepted.reviewSHA256,directory:storage.operation!.url,currentData:currentData)
         _=try acceptedInstall();try value.validate();return value
     }
-    private static func libraryParent(material:SNESFirmwareMaterial,review:String,directory:URL,legacy:Bool=false,targetRecipe:Int=10)throws->SNESMenuStartupParent {
+    private static func libraryParent(material:SNESFirmwareMaterial,review:String,directory:URL,legacy:Bool=false,targetRecipe:Int=10,currentData:SNESDataSnapshotReceipt?=nil)throws->SNESMenuStartupParent {
         let checked=try SNESFirmwareGuard.prepare(material),previous=material.trial.candidate
         guard material.direction == .install,previous.hasMenuSupport,!previous.hasNativeArtworkSupport,
               (!legacy || !previous.hasLibrarySupport),
               material.parentOperationID != nil,BackupManifest.digest(try material.planData())==review else {throw RestoreDirectory.failure()}
-        let candidate=try SNESStartupAdapterCandidate.withLibrarySupport(previous,legacy:legacy,targetRecipe:targetRecipe)
+        let base=try SNESStartupAdapterCandidate.withLibrarySupport(previous,legacy:legacy,targetRecipe:targetRecipe)
+        let candidate=try currentData.map {try SNESStartupAdapterCandidate.withCurrentBackup(base,receipt:$0)} ?? base
         let seal=try SNESFirmwareSourceSeal.capture(directories:[directory],files:[])
         guard try load(RestoreDirectory(directory),review:review).phase == .menuAccepted else {throw RestoreDirectory.failure()}
         try checked.validate();try seal.validate()
         return try .init(accepted:.init(material:material,reviewSHA256:review,directory:directory),candidate:candidate,directory:directory,source:checked,history:seal)
     }
-    private static func menuParent(material:SNESFirmwareMaterial,review:String,directory:URL)throws->SNESMenuStartupParent {
+    private static func menuParent(material:SNESFirmwareMaterial,review:String,directory:URL,currentData:SNESDataSnapshotReceipt?=nil)throws->SNESMenuStartupParent {
         let checked=try SNESFirmwareGuard.prepare(material)
         guard material.direction == .install,material.parentOperationID==nil,BackupManifest.digest(try material.planData())==review else {throw RestoreDirectory.failure()}
         let manifest=try material.trial.candidate.checkedExport().manifest
         guard let record=try JSONSerialization.jsonObject(with:manifest) as? [String:Any],record["schemaVersion"] as? Int==3 else {throw SNESRuntimeBinding.failure()}
-        let candidate=try SNESStartupAdapterCandidate.withMenuSupport(material.trial.candidate)
+        let base=try SNESStartupAdapterCandidate.withMenuSupport(material.trial.candidate)
+        let candidate=try currentData.map {try SNESStartupAdapterCandidate.withCurrentBackup(base,receipt:$0)} ?? base
         let seal=try SNESFirmwareSourceSeal.capture(directories:[directory],files:[])
         guard try load(RestoreDirectory(directory),review:review).phase == .menuAccepted else {throw RestoreDirectory.failure()}
         try checked.validate();try seal.validate()
@@ -211,9 +356,11 @@ actor SNESFirmwareJournal {
     }
     func uncertain()throws {try append(.uncertain)}
     func stoppedBeforeWrite()throws {try append(.stoppedBeforeWrite)}
-    func close()throws {try storage.closeLease()}
-    private func append(_ next:Phase)throws {
-        try Task.checkCancellation();let current=try state();try current.phase.permits(next,direction:material.direction)
+    func close()throws {guard reviewedReservation==nil else {throw LegacyInspectionError.busy};try storage.closeLease()}
+    private func append(_ next:Phase,reservation:UUID?=nil)throws {
+        if let active=reviewedReservation {guard reservation==active.id else {throw LegacyInspectionError.busy}}
+        else {guard reservation==nil else {throw LegacyInspectionError.busy}}
+        try Task.checkCancellation();let current=try state();try current.phase.permits(next,direction:material.direction,reviewedFirstInstall:material.firstInstall != nil)
         try storage.write(Self.encode(Record(phase:next,planSHA256:reviewSHA256,previousSHA256:current.lastSHA256)),name:String(format:"%04d.json",current.count),directory:storage.operation!)
         try storage.sync(storage.operation!);try storage.sync(storage.root)
         let after=try state();guard after.phase==next,after.count==current.count+1 else {throw RestoreDirectory.failure()}
@@ -221,35 +368,75 @@ actor SNESFirmwareJournal {
     private func state()throws->State {
         try storage.checkLock();try Self.checkParent(material,in:storage.root)
         try Self.checkOthers(storage,excluding:storage.operation!.url.lastPathComponent,recoveryParent:material.parentOperationID)
-        return try Self.load(storage.operation!,review:reviewSHA256,expectedPlan:plan)
+        return try Self.load(storage.operation!,review:reviewSHA256,expectedPlan:plan,afterRead:afterRecordRead)
     }
-    private static func load(_ directory:RestoreDirectory,review:String,expectedPlan:Data?=nil)throws->State {
+    private static func load(_ directory:RestoreDirectory,review:String,expectedPlan:Data?=nil,pending:Bool=false,preparing:Bool=false,afterRead:() throws -> Void = {})throws->State {
         let raw=try directory.read("plan.json",maximum:65536)
         guard BackupManifest.digest(raw)==review,expectedPlan.map({$0==raw}) ?? true else {throw RestoreDirectory.failure()}
+        try SNESStrictJSONKeys.validate(raw)
         let plan=try JSONDecoder().decode(SNESFirmwarePlan.self,from:raw)
-        guard [1,2].contains(plan.schemaVersion),plan.scope=="snes-physical-active-boot2",directory.url.lastPathComponent=="SNESFirmware-"+plan.id.uuidString,
+        guard [1,2,3].contains(plan.schemaVersion),plan.scope=="snes-physical-active-boot2",directory.url.lastPathComponent=="SNESFirmware-"+plan.id.uuidString,
               plan.offsetBytes==0x600000,plan.byteCount==7340032,plan.unitBytes==131072 else {throw RestoreDirectory.failure()}
-        if plan.schemaVersion==2 {
+        if plan.schemaVersion==3 {
+            guard let first=plan.firstInstall,plan.direction == .install,plan.parentOperationID==nil,
+                  plan.parentReviewSHA256==nil,plan.originalRangeSHA256==nil,first.startupPlanID != plan.id else {throw RestoreDirectory.failure()}
+            try first.validate()
+            guard BackupManifest.digest(try plan.reviewedStartupPlanData())==first.startupPlanSHA256 else {throw RestoreDirectory.failure()}
+            guard let original=try JSONSerialization.jsonObject(with:raw) as? NSDictionary,
+                  let canonical=try JSONSerialization.jsonObject(with:encode(plan)) as? [String:Any],
+                  original.isEqual(to:canonical) else {throw RestoreDirectory.failure()}
+        } else if plan.schemaVersion==2 {
             guard plan.originalRangeSHA256.map(SNESDataSnapshotChunk.isDigest)==true,plan.parentOperationID != nil,
-                  plan.parentReviewSHA256.map(SNESDataSnapshotChunk.isDigest)==true else {throw RestoreDirectory.failure()}
-        } else {guard plan.originalRangeSHA256==nil,plan.direction != .install || plan.parentOperationID==nil else {throw RestoreDirectory.failure()}}
+                  plan.parentReviewSHA256.map(SNESDataSnapshotChunk.isDigest)==true,plan.firstInstall==nil else {throw RestoreDirectory.failure()}
+        } else {guard plan.firstInstall==nil,plan.originalRangeSHA256==nil,plan.direction != .install || plan.parentOperationID==nil else {throw RestoreDirectory.failure()}}
         let input=try directory.read("input.bin",maximum:14680088)
         guard input.count==14680088,BackupManifest.digest(input)==plan.inputSHA256,
               BackupManifest.digest(Data(input.prefix(24)))==plan.geometrySHA256,
               BackupManifest.digest(Data(input[24..<7340056]))==plan.preimageSHA256,
               BackupManifest.digest(Data(input[7340056...]))==plan.targetSHA256 else {throw RestoreDirectory.failure()}
-        let files=try directory.names(),records=files.filter{$0 != "plan.json" && $0 != "input.bin"}
+        let files=try directory.names(),marker=preparing ? "preparation.pending":"preparation.complete"
+        if preparing || plan.schemaVersion==3 || files.contains(marker) {
+            guard files.contains(marker),try directory.read(marker,maximum:64)==Data(review.utf8) else {throw RestoreDirectory.failure()}
+        }
+        let records=files.filter{$0 != "plan.json" && $0 != "input.bin" && $0 != marker}
         guard (1...8).contains(records.count) else {throw RestoreDirectory.failure()}
-        var previous:String?,phase:Phase?
+        if pending { guard records == ["0000.pending"] else {throw RestoreDirectory.failure()} }
+        var previous:String?,phase:Phase?,checkedRecords:[(String,Data)]=[]
         for (index,name) in records.enumerated() {
-            guard name==String(format:"%04d.json",index) else {throw RestoreDirectory.failure()}
-            let bytes=try directory.read(name,maximum:65536),record=try JSONDecoder().decode(Record.self,from:bytes)
+            guard name==(pending ? "0000.pending" : String(format:"%04d.json",index)) else {throw RestoreDirectory.failure()}
+            let bytes=try directory.read(name,maximum:65536)
+            try SNESStrictJSONKeys.validate(bytes)
+            let record=try JSONDecoder().decode(Record.self,from:bytes)
             guard let canonical=try JSONSerialization.jsonObject(with:encode(record)) as? NSDictionary,
                   let original=try JSONSerialization.jsonObject(with:bytes) as? [String:Any],canonical.isEqual(to:original),
                   record.planSHA256==review,record.previousSHA256==previous else {throw RestoreDirectory.failure()}
-            if let phase {try phase.permits(record.phase,direction:plan.direction)} else {guard record.phase == .prepared else {throw RestoreDirectory.failure()}}
+            if let phase {
+                guard record.markerRequired == nil else {throw RestoreDirectory.failure()}
+                try phase.permits(record.phase,direction:plan.direction,reviewedFirstInstall:plan.firstInstall != nil)
+            } else {
+                guard record.phase == .prepared else {throw RestoreDirectory.failure()}
+                if plan.schemaVersion==3 {guard record.markerRequired==true else {throw RestoreDirectory.failure()}}
+                if record.markerRequired == true {
+                    guard files.contains(marker) else {throw RestoreDirectory.failure()}
+                } else {
+                    guard record.markerRequired == nil,!preparing,!files.contains(marker) else {throw RestoreDirectory.failure()}
+                }
+            }
+            checkedRecords.append((name,bytes))
             phase=record.phase;previous=BackupManifest.digest(bytes)
         }
+        try afterRead();try Task.checkCancellation()
+        guard try directory.names()==files,
+              try directory.read("plan.json",maximum:65536)==raw,
+              try directory.read("input.bin",maximum:14680088)==input else {throw RestoreDirectory.failure()}
+        for (name,bytes) in checkedRecords {
+            try Task.checkCancellation()
+            guard try directory.read(name,maximum:65536)==bytes else {throw RestoreDirectory.failure()}
+        }
+        if files.contains(marker) {
+            guard try directory.read(marker,maximum:64)==Data(review.utf8) else {throw RestoreDirectory.failure()}
+        }
+        guard try directory.names()==files else {throw RestoreDirectory.failure()}
         try directory.check();return .init(phase:phase!,count:records.count,lastSHA256:previous!)
     }
     private static func checkParent(_ material:SNESFirmwareMaterial,in root:RestoreDirectory)throws {
@@ -292,7 +479,7 @@ actor SNESFirmwareJournal {
                   plan.originalRangeSHA256 != nil else {throw RestoreDirectory.failure()}
         } else {
             guard parent.candidate.hasMenuSupport,!parent.installed.trial.candidate.hasMenuSupport,
-                  plan.schemaVersion==1,plan.parentOperationID==nil,plan.parentReviewSHA256==nil,
+                  [1,3].contains(plan.schemaVersion),plan.parentOperationID==nil,plan.parentReviewSHA256==nil,
                   plan.originalRangeSHA256==nil else {throw RestoreDirectory.failure()}
         }
         try parent.validate()
@@ -339,17 +526,19 @@ final class SNESMenuStartupParent:Sendable {
     }
     let candidate:SNESStartupAdapterCandidate,directory:URL,activeImage:Data,record:Record
     let installed:SNESFirmwareMaterial
-    private let source:SNESFirmwareGuard,history:SNESFirmwareSourceSeal
-    fileprivate init(accepted:SNESFirmwareAcceptedInstall,candidate:SNESStartupAdapterCandidate,directory:URL,source:SNESFirmwareGuard,history:SNESFirmwareSourceSeal) {
+    private let source:SNESFirmwareGuard,history:SNESFirmwareSourceSeal,backupSeal:SNESFirmwareSourceSeal
+    fileprivate init(accepted:SNESFirmwareAcceptedInstall,candidate:SNESStartupAdapterCandidate,directory:URL,source:SNESFirmwareGuard,history:SNESFirmwareSourceSeal) throws {
         self.candidate=candidate;self.directory=directory;self.source=source;self.history=history
+        backupSeal=try SNESFirmwareSourceSeal.capture(directories:[candidate.backup.directory],files:[])
         installed=accepted.material
         activeImage=accepted.material.trial.image
         record = .init(operationID:accepted.material.id,reviewSHA256:accepted.reviewSHA256,activeImageSHA256:BackupManifest.digest(activeImage),activeImageBytes:activeImage.count)
     }
-    func validate()throws {try history.validate();try source.validate()}
+    func validate()throws {try history.validate();try source.validate();try backupSeal.validate()}
     func require(_ value:SNESStartupAdapterCandidate)throws {
         try validate()
         guard value.hasMenuSupport,value.image==candidate.image,value.material.binding==candidate.material.binding,
-              value.backup.directory==candidate.backup.directory,value.backup.sha256==candidate.backup.sha256 else {throw SNESRuntimeBinding.failure()}
+              value.backup.directory.path==candidate.backup.directory.path,value.backup.sha256==candidate.backup.sha256,
+              value.backup.manifestSHA256==candidate.backup.manifestSHA256 else {throw SNESRuntimeBinding.failure()}
     }
 }

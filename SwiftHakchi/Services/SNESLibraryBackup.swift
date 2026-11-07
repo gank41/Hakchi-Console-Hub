@@ -121,7 +121,7 @@ struct SNESLibraryBackup: Sendable {
         guard try root.read("manifest.json", maximum: 24 * 1024 * 1024) == raw else { throw failure() }
         return Self(directory: root.url, inventory: inventory, manifestSHA256: BackupManifest.digest(raw), blobs: blobs, manifestSeal: manifestSeal, payloadSeals: seals)
     }
-    static func capture(inventory: SNESLibraryInventory, root: URL, read: Reader, refresh: Refresh, allowCreation: Bool = true) async throws -> Self {
+    static func capture(inventory: SNESLibraryInventory, root: URL, read: Reader, refresh: Refresh, allowCreation: Bool = true, forceNew: Bool = false) async throws -> Self {
         try Task.checkCancellation()
         let parent = try RestoreDirectory(root)
         let candidates = try parent.names().filter { $0.hasPrefix("SNES-Library-") }
@@ -131,7 +131,7 @@ struct SNESLibraryBackup: Sendable {
             try Task.checkCancellation()
             let candidate = parent.url.appendingPathComponent(name)
             guard let header = try? summary(directory: candidate), header.hwid == inventory.hwid else { continue }
-            if header.snapshotSHA256 == inventory.snapshotSHA256,
+            if !forceNew, header.snapshotSHA256 == inventory.snapshotSHA256,
                let saved = try? open(directory: candidate), saved.inventory.snapshotSHA256 == inventory.snapshotSHA256 {
                 let fresh = try await refresh()
                 guard fresh.snapshotSHA256 == inventory.snapshotSHA256, fresh.stateSHA256 == inventory.stateSHA256 else { throw failure() }

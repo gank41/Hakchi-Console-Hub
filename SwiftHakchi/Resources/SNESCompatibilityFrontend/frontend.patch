@@ -1,0 +1,163 @@
+--- a/retroarch.c
++++ b/retroarch.c
+@@ -26,6 +26,10 @@
+ #endif
+ 
+ #include <stdlib.h>
++#ifdef HC_STOCK_REPORT_EXPERIMENT
++#include <unistd.h>
++extern int hc_stock_save_status(void);
++#endif
+ #include <stdarg.h>
+ #include <stdint.h>
+ #include <string.h>
+@@ -1473,7 +1477,21 @@
+ 
+          command_event(CMD_EVENT_RECORD_DEINIT, NULL);
+ 
++#ifdef HC_STOCK_REPORT_EXPERIMENT
++         /* Inert ARM experiment: descriptor 211 is owned by the caller.
++          * Not enabled for the console or production app. */
++         {
++            int saved = hc_stock_save_status();
++            const char *report = getenv("HC_STOCK_SAVE_REPORT");
++            if (report && !strcmp(report, "1"))
++            {
++               char result = (char)saved;
++               (void)write(211, &result, 1);
++            }
++         }
++#else
+          event_save_files();
++#endif
+ 
+          command_event(CMD_EVENT_REWIND_DEINIT, NULL);
+          command_event(CMD_EVENT_CHEATS_DEINIT, NULL);
+--- a/tasks/task_save.c
++++ b/tasks/task_save.c
+@@ -1478,19 +1478,44 @@
+    return true;
+ }
+ 
++/* Host experiment: distinguish no battery memory from an actual failure. */
++int hc_stock_save_status(void)
++{
++   unsigned i, attempted = 0;
++   bool success = true;
++
++   /* Disabled or uninitialized SRAM is not evidence of a no-SRAM game. */
++   if (!rarch_ctl(RARCH_CTL_IS_SRAM_USED, NULL) ||
++       rarch_ctl(RARCH_CTL_IS_SRAM_SAVE_DISABLED, NULL))
++      return 'F';
++   if (!task_save_files)
++      return 'F';
++   if (!task_save_files->size)
++      return 'F';
++
++   for (i = 0; i < task_save_files->size; i++)
++   {
++      struct ram_type ram;
++      retro_ctx_memory_info_t info = {0};
++      if (!content_get_memory(&info, &ram, i))
++      {
++         if (info.size)
++            success = false;
++         continue;
++      }
++      attempted++;
++      if (!content_save_ram_file(i))
++         success = false;
++   }
++
++   return !success ? 'F' : attempted ? 'S' : 'N';
++}
++
+ bool event_save_files(void)
+ {
+-   unsigned i;
+-
+-   if (!task_save_files ||
+-         !rarch_ctl(RARCH_CTL_IS_SRAM_USED, NULL))
+-      return false;
+-
+-   for (i = 0; i < task_save_files->size; i++)
+-      content_save_ram_file(i);
+-
+-   return true;
+-}
++   return hc_stock_save_status() == 'S';
++}
++
+ 
+ bool event_load_save_files(void)
+ {
+--- a/libretro-common/streams/file_stream.c
++++ b/libretro-common/streams/file_stream.c
+@@ -355,8 +355,8 @@
+    else
+       output = retro_vfs_file_close_impl((libretro_vfs_implementation_file*)fp);
+ 
+-   if (output == 0)
+-      free(stream);
++   /* The VFS contract invalidates its handle even when close fails. */
++   free(stream);
+ 
+    return output;
+ }
+@@ -449,7 +449,9 @@
+       return false;
+ 
+    ret = filestream_write(file, data, size);
+-   filestream_close(file);
++   /* A successful write does not establish that buffered data was closed. */
++   if (filestream_close(file) != 0)
++      return false;
+ 
+    if (ret != size)
+       return false;
+--- a/libretro-common/vfs/vfs_implementation.c
++++ b/libretro-common/vfs/vfs_implementation.c
+@@ -193,6 +193,7 @@
+    if (!stream)
+       return NULL;
+ 
++   stream->fd = -1;
+    (void)flags;
+ 
+    stream->hints           = hints;
+@@ -318,13 +319,14 @@
+ 
+ int retro_vfs_file_close_impl(libretro_vfs_implementation_file *stream)
+ {
++   int result = 0;
+    if (!stream)
+       return -1;
+ 
+    if ((stream->hints & RFILE_HINT_UNBUFFERED) == 0)
+    {
+-      if (stream->fp)
+-         fclose(stream->fp);
++      if (stream->fp && fclose(stream->fp) != 0)
++         result = -1;
+    }
+    else
+    {
+@@ -334,15 +336,15 @@
+ #endif
+    }
+ 
+-   if (stream->fd > 0)
+-      close(stream->fd);
++   if (stream->fd >= 0 && close(stream->fd) != 0)
++      result = -1;
+    if (stream->buf)
+       free(stream->buf);
+    if (stream->orig_path)
+       free(stream->orig_path);
+    free(stream);
+ 
+-   return 0;
++   return result;
+ }
+ 
+ int retro_vfs_file_error_impl(libretro_vfs_implementation_file *stream)

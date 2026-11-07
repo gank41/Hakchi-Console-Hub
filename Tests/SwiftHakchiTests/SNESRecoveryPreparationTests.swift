@@ -48,6 +48,7 @@ actor SNESPreparationFakeIO: SNESPreparationIO {
     }
     func readStartup() async throws -> Data {
         events.append("startup")
+        if fault == "task-cancel" { try await Task.sleep(for: .seconds(30)) }
         if fault == "cancel" { throw CancellationError() }
         let second = events.filter { $0 == "startup" }.count == 2
         if fault == "transport-first" || fault == "transport-empty" || (fault == "transport-second" && second) {

@@ -22,6 +22,28 @@ import SwiftHakchiCore
         #expect(reused.directory == backup.directory)
         #expect(try Data(contentsOf: backup.directory.appendingPathComponent("manifest.json")) == manifest)
         #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).count == 1)
+        let fresh = try await SNESLibraryBackup.capture(inventory: inventory, root: root,
+            read: { _, _ in Data("{}".utf8) }, refresh: { inventory }, forceNew: true)
+        #expect(fresh.directory != backup.directory)
+        #expect(try fresh.read(path: "clover/settings.json") == Data("{}".utf8))
+    }
+    @Test func freshBackupFailureKeepsTheEarlierBackupIntact() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = SNESLibraryInventoryTests(), nonce = UUID()
+        let raw = try fixture.frame(challenge: nonce), inventory = try fixture.parse(raw, challenge: nonce)
+        let changedRaw = Data(String(decoding: raw, as: UTF8.self)
+            .replacingOccurrences(of: BackupManifest.digest(Data("{}".utf8)), with: BackupManifest.digest(Data("[]".utf8))).utf8)
+        let changed = try fixture.parse(changedRaw, challenge: nonce)
+        let earlier = try await SNESLibraryBackup.capture(inventory: inventory, root: root,
+            read: { _, _ in Data("{}".utf8) }, refresh: { inventory })
+        await #expect(throws: (any Error).self) {
+            try await SNESLibraryBackup.capture(inventory: inventory, root: root,
+                read: { _, _ in Data("{}".utf8) }, refresh: { changed }, forceNew: true)
+        }
+        let reopened = try SNESLibraryBackup.open(directory: earlier.directory)
+        #expect(reopened.manifestSHA256 == earlier.manifestSHA256)
+        #expect(try reopened.read(path: "clover/settings.json") == Data("{}".utf8))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == [earlier.directory.lastPathComponent])
     }
     @Test func finderMetadataAppearingDuringCaptureDoesNotPreventPublication() async throws {
         let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }

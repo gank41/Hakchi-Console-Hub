@@ -27,6 +27,23 @@ func builderFixtureImage() throws -> Data {
 }
 
 struct LegacyBootImageBuilderTests {
+    @Test func comparisonChecksDecodedContentsAndPreservedHeaderWithoutRebuilding() throws {
+        let source = try builderFixtureImage()
+        let original = try LegacyBootImageBuilder.inspect(source)
+        let archive = try original.archive.updating(replacements: ["init": Data(repeating: 65, count: 40_000)])
+        for encoding: LegacyBootImageBuilder.RamdiskEncoding in [.lzopStored, .lzopCompressed, .xz] {
+            let image = try LegacyBootImageBuilder.build(source: source, kernel: original.kernel, archive: archive, ramdiskEncoding: encoding)
+            #expect(try LegacyBootImageBuilder.matchesRebuild(image, source: source, kernel: original.kernel, archive: archive))
+            #expect(try !LegacyBootImageBuilder.matchesRebuild(image, source: source, kernel: Data([9]), archive: archive))
+            #expect(try !LegacyBootImageBuilder.matchesRebuild(image, source: source, kernel: original.kernel, archive: original.archive))
+            var differentSource = source; differentSource[64] = 113
+            #expect(try !LegacyBootImageBuilder.matchesRebuild(image, source: differentSource, kernel: original.kernel, archive: archive))
+            var corrupted = image; corrupted[576] ^= 1
+            #expect(throws: (any Error).self) {
+                try LegacyBootImageBuilder.matchesRebuild(corrupted, source: source, kernel: original.kernel, archive: archive)
+            }
+        }
+    }
     @Test func independentIdentifierAndPreservedHeader() throws {
         let id = LegacyBootImageBuilder.identifier(kernel: Data("abc".utf8), ramdisk: Data("def".utf8))
         #expect(id.map { String(format: "%02x", $0) }.joined() == "9c6fc5452226c14d4e57da050fb606f940943dc0")

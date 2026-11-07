@@ -27,11 +27,18 @@ enum SNESFirmwareDiagnostic {
         try Task.checkCancellation();await progress(.checkingMaterial)
         if action=="--prepare-snes-firmware" {
             let request=URL(fileURLWithPath:args[1]),directory=try RestoreDirectory(request.deletingLastPathComponent())
-            let raw=try directory.read(request.lastPathComponent,maximum:65536),paths=try JSONDecoder().decode(SNESFirmwarePaths.self,from:raw)
-            try paths.validate()
-            let encoded=try JSONEncoder().encode(paths)
-            guard let decoded=try JSONSerialization.jsonObject(with:encoded) as? NSDictionary,
-                  let actual=try JSONSerialization.jsonObject(with:raw) as? [String:Any],decoded.isEqual(to:actual) else {throw RestoreDirectory.failure()}
+            let raw=try directory.read(request.lastPathComponent,maximum:65536)
+            guard let actual=try JSONSerialization.jsonObject(with:raw) as? [String:Any] else {throw RestoreDirectory.failure()}
+            let paths:SNESFirmwarePaths
+            if actual["helpers"] != nil {
+                paths=try SNESPortableFirmwareRequest.resolve(raw)
+            } else {
+                paths=try JSONDecoder().decode(SNESFirmwarePaths.self,from:raw)
+                try paths.validate()
+                let encoded=try JSONEncoder().encode(paths)
+                guard let decoded=try JSONSerialization.jsonObject(with:encoded) as? NSDictionary,
+                      decoded.isEqual(to:actual) else {throw RestoreDirectory.failure()}
+            }
             let recovery=try await loadInputs();_=try recovery.prepare()
             let material=try SNESFirmwareMaterial.install(paths:paths,recovery:recovery),checked=try SNESFirmwareGuard.prepare(material)
             try SNESColdBootPolicy.require(boot1:material.source.boot1,image:material.trial.image)
@@ -71,6 +78,11 @@ enum SNESFirmwareDiagnostic {
                                  "status":"Original-startup restoration is prepared on this Mac. It preserves games, settings and saves; no firmware was sent."])
             }
             if action=="--check-snes-installed-startup",material.direction != .install {throw RestoreDirectory.failure()}
+            if material.firstInstall != nil && ["--preflight-snes-firmware","--write-snes-firmware"].contains(action) {
+                // The legacy diagnostic has no same-session independent-backup
+                // check. Refuse before host inspection or constructing console IO.
+                throw RestoreDirectory.failure()
+            }
             try await checkHost();try checked.require(material)
             if action=="--check-snes-installed-startup" {
                 let result=try await SNESInstalledStartupCheck().run(journal:journal,guard:checked,io:makeStartupIO(material.trial))

@@ -104,6 +104,116 @@ struct ConsoleAttachmentTests {
         await first.value
         #expect(manager.consoleType == .snesUsa && manager.isConnected)
     }
+    @Test @MainActor func stoppingAnInFlightConnectionDoesNotAcceptALateResult() async throws {
+        let gate = PendingConsoleConnection()
+        let manager = DeviceManager(connectRuntime: { _ in await gate.wait() })
+        manager.usbMonitor.attachments = [Self.legacy()]
+        let connecting = Task { await manager.reconnect() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while !(await gate.entered) {
+            guard ContinuousClock.now < deadline else { Issue.record("Connection did not start"); return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        manager.manualDisconnect()
+        connecting.cancel()
+        await gate.finish()
+        #expect(!(await connecting.value))
+        #expect(!manager.isConnected && !manager.isConnecting && manager.lastConnectionError == nil)
+    }
+    @Test @MainActor func recoveryWaitsForAnInFlightManualConnectionToReleaseUSB() async throws {
+        let gate = PendingConsoleConnection()
+        let usb = LegacyFakeUSB(), client = LegacyInspectionClient(transport: usb)
+        try await client.connect()
+        let manager = DeviceManager(connectRuntime: { _ in await gate.wait() })
+        manager.usbMonitor.attachments = [Self.legacy()]
+        let connecting = Task { await manager.reconnect() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while !(await gate.entered) {
+            guard ContinuousClock.now < deadline else { Issue.record("Connection did not start"); return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        var recoveryReady = false
+        let recovery = Task { await manager.pauseForRecovery(); recoveryReady = true }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!recoveryReady, "Recovery must not claim USB while the connection is still opening")
+        var opened = ConnectedConsoleInfo(consoleType: .nes)
+        opened.legacy = client
+        await gate.finish(opened)
+        #expect(!(await connecting.value))
+        await recovery.value
+        let usbOpen = await usb.isOpen
+        #expect(recoveryReady && !manager.isConnected && !usbOpen)
+    }
+    @Test @MainActor func suppressingConnectionsClosesALateManualConnection() async throws {
+        let gate = PendingConsoleConnection()
+        let usb = LegacyFakeUSB(), client = LegacyInspectionClient(transport: usb)
+        try await client.connect()
+        let manager = DeviceManager(connectRuntime: { _ in await gate.wait() })
+        manager.usbMonitor.attachments = [Self.legacy()]
+        let connecting = Task { await manager.reconnect() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while !(await gate.entered) {
+            guard ContinuousClock.now < deadline else { Issue.record("Connection did not start"); return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        manager.suppressAutoConnect = true
+        var opened = ConnectedConsoleInfo(consoleType: .nes)
+        opened.legacy = client
+        await gate.finish(opened)
+        #expect(!(await connecting.value))
+        let usbOpen = await usb.isOpen
+        #expect(!manager.isConnected && !usbOpen)
+    }
+    @Test @MainActor func stoppingManagerClosesALateManualConnection() async throws {
+        let gate = PendingConsoleConnection()
+        let usb = LegacyFakeUSB(), client = LegacyInspectionClient(transport: usb)
+        try await client.connect()
+        let manager = DeviceManager(connectRuntime: { _ in await gate.wait() })
+        manager.usbMonitor.attachments = [Self.legacy()]
+        let connecting = Task { await manager.reconnect() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while !(await gate.entered) {
+            guard ContinuousClock.now < deadline else { Issue.record("Connection did not start"); return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        manager.stop()
+        var opened = ConnectedConsoleInfo(consoleType: .nes)
+        opened.legacy = client
+        await gate.finish(opened)
+        #expect(!(await connecting.value))
+        let usbOpen = await usb.isOpen
+        #expect(!manager.isConnected && !usbOpen)
+    }
+    @Test @MainActor func secondManualConnectionWaitsForTheFirstToClose() async throws {
+        let gate = PendingConsoleConnection(), calls = ConnectionCallCounter()
+        let usb = LegacyFakeUSB(), client = LegacyInspectionClient(transport: usb)
+        try await client.connect()
+        let manager = DeviceManager(connectRuntime: { device in
+            await calls.record(device.registryEntryID!)
+            let count = await calls.ids.count
+            if count == 1 { return await gate.wait() }
+            let usbOpen = await usb.isOpen
+            #expect(!usbOpen, "The old connection must close before opening another")
+            return ConnectedConsoleInfo(consoleType: .snesUsa)
+        })
+        manager.usbMonitor.attachments = [Self.legacy()]
+        let first = Task { await manager.reconnect() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while !(await gate.entered) {
+            guard ContinuousClock.now < deadline else { Issue.record("Connection did not start"); return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let second = Task { await manager.reconnect() }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await calls.ids.count == 1)
+        var opened = ConnectedConsoleInfo(consoleType: .nes)
+        opened.legacy = client
+        await gate.finish(opened)
+        #expect(!(await first.value))
+        #expect(await second.value)
+        #expect(manager.isConnected && manager.consoleType == .snesUsa)
+        manager.manualDisconnect()
+    }
     @Test @MainActor func recoveryOwnershipBlocksAutoConnectUntilUnplug() async {
         let calls = ConnectionCallCounter()
         let manager = DeviceManager(connectRuntime: { device in
@@ -128,7 +238,7 @@ private actor PendingConsoleConnection {
         entered = true
         return await withCheckedContinuation { continuation = $0 }
     }
-    func finish() { continuation?.resume(returning: ConnectedConsoleInfo(consoleType: .nes)); continuation = nil }
+    func finish(_ result: ConnectedConsoleInfo = ConnectedConsoleInfo(consoleType: .nes)) { continuation?.resume(returning: result); continuation = nil }
 }
 
 actor ConnectionCallCounter {

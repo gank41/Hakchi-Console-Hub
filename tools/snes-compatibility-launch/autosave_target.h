@@ -16,6 +16,9 @@ int hc_autosave_target_init(HCAutosaveTarget *,int parent,int workspace,int temp
  * failure a newly created workspace may remain for inspection; never removes
  * files. Close only after all async work and recovery inspection have ended. */
 int hc_autosave_target_prepare(HCAutosaveTarget *,int parent,uid_t owner,const uint8_t nonce[16],const char *identity,const char *destination);
+/* Caller excludes concurrent descriptor-table reuse during close and retry.
+ * On failure still-open descriptors remain owned; the target cannot be used
+ * for saving again and remains available only for cleanup retry. */
 int hc_autosave_target_close(HCAutosaveTarget *);
 /* Main-thread lifecycle: acquire before scheduling a worker and release only
  * from its completion callback. This does not prevent outside close(2) calls. */

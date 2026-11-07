@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-nes_assistant_root="$(pwd)/Builds/RecoveryAssistant"
+nes_assistant_root="$(cd .. && pwd)/Builds/RecoveryAssistant"
 mkdir -p "$nes_assistant_root/build"
-swift build --configuration release --scratch-path "$nes_assistant_root/build" -Xswiftc -DRECOVERY_ASSISTANT
-nes_assistant_bin="$(swift build --configuration release --scratch-path "$nes_assistant_root/build" -Xswiftc -DRECOVERY_ASSISTANT --show-bin-path)"
+if [[ ! -f "$nes_assistant_root/build/workspace-state.json" ]]; then
+    [[ -f .build/workspace-state.json && -d .build/checkouts && -d .build/repositories ]]
+    ditto .build/checkouts "$nes_assistant_root/build/checkouts"
+    ditto .build/repositories "$nes_assistant_root/build/repositories"
+    cp .build/workspace-state.json "$nes_assistant_root/build/workspace-state.json"
+fi
+swift_flags=()
+[[ "${SWIFTHAKCHI_DISABLE_SWIFTPM_SANDBOX:-0}" != 1 ]] || swift_flags+=(--disable-sandbox)
+swift build "${swift_flags[@]}" --configuration release --scratch-path "$nes_assistant_root/build" --disable-automatic-resolution --skip-update -Xswiftc -DRECOVERY_ASSISTANT
+nes_assistant_bin="$(swift build "${swift_flags[@]}" --configuration release --scratch-path "$nes_assistant_root/build" --disable-automatic-resolution --skip-update -Xswiftc -DRECOVERY_ASSISTANT --show-bin-path)"
 nes_assistant_package="$(mktemp -d "$nes_assistant_root/assistant.XXXXXX")"
 nes_assistant_app="$nes_assistant_package/NES Recovery Assistant.app"
 mkdir -p "$nes_assistant_app/Contents/MacOS" "$nes_assistant_app/Contents/Resources"

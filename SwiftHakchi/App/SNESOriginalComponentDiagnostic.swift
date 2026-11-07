@@ -5,6 +5,7 @@ enum SNESOriginalComponentDiagnostic {
         loadInputs: @Sendable () async throws -> RecoveryBootInputs = { try PayloadService.shared.pinnedRecoveryInputs() },
         checkHost: @Sendable () async throws -> Void = { try RecoveryProbeUSBRegistry.requireOrdinaryAppClosed() },
         makeIO: @Sendable (SNESOriginalComponentSource) -> any SNESOriginalComponentIO = { NativeSNESOriginalComponentIO(source: $0) },
+        makeStore: @Sendable (URL) throws -> RecoveryBootSnapshotStore = { try RecoveryBootSnapshotStore(root: $0) },
         progress: @escaping RecoveryProgressSink = { _ in }) async throws -> String? {
         guard args.first == "--capture-snes-original-components" else { return nil }
         guard args.count == 5, args.dropFirst().allSatisfy({ $0.hasPrefix("/") && !$0.contains("\0") && $0.utf8.count <= 4096 }) else {
@@ -14,7 +15,7 @@ enum SNESOriginalComponentDiagnostic {
         let setup = try SNESOfflineSource.load(snapshot: URL(fileURLWithPath: args[1]))
         let prep = try SNESMenuSupportSource.load(setup: setup, preparation: URL(fileURLWithPath: args[2]))
         let source = try SNESOriginalComponentSource(material: SNESMenuSupportMaterial.load(source: prep, directory: URL(fileURLWithPath: args[3])))
-        let store = try RecoveryBootSnapshotStore(root: URL(fileURLWithPath: args[4]))
+        let store = try makeStore(URL(fileURLWithPath: args[4]))
         let inputs = try await loadInputs(); _ = try inputs.prepare()
         try source.revalidate(); try await checkHost(); try Task.checkCancellation(); try source.revalidate()
         let destination: URL
@@ -23,8 +24,8 @@ enum SNESOriginalComponentDiagnostic {
             let result = try await SNESOriginalComponentService().capture(source: source, inputs: inputs, io: makeIO(source), progress: progress)
             captured = result
             destination = try await store.saveSNESOriginalComponents(result)
-            _ = try SNESOriginalComponentMaterial.load(source: source, directory: destination)
         } catch {
+            if error is RecoverySnapshotCleanupError { throw error }
             if error is CancellationError || Task.isCancelled { throw CancellationError() }
             let failure: SNESOriginalComponentFailure
             if let existing = error as? SNESOriginalComponentFailure { failure = existing }

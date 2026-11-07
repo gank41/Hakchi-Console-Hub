@@ -39,6 +39,8 @@ final class DeviceManager: ObservableObject {
     private let connectRuntime: (@Sendable (RecoveryProbeUSBDevice) async throws -> ConnectedConsoleInfo)?
     private var cancellables = Set<AnyCancellable>()
     private var connectTask: Task<Void, Never>?
+    private var manualConnectRequest: UUID?
+    private var manualConnectAttempt: (id: UUID, task: Task<Void, Never>)?
     private var closingTask: Task<Void, Never>?
     private var observedDevices: [RecoveryProbeUSBDevice] = []
     private var connectedAttachmentID: UInt64?
@@ -50,7 +52,11 @@ final class DeviceManager: ObservableObject {
     /// A recovery operation owns USB until it explicitly releases it or normal boot is restored.
     var suppressAutoConnect = false {
         didSet {
-            if suppressAutoConnect { connectTask?.cancel() }
+            if suppressAutoConnect {
+                connectTask?.cancel()
+                manualConnectRequest = nil
+                manualConnectAttempt?.task.cancel()
+            }
         }
     }
 
@@ -74,7 +80,8 @@ final class DeviceManager: ObservableObject {
         usbMonitor.start()
     }
     func stop() {
-        usbMonitor.stop(); cancellables.removeAll(); connectTask?.cancel(); _ = disconnect()
+        usbMonitor.stop(); cancellables.removeAll(); connectTask?.cancel()
+        manualConnectRequest = nil; manualConnectAttempt?.task.cancel(); _ = disconnect()
     }
     private func enqueue(_ devices: [RecoveryProbeUSBDevice]) {
         let prior = connectTask
@@ -134,7 +141,7 @@ final class DeviceManager: ObservableObject {
                         await self?.recordConnectionStage(stage, session: token, started: started)
                     })
             }
-            guard sessionID == token, !Task.isCancelled,
+            guard sessionID == token, !Task.isCancelled, !suppressAutoConnect,
                   observedDevices.contains(attachment) else {
                 if sessionID == token { connectionStage = nil }
                 await result.close(); return
@@ -158,16 +165,23 @@ final class DeviceManager: ObservableObject {
         }
     }
     func manualDisconnect() {
+        lastConnectionError = nil
         manuallyDisconnectedID = ConsoleAttachmentPolicy.single(observedDevices)?.registryEntryID
             ?? ConsoleAttachmentPolicy.single(usbMonitor.attachments)?.registryEntryID
+        manualConnectRequest = nil; manualConnectAttempt?.task.cancel()
         connectTask?.cancel(); _ = disconnect()
     }
     @discardableResult func reconnect() async -> Bool {
         guard !suppressAutoConnect else {
             lastConnectionError = "Another console operation is using USB. Finish it before connecting."; return false
         }
-        let prior = connectTask; prior?.cancel(); await prior?.value
-        guard !Task.isCancelled else { return false }
+        let request = UUID()
+        manualConnectRequest = request
+        let prior = connectTask, priorManual = manualConnectAttempt
+        prior?.cancel(); priorManual?.task.cancel()
+        await prior?.value; await priorManual?.task.value
+        if manualConnectAttempt?.id == priorManual?.id { manualConnectAttempt = nil }
+        guard !Task.isCancelled, !suppressAutoConnect, manualConnectRequest == request else { return false }
         manuallyDisconnectedID = nil; attemptedAttachmentID = nil
         observedDevices = usbMonitor.attachments
         guard let attachment = ConsoleAttachmentPolicy.single(observedDevices) else {
@@ -179,7 +193,14 @@ final class DeviceManager: ObservableObject {
             lastConnectionError = "Recovery mode is ready. It cannot show a game library yet. Use the console backup or setup action, or boot normally if the console is already modified."
             return false
         }
-        await connect(attachment)
+        let attempt = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.connect(attachment)
+        }
+        manualConnectAttempt = (request, attempt)
+        await withTaskCancellationHandler(operation: { await attempt.value }, onCancel: { attempt.cancel() })
+        if manualConnectAttempt?.id == request { manualConnectAttempt = nil }
+        guard !Task.isCancelled, !suppressAutoConnect, manualConnectRequest == request else { return false }
         return isConnected
     }
     /// Compatibility entry point for existing presence observers; absent startup notifications are harmless.
@@ -189,9 +210,12 @@ final class DeviceManager: ObservableObject {
     }
     func pauseForRecovery() async {
         suppressAutoConnect = true
-        let prior = connectTask; prior?.cancel()
+        let prior = connectTask, manual = manualConnectAttempt
+        manualConnectRequest = nil
+        prior?.cancel(); manual?.task.cancel()
         let close = disconnect()
-        await prior?.value; await close?.value
+        await prior?.value; await manual?.task.value; await close?.value
+        if manualConnectAttempt?.id == manual?.id { manualConnectAttempt = nil }
     }
     /// Resume the normal tracked connection task after a foreground USB workflow releases its handle.
     func resumeAfterExclusive() {

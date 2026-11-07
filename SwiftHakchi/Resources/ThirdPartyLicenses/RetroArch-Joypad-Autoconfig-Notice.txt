@@ -1,0 +1,8 @@
+RetroArch joypad autoconfiguration profile
+
+The Nintendo Clovercon controller 1 profile is adapted from the RetroArch
+joypad autoconfiguration project:
+https://github.com/libretro/retroarch-joypad-autoconfig/blob/2f73cbf1f74904233f1c91a5c8e220565a880375/udev/Nintendo_Clovercon_-_controller1.cfg
+
+The bundled version includes additional analog-axis bindings and labels.
+License: MIT. See RetroArch-Joypad-Autoconfig-COPYING.txt.

@@ -12,6 +12,10 @@ int hc_checkpoint_init(HCCheckpoint *s,const uint8_t session[16],uint64_t sequen
  if (!nonzero || !sequence) return -1;
  memcpy(s->session,copy,sizeof copy);s->sequence=sequence;s->phase=HC_CP_WAIT_SAVE;return 0;
 }
+int hc_checkpoint_init_image(HCCheckpoint *s,const uint8_t session[16],uint64_t sequence) {
+ if(hc_checkpoint_init(s,session,sequence))return -1;
+ s->phase=HC_CP_WAIT_IMAGE;return 0;
+}
 int hc_checkpoint_receipt(HCCheckpoint *s,const uint8_t *p,size_t n) {
  if (!s || !p || n!=HC_CHECKPOINT_RECEIPT_BYTES) return fail(s);
  if (s->phase!=HC_CP_WAIT_SAVE && s->phase!=HC_CP_WAIT_IMAGE) return fail(s);

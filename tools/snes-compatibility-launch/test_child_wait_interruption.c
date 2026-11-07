@@ -29,8 +29,13 @@ int main(void) {
     assert(child.pid == 123 && child.input == fd && status == 91);
     assert(fcntl(fd, F_GETFD) >= 0);
     calls = 0; always_interrupted = 1;
-    assert(hc_child_poll(&child, &status) == -1 && errno == EINTR);
+    /* Exhausting the bounded retries is still pending: no exit status was
+     * observed, so the owner must retain and continue polling the child. */
+    assert(hc_child_poll(&child, &status) == 0);
     assert(calls == 4 && child.pid == 123 && child.input == fd && status == 91);
+    calls = 0; always_interrupted = 0;
+    assert(hc_child_poll(&child, &status) == 0);
+    assert(calls == 2 && child.pid == 123 && child.input == fd && status == 91);
     injected_error = EIO;
     calls = 0;
     assert(hc_child_poll(&child, &status) == -1 && errno == EIO);

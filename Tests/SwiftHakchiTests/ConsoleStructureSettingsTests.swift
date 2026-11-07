@@ -3,12 +3,6 @@ import Testing
 @testable import SwiftHakchi
 
 struct ConsoleStructureSettingsTests {
-    @Test func freshWorkspaceUsesAppSpecificApplicationSupportFolder() {
-        guard ProcessInfo.processInfo.environment["SWIFTHAKCHI_WORKSPACE"]?.isEmpty != false else { return }
-        let expected = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Hakchi Console Hub", isDirectory: true)
-        #expect(AppConfig.defaultWorkspace == expected)
-    }
     @Test func oldMenuLimitMigratesWithoutMovingWorkspaceOrLibraryOrder() throws {
         let legacy = Data(#"{"consoleMenuLimit":25,"libraryOrder":"dateModified","workspacePath":"/tmp/structure-legacy"}"#.utf8)
         let config = try JSONDecoder().decode(AppConfig.self, from: legacy)

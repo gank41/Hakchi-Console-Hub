@@ -10,6 +10,12 @@ private func sourceBuiltCoreFixture() throws -> (core:Data, archive:Data, notice
             try Data(contentsOf:source.appendingPathComponent("LICENSE.txt")))
 }
 struct SNESCompatibilityCorePackageTests {
+    @Test func bundledCoreMatchesReviewedSourceAndNotice() throws {
+        let package = try SNESCompatibilityCorePackage.loadBundled()
+        #expect(package.core.count == 3_385_720)
+        #expect(package.notice.count == 6_100)
+        #expect(package.inspection.dependencies.contains("libc.so.6"))
+    }
     @Test func unknownOrOversizedInputsNeverBecomeACorePackage() {
         for data in [Data(),Data(count:1024),Data(count:8*1024*1024+1)] {
             #expect(throws:(any Error).self) { try SNESCompatibilityCorePackage(core:data,sourceArchive:Data(),notice:Data()) }

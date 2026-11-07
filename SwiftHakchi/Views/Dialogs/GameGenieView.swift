@@ -34,8 +34,8 @@ struct GameGenieView: View {
                         Label("Saved on this Mac", systemImage: "checkmark.circle.fill")
                             .font(.title3.bold()).foregroundStyle(.green)
                         Text(copyNotice).font(.body)
-                        Text(session?.system == .nes ? "To play these changes on your console:" : "Your Cheat Codes copy is ready on this Mac.").font(.headline)
-                        Text(session?.system == .nes ? "1. Close this window and connect your console.\n\n2. Choose Sync Library and follow the steps to copy and show your updated games.\n\n3. Test the game, then choose Finish Sync." : "SNES and Genesis console setup and game transfers are still being developed. This copy stays in your Mac library until that support is ready. You can change its codes and update the same copy here.")
+                        Text(session?.system == .nes || game.consoleType == .snesUsa ? "To play this copy on a prepared console:" : "Your Cheat Codes copy is ready on this Mac.").font(.headline)
+                        Text(session?.system == .nes || game.consoleType == .snesUsa ? "1. Close this window and connect your prepared console.\n\n2. Check the [Cheat Code] copy in your library, then choose Sync Library. Review the game and follow the steps shown.\n\n3. Test the game and its codes before choosing Finish Sync." : "Game transfers for this console are still being developed. This copy stays in your Mac library. You can change its codes and update the same copy here.")
                             .font(.body)
                     }
                     .padding(16)

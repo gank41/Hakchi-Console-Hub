@@ -161,7 +161,7 @@ struct SNESPowerInputCaptureTests {
         let attrs=try FileManager.default.attributesOfItem(atPath:root.path)
         #expect((attrs[.posixPermissions] as? NSNumber)?.intValue == 0o755)
         try FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:root.path)
-        #expect(try SNESLibraryInstallationIndex.existingPrivateRoot(root).standardizedFileURL.path == root.standardizedFileURL.path)
+        #expect(try SNESLibraryInstallationIndex.existingPrivateRoot(root)==root)
     }
     @Test func acceptsOnlyTheExpectedReadyMessageOnSuccessfulResponse() throws {
         let n=UUID(),raw=powerFrame(n,event:inputEvent(1,116,0)),marker="HC_POWER_READER_READY_\(n.uuidString)\n"

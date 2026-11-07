@@ -119,17 +119,48 @@ static int manager_checkpoint(const HCLaunchArguments *args,HCManagerCheckpointP
   int n=snprintf(result.save,sizeof result.save,"%s/savestate",args->values[HC_ROLLBACK_OUT]);
   if(n<=0||n>=(int)sizeof result.save)return -1;result.have_save=1;
  }
+ if(args->present&(1u<<HC_LOAD)){
+  size_t n=length(args->values[HC_LOAD]);if(!n||n>=HC_ARGUMENT_BYTES)return -1;
+  memcpy(result.load,args->values[HC_LOAD],n+1);result.have_load=1;
+ }else if(args->present&(1u<<HC_ROLLBACK_IN)){
+  int n=snprintf(result.load,sizeof result.load,"%s/savestate",args->values[HC_ROLLBACK_IN]);
+  if(n<=0||n>=(int)sizeof result.load)return -1;result.have_load=1;
+ }
  if(args->present&(1u<<HC_SCREENSHOT)){
   size_t n=length(args->values[HC_SCREENSHOT]);if(!n||n>=HC_ARGUMENT_BYTES)return -1;
   memcpy(result.image,args->values[HC_SCREENSHOT],n+1);result.have_image=1;
  }
- if(result.have_save&&result.have_image&&same_ascii_case(result.save,result.image))return -1;
+ if(result.have_image&&((result.have_save&&same_ascii_case(result.save,result.image))||(result.have_load&&same_ascii_case(result.load,result.image))))return -1;
+ *out=result;return 0;
+}
+
+/* Time files may be the same on load and save, but neither may alias game
+ * SRAM/RTC or any requested state or screenshot. Names are not authorization. */
+static int manager_time(const HCLaunchArguments *args,const HCGameSavePaths *native,const HCGameSavePaths *isolated,const HCManagerCheckpointPaths *checkpoint,HCManagerTimePaths *out){
+ HCManagerTimePaths result={0};char rollback_state[HC_ARGUMENT_BYTES]={0};
+ if(!args||!native||!isolated||!checkpoint||!out)return -1;
+ if(args->present&(1u<<HC_LOAD_TIME)){strcpy(result.load,args->values[HC_LOAD_TIME]);result.have_load=1;}
+ if(args->present&(1u<<HC_SAVE_TIME)){strcpy(result.save,args->values[HC_SAVE_TIME]);result.have_save=1;}
+ if(!result.have_load&&!result.have_save){*out=result;return 0;}
+ if(args->present&(1u<<HC_ROLLBACK_IN)){
+  int n=snprintf(rollback_state,sizeof rollback_state,"%s/savestate",args->values[HC_ROLLBACK_IN]);
+  if(n<=0||(size_t)n>=sizeof rollback_state)return -1;
+ }
+ const char *times[]={result.have_load?result.load:NULL,result.have_save?result.save:NULL};
+ const char *other[]={native->sram,native->rtc,isolated->sram,isolated->rtc,
+  checkpoint->have_save?checkpoint->save:NULL,checkpoint->have_image?checkpoint->image:NULL,checkpoint->have_load?checkpoint->load:NULL,
+  (args->present&(1u<<HC_LOAD))?args->values[HC_LOAD]:NULL,
+  (args->present&(1u<<HC_ROLLBACK_IN))?args->values[HC_ROLLBACK_IN]:NULL,
+  (args->present&(1u<<HC_ROLLBACK_OUT))?args->values[HC_ROLLBACK_OUT]:NULL,
+  rollback_state[0]?rollback_state:NULL};
+ for(size_t i=0;i<2;i++)if(times[i])for(size_t j=0;j<sizeof other/sizeof other[0];j++)
+  if(other[j]&&same_ascii_case(times[i],other[j]))return -1;
  *out=result;return 0;
 }
 
 int hc_parse_compatibility_menu_command(int argc,const char *const argv[],HCCompatibilityMenuCommand *output){
  static const char prefix[]="/var/lib/swifthakchi/snes-v2/objects/";
- HCCompatibilityMenuCommand result={0};
+ HCCompatibilityMenuCommand result={0};HCGameSavePaths native={0};
  if(!output||!argv||argc<12||!argv[0]||!argv[2]||strcmp(argv[0],"--game")||strcmp(argv[2],"--rom")||!game_code(argv[1])||!argv[3])return -1;
  size_t prefix_len=sizeof prefix-1, n=length(argv[3]);
  if(n!=prefix_len+68||memcmp(argv[3],prefix,prefix_len))return -1;
@@ -138,7 +169,10 @@ int hc_parse_compatibility_menu_command(int argc,const char *const argv[],HCComp
  if(strcmp(name+64,".sfc")&&strcmp(name+64,".smc"))return -1;
  memcpy(result.game,argv[1],12);memcpy(result.rom_name,name,69);memcpy(result.digest,name,64);result.digest[64]=0;
  if(hc_launch_arguments(argc-4,argv+4,result.game,&result.manager)||
+    hc_launch_save_paths(argc-4,argv+4,result.game,&native)||
     hc_launch_isolated_save_paths(argc-4,argv+4,result.game,result.digest,&result.saves)||
-    manager_checkpoint(&result.manager,&result.checkpoint))return -1;
+    manager_checkpoint(&result.manager,&result.checkpoint)||manager_time(&result.manager,&native,&result.saves,&result.checkpoint,&result.time))return -1;
+ if(result.checkpoint.have_load&&(same_ascii_case(result.checkpoint.load,native.sram)||same_ascii_case(result.checkpoint.load,native.rtc)||
+    same_ascii_case(result.checkpoint.load,result.saves.sram)||same_ascii_case(result.checkpoint.load,result.saves.rtc)))return -1;
  *output=result;return 0;
 }

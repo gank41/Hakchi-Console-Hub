@@ -6,15 +6,21 @@ import SwiftHakchiCore
 /// user's requested NES workspace, so an unresolved write cannot disappear
 /// when a different folder is selected.
 enum RecoveryFirmwareJournalPolicy {
-    // The single-account development restriction is not suitable for a public
-    // build. Keep firmware writes unavailable until general recovery is verified.
+    // The first physical recovery path is bound to the account that owns the
+    // privately preserved evidence. Another account must not get a new empty
+    // journal root for the same NES after an uncertain write.
+    private static let ownerUID: uid_t = 501
+    private static let ownerHomeSHA256 = "0f77d531564041e15c81322ca23303437827cb5e3b6259368b3383749c32e99a"
     static func requireOwner(home: URL = FileManager.default.homeDirectoryForCurrentUser,
                              uid: uid_t = geteuid(), realUID: uid_t = getuid()) throws {
-        throw RecoveryProbeError.refused("Firmware recovery is not available in this preview. No console command was sent.")
+        guard uid == ownerUID, realUID == ownerUID,
+              BackupManifest.digest(Data(home.standardizedFileURL.path.utf8)) == ownerHomeSHA256 else {
+            throw RecoveryProbeError.refused("This first NES firmware operation must run from the recovery evidence owner's Mac account. No console command was sent.")
+        }
     }
     static var root: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Hakchi Console Hub/Backups/StockKernelRestoreJournals", isDirectory: true)
+            .appendingPathComponent("Development/NES/Backups/StockKernelRestoreJournals", isDirectory: true)
             .standardizedFileURL
     }
     static func require(_ candidate: URL) throws {

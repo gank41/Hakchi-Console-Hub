@@ -1,9 +1,30 @@
 import Foundation
+import Darwin
 import Testing
 @testable import SwiftHakchi
 
 @Suite(.serialized)
 struct SNESOriginalComponentDiagnosticTests {
+    @Test func unconfirmedMarkerCleanupReachesCallerWithoutBeingReplaced() async throws {
+        let root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}
+        guard let source=try await originalComponentSourceFixture(root:root) else { return }
+        let io=OriginalComponentFakeIO(source:source)
+        do {
+            _=try await SNESOriginalComponentDiagnostic.runIfPresent([
+                "--capture-snes-original-components",source.material.setup.directoryURL.path,
+                source.material.source.directoryURL.path,source.material.directoryURL.path,root.path],
+                checkHost:{},makeIO:{_ in io},makeStore:{ url in
+                    try RecoveryBootSnapshotStore(root:url,synchronize:{fd in
+                        var info=stat()
+                        if fstatat(fd,"manifest.json",&info,AT_SYMLINK_NOFOLLOW)==0 { errno=EIO;return -1 }
+                        return fsync(fd)
+                    },removeManifest:{_,_ in errno=EACCES;return -1})
+                })
+            Issue.record("Uncertain cleanup was accepted")
+        } catch let error as RecoverySnapshotCleanupError {
+            #expect(error.directory.lastPathComponent.hasPrefix("SNES-Original-Components-"))
+        } catch { Issue.record("Uncertain cleanup was replaced by another error") }
+    }
     @Test func invalidOptionsRefuseBeforeUSBFactoryOrHostCheck() async throws {
         #expect(try await SNESOriginalComponentDiagnostic.runIfPresent(["--other"], makeIO: { _ in Issue.record("Unexpected IO"); fatalError() }) == nil)
         for args in [["--capture-snes-original-components"], ["--capture-snes-original-components", "relative", "/tmp", "/tmp", "/tmp"],

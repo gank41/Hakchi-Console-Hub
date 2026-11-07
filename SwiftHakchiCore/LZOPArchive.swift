@@ -122,12 +122,9 @@ public enum LZOPArchive {
             for byte in bytes { value = crcTable[Int((value ^ UInt32(byte)) & 255)] ^ (value >> 8) }
             return value ^ 0xffffffff
         }
-        var a: UInt64 = 1, b: UInt64 = 0
-        for start in stride(from: 0, to: bytes.count, by: 5552) {
-            for byte in bytes[start..<min(start + 5552, bytes.count)] { a += UInt64(byte); b += a }
-            a %= 65521; b %= 65521
+        return bytes.withUnsafeBufferPointer { buffer in
+            swift_hakchi_lzo_adler32(buffer.baseAddress, buffer.count)
         }
-        return UInt32((b << 16) | a)
     }
 }
 

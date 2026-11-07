@@ -10,7 +10,7 @@ struct LegacyBoot2ActivationPlan: Codable, Sendable {
     static let legacyBytes = 3_788_800
     // Independent fingerprint of the first NES's hardware ID. Keep the raw ID
     // in private evidence only; a copied or edited snapshot cannot retarget it.
-    static let supportedHWIDSHA256 = "ec2f6708f3567c0e60ab6034a1fa8bfdc49958fd6c8f61ea82d058fa1ba59942"
+    static let supportedHWIDSHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
     static let supportedScope = "Western-NES-legacy-boot2-hex30"
 
     let id: UUID

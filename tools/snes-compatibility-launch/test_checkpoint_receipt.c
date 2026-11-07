@@ -69,7 +69,24 @@ int main(void) {
  assert(hc_checkpoint_receipt(&s,b,32)==0);assert(hc_checkpoint_verified(&s,HC_CP_SAVE,0)!=0 && s.phase==HC_CP_FAILED);
  assert(hc_checkpoint_init(&s,session,9)==0);
  assert(hc_checkpoint_verified(&s,HC_CP_SAVE,1)!=0 && s.phase==HC_CP_FAILED);
- uint8_t empty[16]={0};assert(hc_checkpoint_init(&s,empty,9)!=0 && s.phase==HC_CP_INVALID);
+ /* Screenshot-only requests must not manufacture a fake save receipt. */
+ assert(hc_checkpoint_init_image(&s,session,9)==0 && s.phase==HC_CP_WAIT_IMAGE);
+ frame(b,2);assert(hc_checkpoint_receipt(&s,b,32)==0 && s.phase==HC_CP_VERIFY_IMAGE);
+ assert(hc_checkpoint_verify_image(&s,valid,sizeof valid,1)==0 && s.phase==HC_CP_READY);
+ assert(hc_checkpoint_init_image(&s,session,9)==0);frame(b,1);
+ assert(hc_checkpoint_receipt(&s,b,32)!=0 && s.phase==HC_CP_FAILED);
+ assert(hc_checkpoint_init_image(&s,session,9)==0);frame(b,2);b[4]^=1;
+ assert(hc_checkpoint_receipt(&s,b,32)!=0 && s.phase==HC_CP_FAILED);
+ assert(hc_checkpoint_init_image(&s,session,9)==0);frame(b,2);b[27]=8;
+ assert(hc_checkpoint_receipt(&s,b,32)!=0 && s.phase==HC_CP_FAILED);
+ assert(hc_checkpoint_init_image(&s,session,9)==0);frame(b,2);b[29]=1;
+ assert(hc_checkpoint_receipt(&s,b,32)!=0 && s.phase==HC_CP_FAILED);
+ assert(hc_checkpoint_init_image(&s,session,9)==0);frame(b,2);
+ assert(hc_checkpoint_receipt(&s,b,32)==0);
+ assert(hc_checkpoint_verify_image(&s,valid,sizeof valid,0)!=0 && s.phase==HC_CP_FAILED);
+ uint8_t empty[16]={0};assert(hc_checkpoint_init_image(&s,empty,9)!=0 && s.phase==HC_CP_INVALID);
+ assert(hc_checkpoint_init_image(&s,session,0)!=0 && s.phase==HC_CP_INVALID);
+ assert(hc_checkpoint_init(&s,empty,9)!=0 && s.phase==HC_CP_INVALID);
  assert(hc_checkpoint_init(&s,session,0)!=0 && s.phase==HC_CP_INVALID);
  return 0;
 }

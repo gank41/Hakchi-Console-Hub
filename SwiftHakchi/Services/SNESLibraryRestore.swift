@@ -1,13 +1,363 @@
 import Foundation
 import SwiftHakchiCore
 
+enum SNESLibraryRestoreScope: Sendable { case sameConsole, replacementConsole }
+
+/// A comparison of two verified Mac backups, not permission to change a console.
+struct SNESReplacementSaveReview: Sendable {
+    enum Disposition: Sendable { case new, unchanged, conflict }
+    enum GameMatch: Sendable { case includedGame, matchingAddedGame, addedGameMissing, addedGameDifferent }
+    struct Entry: Sendable {
+        let path: String, sourceSHA256: String, destinationSHA256: String?, blockerPath: String?
+        let byteCount: Int, sourceMode: Int, sourceModified: Int64, disposition: Disposition
+        let gameMatch: GameMatch
+    }
+    struct GameOption: Identifiable, Sendable {
+        let code: String, title: String, eligible: Bool, reason: String?
+        var id: String { code }
+    }
+    let entries: [Entry]
+    fileprivate let source: SNESLibraryBackup, destination: SNESLibraryBackup
+
+    func validate() throws { try source.validate(); try destination.validate() }
+
+    static func sameSavedFile(_ lhs: SNESLibraryInventory.File, _ rhs: SNESLibraryInventory.File) -> Bool {
+        lhs.path == rhs.path && lhs.byteCount == rhs.byteCount && lhs.sha256 == rhs.sha256 && lhs.mode == rhs.mode && lhs.modified == rhs.modified
+    }
+
+    /// A matching inventory is only a point-in-time check, not a write permit.
+    func requireCurrent(_ inventory: SNESLibraryInventory) throws {
+        try validate()
+        let saved = destination.inventory
+        guard inventory.hwid == saved.hwid, inventory.catalogSHA256 == saved.catalogSHA256,
+              inventory.selection == saved.selection, inventory.snapshotSHA256 == saved.snapshotSHA256,
+              inventory.stateSHA256 == saved.stateSHA256, inventory.excludedMenuID == nil, !inventory.incompleteNamespace else {
+            throw RecoveryProbeError.refused("The replacement console changed since its backup. Make a new backup and review it again. Nothing was copied.")
+        }
+        try validate()
+    }
+}
+
+/// A provisional offline, non-overwriting selection. It does not authorize a
+/// console write; a transfer must still validate allowed file types, related
+/// suspend-point files, the live destination and interruption recovery.
+struct SNESReplacementSavePlan: Sendable {
+    let files: [SNESReplacementSaveReview.Entry]
+    let gameCodes: Set<String>
+    fileprivate let comparison: SNESReplacementSaveReview
+    private let replacement: SNESLibraryReplacement
+    private let selected: [SNESReplacementSaveReview.Entry]
+
+    static func prepare(replacement: SNESLibraryReplacement, destination: SNESLibraryBackup,
+                        gameCodes: Set<String>) throws -> Self {
+        guard !gameCodes.isEmpty else { throw SNESLibraryInventory.failure() }
+        let comparison = try replacement.compareSaves(to: destination)
+        var found = Set<String>(), files: [SNESReplacementSaveReview.Entry] = [], selected: [SNESReplacementSaveReview.Entry] = []
+        for entry in comparison.entries {
+            let parts = entry.path.split(separator: "/", omittingEmptySubsequences: false)
+            guard parts.count >= 5 else { throw SNESLibraryInventory.failure() }
+            let code = String(parts[3])
+            guard gameCodes.contains(code) else { continue }
+            found.insert(code)
+            guard entry.gameMatch == .includedGame || entry.gameMatch == .matchingAddedGame,
+                  entry.disposition != .conflict else {
+                throw RecoveryProbeError.refused("A selected game's saved files conflict or the matching game is not on the replacement. Nothing was copied.")
+            }
+            selected.append(entry)
+            if entry.disposition == .new { files.append(entry) }
+        }
+        guard found == gameCodes else { throw SNESLibraryInventory.failure() }
+        try comparison.validate()
+        return .init(files: files, gameCodes: gameCodes, comparison: comparison, replacement: replacement, selected: selected)
+    }
+
+    static func prepare(replacement: SNESLibraryReplacement, comparison: SNESReplacementSaveReview,
+                        gameCodes: Set<String>) throws -> Self {
+        guard comparison.source.directory == replacement.backup.directory,
+              comparison.source.manifestSHA256 == replacement.backup.manifestSHA256 else { throw SNESLibraryInventory.failure() }
+        try comparison.validate()
+        return try prepare(replacement: replacement, destination: comparison.destination, gameCodes: gameCodes)
+    }
+
+    func validate() throws { try comparison.validate() }
+
+    var destinationInventory: SNESLibraryInventory { comparison.destination.inventory }
+
+    func requireCurrent(_ inventory: SNESLibraryInventory) throws { try comparison.requireCurrent(inventory) }
+
+    func requireReplacement(_ value: SNESLibraryReplacement) throws {
+        try validate(); try value.backup.validate()
+        guard value.backup.directory == replacement.backup.directory,
+              value.backup.manifestSHA256 == replacement.backup.manifestSHA256,
+              value.destinationHWID == replacement.destinationHWID,
+              try SNESLibraryCatalogIdentity.digest(value.originals) == SNESLibraryCatalogIdentity.digest(replacement.originals) else {
+            throw SNESLibraryInventory.failure()
+        }
+        try validate(); try value.backup.validate()
+    }
+
+    func nativeLayout() throws -> SNESNativeSaveLayout {
+        try validate()
+        let layout = try SNESNativeSaveLayout(paths: selected.map(\.path))
+        guard layout.gameCodes == gameCodes else { throw SNESLibraryInventory.failure() }
+        try validate(); return layout
+    }
+
+    /// Avoid splitting a related save set between existing and new files.
+    func protectedGroups() throws -> [SNESNativeSaveLayout.Group] {
+        let layout = try nativeLayout()
+        let entries = Dictionary(uniqueKeysWithValues: selected.map { ($0.path, $0) })
+        var groups: [SNESNativeSaveLayout.Group] = []
+        for group in layout.groups {
+            let dispositions = try group.paths.map { path -> SNESReplacementSaveReview.Disposition in
+                guard let entry = entries[path] else { throw SNESLibraryInventory.failure() }
+                return entry.disposition
+            }
+            if dispositions.allSatisfy({ $0 == .new }) { groups.append(group) }
+            else if !dispositions.allSatisfy({ $0 == .unchanged }) {
+                throw RecoveryProbeError.refused("A saved-game set is partly present on the replacement. Review it before copying; nothing was changed.")
+            }
+        }
+        try validate(); return groups
+    }
+
+    func read(path: String) throws -> Data {
+        try validate()
+        guard let entry = files.first(where: { $0.path == path }) else { throw SNESLibraryInventory.failure() }
+        let data = try replacement.readSave(path: path)
+        guard data.count == entry.byteCount, BackupManifest.digest(data) == entry.sourceSHA256 else { throw SNESLibraryInventory.failure() }
+        try validate()
+        return data
+    }
+}
+
+/// A reopenable Mac-only review. No decoded record authorizes console access.
+struct SNESReplacementSaveEnvelope: Sendable {
+    struct Identity: Sendable { let source: SNESLibrarySnapshotReference, destination: SNESLibrarySnapshotReference }
+    private struct File: Codable { let path: String, bytes: Int, sha256: String, mode: Int, modified: Int64 }
+    private struct Record: Codable {
+        let version: Int, scope: String, source: SNESLibrarySnapshotReference, destination: SNESLibrarySnapshotReference
+        let gameCodes: [String], files: [File]
+    }
+    let data: Data, sha256: String, plan: SNESReplacementSavePlan
+
+    /// Ensure a review's serialized identity still describes this exact plan.
+    func validate() throws {
+        let rebuilt = try Self.prepare(plan: plan)
+        guard rebuilt.data == data, rebuilt.sha256 == sha256 else { throw SNESLibraryInventory.failure() }
+    }
+
+    static func identity(data: Data, expectedSHA256: String) throws -> Identity {
+        guard data.count <= 4 * 1024 * 1024, SNESDataSnapshotChunk.isDigest(expectedSHA256),
+              BackupManifest.digest(data) == expectedSHA256 else { throw SNESLibraryInventory.failure() }
+        let record = try JSONDecoder().decode(Record.self, from: data)
+        guard record.version == 2, record.scope == "snes-replacement-saves-offline-review",
+              !record.gameCodes.isEmpty, record.gameCodes == Array(Set(record.gameCodes)).sorted(),
+              !record.files.isEmpty, record.files.count <= 4096,
+              record.files.allSatisfy({ SNESLibraryInventory.safePath($0.path) && $0.bytes >= 0 && $0.bytes <= 16 * 1024 * 1024 && SNESDataSnapshotChunk.isDigest($0.sha256) && (0...511).contains($0.mode) }),
+              Set(record.files.map(\.path)).count == record.files.count, try encode(record) == data else { throw SNESLibraryInventory.failure() }
+        try record.source.validateMetadata(); try record.destination.validateMetadata()
+        return .init(source: record.source, destination: record.destination)
+    }
+
+    static func prepare(plan: SNESReplacementSavePlan) throws -> Self {
+        try plan.validate(); _ = try plan.protectedGroups()
+        guard !plan.files.isEmpty, plan.files.count <= 4096 else { throw SNESLibraryInventory.failure() }
+        let record = Record(version: 2, scope: "snes-replacement-saves-offline-review",
+            source: try SNESLibrarySnapshotReference(plan.comparison.source), destination: try SNESLibrarySnapshotReference(plan.comparison.destination),
+            gameCodes: plan.gameCodes.sorted(), files: plan.files.map { .init(path: $0.path, bytes: $0.byteCount, sha256: $0.sourceSHA256, mode: $0.sourceMode, modified: $0.sourceModified) })
+        let data = try encode(record)
+        guard data.count <= 4 * 1024 * 1024 else { throw SNESLibraryInventory.failure() }
+        try plan.validate(); return .init(data: data, sha256: BackupManifest.digest(data), plan: plan)
+    }
+
+    static func load(data: Data, expectedSHA256: String, originals: SNESOriginalGamesFrame) throws -> Self {
+        _ = try identity(data: data, expectedSHA256: expectedSHA256)
+        let record = try JSONDecoder().decode(Record.self, from: data)
+        guard record.version == 2, record.scope == "snes-replacement-saves-offline-review",
+              !record.gameCodes.isEmpty, record.gameCodes == Array(Set(record.gameCodes)).sorted(),
+              try encode(record) == data else { throw SNESLibraryInventory.failure() }
+        let source = try record.source.reopen(), destination = try record.destination.reopen()
+        let replacement = try SNESLibraryRestore.prepareReplacement(backup: source, originals: originals, destinationHWID: destination.inventory.hwid)
+        let plan = try SNESReplacementSavePlan.prepare(replacement: replacement, destination: destination, gameCodes: Set(record.gameCodes))
+        let rebuilt = try prepare(plan: plan)
+        guard rebuilt.data == data, rebuilt.sha256 == expectedSHA256 else { throw SNESLibraryInventory.failure() }
+        return rebuilt
+    }
+
+    private static func encode(_ value: Record) throws -> Data {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(value)
+    }
+}
+
+/// A Mac-only review of content for another console. It grants no write authority.
+struct SNESLibraryReplacement: Sendable {
+    let sourceHWID: String, destinationHWID: String
+    let menu: SNESLibraryMenu?
+    let saveFiles: [SNESLibraryInventory.File]
+    let unmatchedProfileFiles: [String]
+    fileprivate let backup: SNESLibraryBackup
+    fileprivate let originals: SNESOriginalGamesFrame
+
+    func saveOptions(comparison: SNESReplacementSaveReview) throws -> [SNESReplacementSaveReview.GameOption] {
+        guard comparison.source.directory == backup.directory, comparison.source.manifestSHA256 == backup.manifestSHA256,
+              comparison.destination.inventory.hwid == destinationHWID else { throw SNESLibraryInventory.failure() }
+        try comparison.validate()
+        var grouped: [String: [SNESReplacementSaveReview.Entry]] = [:]
+        for entry in comparison.entries {
+            let parts = entry.path.split(separator: "/", omittingEmptySubsequences: false)
+            guard parts.count >= 5 else { throw SNESLibraryInventory.failure() }
+            grouped[String(parts[3]), default: []].append(entry)
+        }
+        let options = grouped.keys.sorted().map { code -> SNESReplacementSaveReview.GameOption in
+            let entries = grouped[code] ?? [], title = gameTitle(code)
+            let reason: String?
+            if entries.contains(where: { $0.gameMatch == .addedGameMissing }) { reason = "Add this game to the replacement first." }
+            else if entries.contains(where: { $0.gameMatch == .addedGameDifferent }) { reason = "The game on the replacement is different." }
+            else if entries.contains(where: { $0.disposition == .conflict }) { reason = "Existing saved data needs a separate review." }
+            else if let layout = try? SNESNativeSaveLayout(paths: entries.map(\.path)) {
+                let values = Dictionary(uniqueKeysWithValues: entries.map { ($0.path, $0.disposition) })
+                let split = layout.groups.contains { group in
+                    let states = group.paths.compactMap { values[$0] }
+                    return states.count != group.paths.count || (!states.allSatisfy { $0 == .new } && !states.allSatisfy { $0 == .unchanged })
+                }
+                if split { reason = "Part of this save is already present and needs a separate review." }
+                else if !entries.contains(where: { $0.disposition == .new }) { reason = "This saved data already matches." }
+                else { reason = nil }
+            } else { reason = "This save format needs a separate review." }
+            return .init(code: code, title: title, eligible: reason == nil, reason: reason)
+        }
+        try comparison.validate(); return options.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
+    private func gameTitle(_ code: String) -> String {
+        if let original = originals.entries.first(where: { $0.code == code }),
+           let desktop = original.files.first(where: { $0.name == code + ".desktop" }),
+           let title = try? SNESOneGameMenu.fields(desktop.data)["name"], !title.isEmpty { return title }
+        if let menu, let placement = menu.description.placements.first(where: { $0.code == code && $0.kind == "import" }) {
+            let path = String(format: "pages/%03d/%@/%@.desktop", placement.page, code, code)
+            if let desktop = menu.files[path], let title = try? SNESOneGameMenu.fields(desktop)["name"], !title.isEmpty { return title }
+        }
+        return code
+    }
+
+    func readSave(path: String) throws -> Data {
+        guard saveFiles.contains(where: { $0.path == path }) else { throw SNESLibraryInventory.failure() }
+        return try backup.read(path: path)
+    }
+
+    /// Classify changes against a full backup of the replacement, including
+    /// file-versus-directory collisions. This does not select or copy files.
+    func compareSaves(to destination: SNESLibraryBackup) throws -> SNESReplacementSaveReview {
+        try backup.validate()
+        let checked = try SNESLibraryBackup.open(directory: destination.directory)
+        guard checked.manifestSHA256 == destination.manifestSHA256,
+              checked.inventory.hwid == destinationHWID,
+              checked.inventory.catalogSHA256 == backup.inventory.catalogSHA256,
+              checked.inventory.excludedMenuID == nil, !checked.inventory.incompleteNamespace else {
+            throw RecoveryProbeError.refused("A backup of the replacement SNES could not be verified. Nothing was copied.")
+        }
+        let files = Dictionary(uniqueKeysWithValues: checked.inventory.files.map { ($0.path, $0) })
+        let directories = Set(checked.inventory.directories.map(\.path))
+        let targetMenu = try SNESLibraryRestore.prepare(backup: checked, originals: originals, expectedHWID: destinationHWID).menu
+        let sourceGames = try Self.importedGames(menu), targetGames = try Self.importedGames(targetMenu)
+        let includedCodes = Set(originals.entries.map(\.code))
+        let entries = try saveFiles.map { source -> SNESReplacementSaveReview.Entry in
+            let parts = source.path.split(separator: "/", omittingEmptySubsequences: false)
+            guard parts.count >= 5 else { throw SNESLibraryInventory.failure() }
+            let code = String(parts[3])
+            let gameMatch: SNESReplacementSaveReview.GameMatch
+            if includedCodes.contains(code) { gameMatch = .includedGame }
+            else {
+                guard let original = sourceGames[code] else { throw SNESLibraryInventory.failure() }
+                if let target = targetGames[code] { gameMatch = original == target ? .matchingAddedGame : .addedGameDifferent }
+                else { gameMatch = .addedGameMissing }
+            }
+            if let existing = files[source.path] {
+                let match = SNESReplacementSaveReview.sameSavedFile(source, existing)
+                return .init(path: source.path, sourceSHA256: source.sha256, destinationSHA256: existing.sha256,
+                             blockerPath: match ? nil : source.path, byteCount: source.byteCount, sourceMode: source.mode, sourceModified: source.modified, disposition: match ? .unchanged : .conflict, gameMatch: gameMatch)
+            }
+            var blocker: String? = directories.contains(source.path) ? source.path : nil
+            var parent = source.path
+            while blocker == nil, let slash = parent.lastIndex(of: "/") {
+                parent = String(parent[..<slash])
+                if files[parent] != nil { blocker = parent }
+            }
+            return .init(path: source.path, sourceSHA256: source.sha256, destinationSHA256: nil,
+                         blockerPath: blocker, byteCount: source.byteCount, sourceMode: source.mode, sourceModified: source.modified, disposition: blocker == nil ? .new : .conflict, gameMatch: gameMatch)
+        }
+        try backup.validate(); try checked.validate()
+        return .init(entries: entries, source: backup, destination: checked)
+    }
+
+    private struct GameIdentity: Equatable { let rom: String, launch: String }
+    private static func importedGames(_ menu: SNESLibraryMenu?) throws -> [String: GameIdentity] {
+        guard let menu else { return [:] }
+        var result: [String: GameIdentity] = [:]
+        for placement in menu.description.placements where placement.kind == "import" {
+            guard let rom = placement.rom, result[placement.code] == nil else { throw SNESLibraryInventory.failure() }
+            let path = String(format: "pages/%03d/%@/%@.desktop", placement.page, placement.code, placement.code)
+            guard let desktop = menu.files[path], let launch = try SNESOneGameMenu.fields(desktop)["exec"], !launch.isEmpty else {
+                throw SNESLibraryInventory.failure()
+            }
+            result[placement.code] = .init(rom: rom, launch: launch)
+        }
+        return result
+    }
+}
+
 /// Reconstructs inert Mac material from a verified snapshot. No console access or writes.
 struct SNESLibraryRestore: Sendable {
     let backup: SNESLibraryBackup, menu: SNESLibraryMenu?
+    static func prepareForSync(backup: SNESLibraryBackup, originals: SNESOriginalGamesFrame,
+                               destinationHWID: String, scope: SNESLibraryRestoreScope) throws -> Self {
+        switch scope {
+        case .sameConsole:
+            return try prepare(backup: backup, originals: originals, expectedHWID: destinationHWID)
+        case .replacementConsole:
+            let replacement = try prepareReplacement(backup: backup, originals: originals, destinationHWID: destinationHWID)
+            return .init(backup: replacement.backup, menu: replacement.menu)
+        }
+    }
     static func prepare(backup: SNESLibraryBackup, originals: SNESOriginalGamesFrame, expectedHWID: String, id: UUID = UUID()) throws -> Self {
         let saved = try SNESLibraryBackup.open(directory: backup.directory), inventory = saved.inventory
         guard saved.manifestSHA256 == backup.manifestSHA256, inventory.hwid == expectedHWID,
               inventory.catalogSHA256 == (try SNESLibraryCatalogIdentity.digest(originals)) else { throw SNESLibraryInventory.failure() }
+        return try rebuild(saved, originals: originals, id: id)
+    }
+
+    /// Prepare content for a different SNES only when its included games match.
+    /// The resulting plan is inert; a later transfer must independently verify
+    /// the connected replacement and protect its existing saves.
+    static func prepareReplacement(backup: SNESLibraryBackup, originals: SNESOriginalGamesFrame,
+                                   destinationHWID: String, id: UUID = UUID()) throws -> SNESLibraryReplacement {
+        let saved = try SNESLibraryBackup.open(directory: backup.directory), inventory = saved.inventory
+        guard saved.manifestSHA256 == backup.manifestSHA256 else { throw SNESLibraryInventory.failure() }
+        guard originals.hwid == destinationHWID, inventory.hwid != destinationHWID else {
+            throw RecoveryProbeError.refused("Choose a backup from another SNES and connect the replacement. Nothing was copied.")
+        }
+        guard inventory.catalogSHA256 == (try SNESLibraryCatalogIdentity.digest(originals)) else {
+            throw RecoveryProbeError.refused("The replacement SNES's included games do not match this backup. Nothing was copied.")
+        }
+        let restored = try rebuild(saved, originals: originals, id: id)
+        var codes = Set(originals.entries.map(\.code))
+        if let menu = restored.menu { codes.formUnion(menu.description.placements.filter { $0.kind == "import" }.map(\.code)) }
+        let profiles = inventory.files.filter { $0.path.hasPrefix("clover/profiles/") }.sorted { $0.path < $1.path }
+        var saves: [SNESLibraryInventory.File] = [], unmatched: [String] = []
+        for file in profiles {
+            let parts = file.path.split(separator: "/", omittingEmptySubsequences: false)
+            if parts.count >= 5, parts[2] == "0", codes.contains(String(parts[3])) { saves.append(file) }
+            else { unmatched.append(file.path) }
+        }
+        try saved.validate()
+        return .init(sourceHWID: inventory.hwid, destinationHWID: destinationHWID, menu: restored.menu,
+                     saveFiles: saves, unmatchedProfileFiles: unmatched, backup: saved, originals: originals)
+    }
+
+    private static func rebuild(_ saved: SNESLibraryBackup, originals: SNESOriginalGamesFrame, id: UUID) throws -> Self {
+        let inventory = saved.inventory
         switch inventory.selection.kind {
         case .builtin: return .init(backup: saved, menu: nil)
         case .legacy: return .init(backup: saved, menu: try migrateLegacy(saved, originals: originals, id: id))

@@ -7,6 +7,13 @@ struct SNESOriginalGamesFrame:Sendable {
     struct File:Sendable {let name:String,data:Data}
     struct Entry:Sendable {let code:String,files:[File],romName:String,romBytes:Int,romSHA256:String,headers:Data}
     let raw:Data,launcher:Data,entries:[Entry]
+    let hwid:String
+    func gameTitle(for code: String) -> String? {
+        guard let entry = entries.first(where: { $0.code == code }),
+              let desktop = entry.files.first(where: { $0.name == code + ".desktop" }),
+              let title = try? SNESOneGameMenu.fields(desktop.data)["name"], !title.isEmpty else { return nil }
+        return title
+    }
     static func failure()->RecoveryProbeError {
         .refused("The original SNES game information could not be verified. No games were changed.")
     }
@@ -63,6 +70,6 @@ struct SNESOriginalGamesFrame:Sendable {
             guard try line()=="END_GAME" else {throw Self.failure()}
             entries.append(.init(code:code,files:files,romName:next[1],romBytes:romBytes,romSHA256:next[3],headers:headers))
         }
-        self.raw=Data(raw);self.launcher=launcher;self.entries=entries
+        self.raw=Data(raw);self.launcher=launcher;self.entries=entries;self.hwid=binding.expectedHWID
     }
 }

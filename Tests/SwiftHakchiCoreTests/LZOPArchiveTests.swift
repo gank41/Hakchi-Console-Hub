@@ -3,6 +3,18 @@ import Testing
 @testable import SwiftHakchiCore
 
 struct LZOPArchiveTests {
+    @Test func adlerChecksumMatchesIndependentVectorsAcrossBlockBoundaries() {
+        // Expected values from zlib, for repeating 00...ff bytes.
+        let vectors: [(Int, UInt32)] = [
+            (0, 0x00000001), (1, 0x00010001), (5551, 0xc77eb190),
+            (5552, 0x79ccb23f), (5553, 0x2ccab2ef), (262144, 0x8f901de3),
+            (262145, 0xad731de3), (4194304, 0x9effde30)
+        ]
+        let bytes = (0..<4194304).map { UInt8(truncatingIfNeeded: $0) }
+        for (count, expected) in vectors {
+            #expect(LZOPArchive.checksum(Array(bytes.prefix(count)), crc: false) == expected)
+        }
+    }
     // A stored-only fallback must not pass as a compressed startup package.
     @Test func strongCompressionIsBoundedDeterministicAndPreservesAllBlocks() throws {
         let input=Data(repeating:65,count:600_000)

@@ -171,7 +171,34 @@ struct ContentView: View {
                 .environmentObject(appState)
         }
         .sheet(isPresented: $appState.showSNESBackup) {
-            SNESBackupView { progress in try await appState.captureSNESSetup(progress: progress) }
+            SNESBackupView(execute: { progress in try await appState.captureSNESSetup(progress: progress) },
+                           prepareRecovery: { backup in try await appState.prepareSNESRecoveryPackage(from: backup) },
+                           prepareHelpers: { try await appState.prepareSNESSetupHelpers() },
+                           prepareStartup: { backup, recovery, helpers, progress in
+                               try await appState.checkSNESStartup(backup: backup, recovery: recovery, helpers: helpers, progress: progress)
+                           }, captureMenuSupport: { backup, recovery, helpers, startup, progress in
+                               try await appState.captureSNESMenuSupport(backup: backup, recovery: recovery, helpers: helpers, startup: startup, progress: progress)
+                           }, captureComponents: { backup, recovery, helpers, startup, support, progress in
+                               try await appState.captureSNESOriginalComponents(backup: backup, recovery: recovery, helpers: helpers, startup: startup, support: support, progress: progress)
+                           }, captureData: { backup, recovery, helpers, chain, progress, detail in
+                               try await appState.backupSNESData(backup: backup, recovery: recovery, helpers: helpers, chain: chain, progress: progress, detail: detail)
+                           }, captureRuntime: { backup, recovery, helpers, chain, data, progress in
+                               try await appState.captureSNESRuntime(backup: backup, recovery: recovery, helpers: helpers, chain: chain, data: data, progress: progress)
+                           }, prepareCandidate: { backup, recovery, helpers, chain, data, runtime, progress in
+                               try await appState.prepareSNESStartupCandidate(backup: backup, recovery: recovery, helpers: helpers, chain: chain, data: data, runtime: runtime, progress: progress)
+                           }, preflight: { candidate, progress in
+                               try await appState.checkSNESStartupCandidate(candidate, progress: progress)
+                           }, startTrial: { candidate, preflight, progress in
+                               try await appState.runSNESStartupTrial(candidate: candidate, preflight: preflight, progress: progress)
+                           }, checkTrial: { candidate, preflight, started, progress in
+                               try await appState.runSNESStartupTrial(candidate: candidate, preflight: preflight, started: started, progress: progress)
+                           }, captureActive: { backup, helpers, candidate, preflight, started, played, progress in
+                               try await appState.captureSNESActiveStartup(backup: backup, helpers: helpers, candidate: candidate,
+                                   preflight: preflight, started: started, played: played, progress: progress)
+                           }, prepareFirmwarePlan: { backup, helpers, candidate, preflight, started, played, active, data in
+                               try await appState.prepareSNESFirmwarePlan(backup: backup, helpers: helpers, candidate: candidate,
+                                   preflight: preflight, started: started, played: played, active: active, currentData: data)
+                           })
                 .environmentObject(appState)
         }
         .sheet(isPresented: $appState.showRecoveryReadiness, onDismiss: { appState.openRequestedOriginalGamesReview() }) {
@@ -383,25 +410,34 @@ struct ActionBarView: View {
                 if appState.deviceManager.isConnected {
                     Text("Connected: " + appState.deviceManager.consoleType.displayName).foregroundStyle(.secondary)
                 }
-                if config.lastConsoleType == .snesUsa {
-                    Button("Prepare SNES Setup…", systemImage: "externaldrive.badge.checkmark") {
-                        appState.reviewSNESBackup()
-                    }.disabled(appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
-                }
                 Spacer()
             }
         HStack(spacing: 6) {
-            Button {
-                appState.requestFlash(.installHakchi)
-            } label: {
-                Label("Install Kernel", systemImage: "cpu")
-            }
-            .buttonStyle(ActionButtonStyle(role: .primary, compact: true))
-            .disabled(true)
-            .help("Permanently changes console startup software; currently unavailable. Select the info button for details.")
+            if config.lastConsoleType == .snesUsa {
+                Button {
+                    appState.reviewSNESBackup()
+                } label: {
+                    Label("Set Up SNES…", systemImage: "cpu")
+                }
+                .buttonStyle(ActionButtonStyle(role: .primary, compact: true))
+                .disabled(appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
+                .help("Start with a backup and console check. First-time SNES setup is a preview.")
 
-            FirmwareActionInfo(title: "Install Kernel", explanation:
-                "Installs modified startup software in the console's internal storage. It stays installed after power is turned off and can enable custom game management. It does not add games by itself. This action needs a verified original-kernel backup and a guided recovery path, so it is unavailable while installation is validated for each console.")
+                FirmwareActionInfo(title: "Set Up SNES", explanation:
+                    "Start by saving the current startup software and checking the console. Follow the separate reviews for each update. This first-time setup flow has not yet been tested on a new SNES.")
+            } else {
+                Button {
+                    appState.requestFlash(.installHakchi)
+                } label: {
+                    Label("Install Kernel", systemImage: "cpu")
+                }
+                .buttonStyle(ActionButtonStyle(role: .primary, compact: true))
+                .disabled(true)
+                .help("Permanently changes console startup software; currently unavailable. Select the info button for details.")
+
+                FirmwareActionInfo(title: "Install Kernel", explanation:
+                    "Installs modified startup software in the console's internal storage. It stays installed after power is turned off and can enable custom game management. It does not add games by itself. This action needs a verified original-kernel backup and a guided recovery path, so it is unavailable while installation is validated for each console.")
+            }
 
             // Connect / Disconnect
             Button {

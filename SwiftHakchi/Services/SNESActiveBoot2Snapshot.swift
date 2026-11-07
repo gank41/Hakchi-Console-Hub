@@ -36,11 +36,16 @@ struct SNESPhysicalFrame:Sendable {
 struct SNESBoundedReadHelper:Sendable {
     let bytes:Data,location:URL
     static let sha256="59dc6f084106cb4d08b56d9bbb6abcd9a1f9f09de3c668018432eabdb9066ae0"
+    var digest:String {BackupManifest.digest(bytes)}
+    static func accepts(digest:String)->Bool {digest==sha256 || SNESPortableHelpers.recognizes(kind:.reader,sha256:digest)}
     private init(bytes:Data,location:URL){self.bytes=bytes;self.location=location}
     static func load(_ url:URL)throws->Self {
         let directory=try RestoreDirectory(url.deletingLastPathComponent())
         let bytes=try directory.read(url.lastPathComponent,maximum:16384)
-        guard bytes.count==11928,BackupManifest.digest(bytes)==sha256,bytes.prefix(7)==Data([0x7f,69,76,70,1,1,1]) else {throw SNESRuntimeBinding.failure()}
+        let digest=BackupManifest.digest(bytes)
+        guard ((bytes.count==11928 && digest==sha256) ||
+               SNESPortableHelpers.recognizes(kind:.reader,byteCount:bytes.count,sha256:digest)),
+              bytes.prefix(7)==Data([0x7f,69,76,70,1,1,1]) else {throw SNESRuntimeBinding.failure()}
         func u16(_ n:Int)->Int {Int(bytes[n]) | Int(bytes[n+1]) << 8}
         func u32(_ n:Int)->UInt32 {(0..<4).reduce(0) {$0 | UInt32(bytes[n+$1]) << ($1*8)}}
         guard u16(16)==2,u16(18)==40,u16(42)==32,(1...16).contains(u16(44)) else {throw SNESRuntimeBinding.failure()}

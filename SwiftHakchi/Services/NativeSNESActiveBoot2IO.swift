@@ -34,13 +34,13 @@ actor NativeSNESActiveBoot2IO:SNESActiveBoot2IO {
         let first=try await execute(SNESActiveBoot2Commands.create(id:id),limit:256,timeout:30000)
         guard first==Data(SNESActiveBoot2Commands.created(id).utf8) else {throw SNESRuntimeBinding.failure()}
         try validate();try await shell.upload(data:helper.bytes,to:SNESActiveBoot2Commands.directory(id)+"/reader");try validate()
-        let second=try await execute(SNESActiveBoot2Commands.validation(id:id),limit:256,timeout:30000)
+        let second=try await execute(SNESActiveBoot2Commands.validation(id:id,helper:helper),limit:256,timeout:30000)
         guard second==Data(SNESActiveBoot2Commands.checked(id).utf8) else {throw SNESRuntimeBinding.failure()}
         staged=true
     }
     private func read(_ kind:SNESPhysicalFrame.Kind,challenge:UUID) async throws->Data {
         try validate();try await ensureStaged();try validate()
-        return try await execute(SNESActiveBoot2Commands.read(id:id,kind:kind,challenge:challenge),limit:kind.count+512,timeout:180000)
+        return try await execute(SNESActiveBoot2Commands.read(id:id,kind:kind,challenge:challenge,helper:helper),limit:kind.count+512,timeout:180000)
     }
     func geometry(challenge:UUID) async throws->Data {try await read(.geometry,challenge:challenge)}
     func readActive(challenge:UUID) async throws->Data {try await read(.active,challenge:challenge)}

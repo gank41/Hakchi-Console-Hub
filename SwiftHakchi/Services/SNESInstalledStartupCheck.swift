@@ -25,13 +25,21 @@ struct SNESInstalledStartupResult:Sendable {
 }
 actor SNESInstalledStartupCheck {
     private var busy=false
+    nonisolated static func recordStartupTransition(for phase: SNESFirmwareJournal.Phase) throws -> Bool {
+        switch phase {
+        case .readbackVerified: return true
+        case .startupVerified: return false
+        default: throw RestoreDirectory.failure()
+        }
+    }
     func run(journal:SNESFirmwareJournal,guard checked:SNESFirmwareGuard,io:any SNESInstalledStartupIO) async throws->SNESInstalledStartupResult {
         guard !busy else {throw LegacyInspectionError.busy};busy=true;defer{busy=false}
         var closed=false
         func validate()throws {try Task.checkCancellation();try checked.validate()}
         do {
             try validate()
-            guard try await journal.phase() == .readbackVerified else {throw RestoreDirectory.failure()}
+            let initialPhase = try await journal.phase()
+            let recordTransition = try Self.recordStartupTransition(for: initialPhase)
             let material=try await journal.verifiedMaterial(guard:checked)
             guard material.direction == .install else {throw RestoreDirectory.failure()}
             try validate()
@@ -49,7 +57,8 @@ actor SNESInstalledStartupCheck {
                 challenges.append(challenge);reports.append(raw)
             }
             closed=true;await io.disconnect();try validate()
-            try await journal.startupVerified();try validate()
+            guard try await journal.phase() == initialPhase else {throw RestoreDirectory.failure()}
+            if recordTransition {try await journal.startupVerified()};try validate()
             return .init(device:device,challenges:challenges,reports:reports,operation:material.id,reviewSHA256:checked.reviewSHA256)
         } catch {
             if !closed {closed=true;await io.disconnect()}
