@@ -52,6 +52,13 @@ struct GameDetailView: View {
                         .disabled(!access.canEditMetadata)
                         .padding()
 
+                    if game.isStock, GameGenieSystem(console: game.consoleType) != nil {
+                        Button("Cheat Codes…") { showGameGenie = true }
+                            .disabled(appState.gameManager.isInspectingLegacy)
+                            .help("Create a separate Cheat Code copy using a matching game file on this Mac.")
+                            .padding(.horizontal)
+                    }
+
                     if access.canDownloadROM {
                         Button("Download from Console") {
                             appState.downloadGameFromConsole(game: game)
@@ -71,7 +78,11 @@ struct GameDetailView: View {
             }
         }
         .sheet(isPresented: $showGameGenie) {
-            GameGenieView(game: game).environmentObject(appState)
+            if game.isStock {
+                IncludedGameCheatSourceView(included: game).environmentObject(appState)
+            } else {
+                GameGenieView(game: game).environmentObject(appState)
+            }
         }
         .sheet(isPresented: $showArtwork) {
             GameArtworkView(game: game).environmentObject(appState)

@@ -11,6 +11,9 @@ struct SNESLibraryStartupDiagnosticTests {
         let access = SNESLibraryDiagnosticAccess(), digest = String(repeating: "a", count: 64)
         let invalid = [
             ["--prepare-snes-library-startup"],
+            ["--prepare-snes-parallel-startup"],
+            ["--prepare-snes-parallel-startup", "relative", digest, "/out"],
+            ["--test-snes-parallel-startup", "/operation", digest, "/candidate", "/out"],
             ["--prepare-snes-library-startup", "relative", digest, "/out"],
             ["--prepare-snes-library-startup", "/operation", "not-a-digest", "/out"],
             ["--test-snes-library-startup", "/operation", digest, "/candidate", "/out"],
@@ -23,10 +26,12 @@ struct SNESLibraryStartupDiagnosticTests {
                 }, checkHost: { await access.used() })
             }
         }
-        let other = try await SNESLibraryStartupDiagnostic.runIfPresent(["--inspect"], loadInputs: {
-            await access.used(); throw SNESRuntimeBinding.failure()
-        }, checkHost: { await access.used() })
-        #expect(other == nil)
+        for mode in ["--inspect", "--write-snes-parallel-startup", "--install-snes-parallel-startup"] {
+            let other = try await SNESLibraryStartupDiagnostic.runIfPresent([mode], loadInputs: {
+                await access.used(); throw SNESRuntimeBinding.failure()
+            }, checkHost: { await access.used() })
+            #expect(other == nil)
+        }
         #expect(await access.calls == 0)
     }
 }

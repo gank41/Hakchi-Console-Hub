@@ -27,7 +27,12 @@ enum GameGenieROMPatcher {
             for (offset,value) in writes {output[offset]=value}
             let h=layout.prefix+layout.header
             output[h+0x1C]=0xFF;output[h+0x1D]=0xFF;output[h+0x1E]=0;output[h+0x1F]=0
-            let sum=output.dropFirst(layout.prefix).reduce(UInt32(0)){$0+UInt32($1)} & 0xFFFF
+            let rom=output.dropFirst(layout.prefix)
+            var sum=rom.reduce(UInt32(0)){$0+UInt32($1)}
+            if layout.mirrorCount > 1 {
+                sum += UInt32(layout.mirrorCount - 1) * rom.suffix(layout.tailLength).reduce(UInt32(0)){$0+UInt32($1)}
+            }
+            sum &= 0xFFFF
             output[h+0x1C]=UInt8((sum ^ 0xFFFF)&0xFF);output[h+0x1D]=UInt8(((sum ^ 0xFFFF)>>8)&0xFF)
             output[h+0x1E]=UInt8(sum&0xFF);output[h+0x1F]=UInt8((sum>>8)&0xFF)
             return .init(data:output,offsets:Array(Set(writes.keys).union([h+0x1C,h+0x1D,h+0x1E,h+0x1F])).sorted())
@@ -58,20 +63,29 @@ enum GameGenieROMPatcher {
         }
     }
     struct SNESLayout {
-        let prefix:Int,header:Int,hi:Bool,length:Int
+        let prefix:Int,header:Int,hi:Bool,length:Int,tailLength:Int,mirrorCount:Int
         init(_ data:Data)throws {
             let offsetPrefix=data.count%32768==512 ? 512:0,payloadLength=data.count-offsetPrefix
             prefix=offsetPrefix;length=payloadLength
-            guard length>=32768,length<=4*1024*1024,length.nonzeroBitCount==1 else {throw MappingError.unsupported("SNES patching currently needs an ordinary, power-of-two LoROM or HiROM image up to 4 MB.")}
+            guard length>=32768,length<=4*1024*1024 else {throw MappingError.unsupported("This SNES game uses a file size that Cheat Codes cannot safely patch yet.")}
+            let baseSize = 1 << (Int.bitWidth - 1 - length.leadingZeroBitCount)
+            let tail = length-baseSize
+            guard tail==0 || (tail>=32768 && tail.nonzeroBitCount==1 && baseSize%tail==0) else {throw MappingError.unsupported("This SNES game uses a file layout that Cheat Codes cannot safely patch yet.")}
+            tailLength=tail;mirrorCount=tail==0 ? 1:baseSize/tail
             let candidates=[(0x7FC0,false),(0xFFC0,true)].filter{h,high in
                 let base=offsetPrefix+h
                 guard base+64<=data.count else{return false}
                 let mode=data[base+0x15],type=data[base+0x16],size=data[base+0x17],sram=data[base+0x18]
                 let complement=UInt16(data[base+0x1C])|UInt16(data[base+0x1D])<<8,checksum=UInt16(data[base+0x1E])|UInt16(data[base+0x1F])<<8
                 let reset=UInt16(data[base+0x3C])|UInt16(data[base+0x3D])<<8
-                return (high ? [0x21,0x31]:[0x20,0x30]).contains(Int(mode)) && type<=2 && size<=12 && (1 << (Int(size)+10))==payloadLength && sram<=5 && (complement ^ checksum)==0xFFFF && reset>=0x8000 && reset<0xFFFF && data[base..<base+21].allSatisfy{(32...126).contains($0)}
+                let expectedSize=tail==0 ? payloadLength:baseSize*2
+                // Contra III's original US title overflows into the map-mode byte. Its
+                // cartridge is LoROM; restrict the exception to the observed layout.
+                let contra = !high && payloadLength == 1024*1024 && mode == 0x53 && type == 0 && size == 10 && sram == 0 && data[base+0x19] == 1 &&
+                    data[base..<base+22] == Data("CONTRA3 THE ALIEN WARS".utf8)
+                return (contra || (high ? [0x21,0x31]:[0x20,0x30]).contains(Int(mode))) && type<=2 && size<=12 && (1 << (Int(size)+10))==expectedSize && sram<=5 && (complement ^ checksum)==0xFFFF && reset>=0x8000 && reset<0xFFFF && data[base..<base+21].allSatisfy{(32...126).contains($0)}
             }
-            guard candidates.count==1,let selected=candidates.first else{throw MappingError.unsupported("The SNES ROM's mapping is ambiguous or uses an unsupported cartridge layout.")}
+            guard candidates.count==1,let selected=candidates.first else{throw MappingError.unsupported("This game may use special cartridge hardware or a file layout that Cheat Codes cannot safely patch yet. Your original game is unchanged.")}
             header=selected.0;hi=selected.1
             let title=String(decoding:data[prefix+header..<prefix+header+21],as:UTF8.self).uppercased()
             guard !["BANDAI SFC-ADX","ADD-ON BASE","DEZAEMON","RPG-TCOOL","DERBY STALLION","SUPER DRIFT OUT","THOROUGHBRED","BATMAN--REVENGE"].contains(where:title.contains) else{throw MappingError.unsupported("This SNES cartridge needs a separately verified mapper.")}

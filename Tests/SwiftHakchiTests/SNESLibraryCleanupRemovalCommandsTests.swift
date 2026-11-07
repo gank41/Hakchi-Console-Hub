@@ -20,16 +20,25 @@ import SwiftHakchiCore
             try Data(request.script.utf8).write(to: target.appendingPathComponent("preview.sh")); try request.body.write(to: target.appendingPathComponent("body.bin"))
             try Data(removal.script.utf8).write(to: target.appendingPathComponent("remove.sh"))
             try Data(SNESLibraryStartupScripts.verifier.utf8).write(to: target.appendingPathComponent("library-selector"))
-            try JSONSerialization.data(withJSONObject: ["runtime": runtimeHash, "oldRoot": SNESLibraryCleanupCommands.path("menus/" + scope.oldMenuID!.uuidString),
-                "protected": try Dictionary(uniqueKeysWithValues: (plan.material.menu.files.map { ("/var/lib/swifthakchi/snes-v2/menus/" + plan.material.menu.id.uuidString + "/" + $0.key, $0.value) }
-                    + plan.material.menu.objects.map { ("/var/lib/swifthakchi/snes-v2/objects/" + $0.key, $0.value) }
-                    + [("/var/lib/swifthakchi/snes-v2/menus/" + plan.material.menu.id.uuidString + "/menu.manifest", try SNESLibraryStartupScripts.manifest(for: plan.material.menu)),
-                       ("/var/lib/swifthakchi/snes-v2/descriptions/" + plan.material.menu.id.uuidString + ".json", plan.material.menu.manifest)]).map { ($0.0, $0.1.base64EncodedString()) }),
-                "stock": Dictionary(uniqueKeysWithValues: originals.entries.flatMap { entry in entry.files.filter { $0.name.hasSuffix(".desktop") }.map { (entry.code + "/" + $0.name, $0.data.base64EncodedString()) } }),
-                "files": try Dictionary(uniqueKeysWithValues: scope.files.map { (SNESLibraryCleanupCommands.path($0.path), try plan.backup.read(path: $0.path).base64EncodedString()) }),
+            let menu = plan.material.menu
+            let menuRoot = "/var/lib/swifthakchi/snes-v2/menus/" + menu.id.uuidString
+            var protectedFiles: [String: String] = [:]
+            for (name, bytes) in menu.files { protectedFiles[menuRoot + "/" + name] = bytes.base64EncodedString() }
+            for (name, bytes) in menu.objects { protectedFiles["/var/lib/swifthakchi/snes-v2/objects/" + name] = bytes.base64EncodedString() }
+            protectedFiles[menuRoot + "/menu.manifest"] = try SNESLibraryStartupScripts.manifest(for: menu).base64EncodedString()
+            protectedFiles["/var/lib/swifthakchi/snes-v2/descriptions/" + menu.id.uuidString + ".json"] = menu.manifest.base64EncodedString()
+            var stock: [String: String] = [:]
+            for entry in originals.entries {
+                for file in entry.files where file.name.hasSuffix(".desktop") { stock[entry.code + "/" + file.name] = file.data.base64EncodedString() }
+            }
+            var backupFiles: [String: String] = [:]
+            for file in scope.files { backupFiles[SNESLibraryCleanupCommands.path(file.path)] = try plan.backup.read(path: file.path).base64EncodedString() }
+            let oldID = try #require(scope.oldMenuID)
+            let fixture: [String: Any] = ["runtime": runtimeHash, "oldRoot": SNESLibraryCleanupCommands.path("menus/" + oldID.uuidString),
+                "protected": protectedFiles, "stock": stock, "files": backupFiles,
                 "selector": try scope.selection.bytes().base64EncodedString(), "tokens": synthetic.tokensSHA256,
-                "receipt": removal.receipt.base64EncodedString(), "filesCount": scope.files.count, "dirsCount": scope.directories.count], options: [.sortedKeys])
-                .write(to: target.appendingPathComponent("fixture.json"))
+                "receipt": removal.receipt.base64EncodedString(), "filesCount": scope.files.count, "dirsCount": scope.directories.count]
+            try JSONSerialization.data(withJSONObject: fixture, options: [.sortedKeys]).write(to: target.appendingPathComponent("fixture.json"))
         }
         let data = root.appendingPathComponent("data"), runtime = root.appendingPathComponent("runtime")
         for dir in [data, runtime, data.appendingPathComponent("clover")] { try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) }

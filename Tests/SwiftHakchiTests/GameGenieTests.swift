@@ -4,6 +4,18 @@ import Testing
 
 @Suite(.serialized) @MainActor
 struct GameGenieTests {
+    @Test func importedGameCanBeIdentifiedEvenWhenCheatPatchingIsUnsupported() throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let config = AppConfig.shared; let old = config.workspacePath
+        config.workspacePath = root.path; defer { config.workspacePath = old }
+        let source = root.appendingPathComponent("Console Game.sfc")
+        let bytes = Data(repeating: 42, count: 65536); try bytes.write(to: source)
+        let manager = GameManagerService(); try manager.importROMs(urls: [source], consoleType: .snesUsa)
+        let game = try #require(manager.games.first)
+        #expect(try GameGenieWorkflow.managedSourceDigest(game: game, manager: manager) == GameGenieWorkflow.digest(bytes))
+        #expect(throws: (any Error).self) { try GameGenieWorkflow.open(game: game, manager: manager) }
+        #expect(try Data(contentsOf: source) == bytes)
+    }
     @Test func codecMatchesIndependentWindowsKnownAnswersAndRejectsWrongType() throws {
         let six = try #require(GameGenieNES.decode("SXIOPO"))
         #expect(six.address == 0x91D9); #expect(six.value == 0xAD); #expect(six.compare == nil)

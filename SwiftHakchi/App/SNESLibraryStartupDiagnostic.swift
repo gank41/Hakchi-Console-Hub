@@ -12,10 +12,15 @@ enum SNESLibraryStartupDiagnostic {
         progress: @escaping RecoveryProgressSink = { _ in }) async throws -> String? {
         let library = ["--prepare-snes-library-startup", "--preflight-snes-library-startup", "--test-snes-library-startup", "--check-snes-library-startup"]
         let prior = ["--prepare-snes-menu-startup", "--preflight-snes-menu-startup", "--test-snes-menu-startup", "--check-snes-menu-startup"]
-        guard let mode = args.first, let index = library.firstIndex(of: mode) else { return nil }
+        let parallel = ["--prepare-snes-parallel-startup", "--preflight-snes-parallel-startup", "--test-snes-parallel-startup", "--check-snes-parallel-startup"]
+        guard let mode = args.first, let index = library.firstIndex(of: mode) ?? parallel.firstIndex(of: mode) else { return nil }
+        let isParallel = parallel.contains(mode)
         var translated = args; translated[0] = prior[index]
         return try await SNESMenuStartupDiagnostic.runIfPresent(translated,
-            resolveParent: { try await $0.libraryStartupParent() }, loadInputs: loadInputs,
+            resolveParent: { journal in
+                if isParallel { return try await journal.parallelLibraryStartupParent() }
+                return try await journal.libraryStartupParent()
+            }, loadInputs: loadInputs,
             requireOperation: requireOperation, checkHost: checkHost, makePreflightIO: makePreflightIO,
             makeTrialIO: makeTrialIO, progress: progress)
     }

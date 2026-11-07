@@ -173,6 +173,10 @@ struct SNESFirstInstallPlanBinding:Codable,Sendable,Equatable {
     }
 }
 struct SNESFirmwareMaterial:Sendable {
+    /// Experimental startup recipes may be booted temporarily, never written as firmware.
+    static func requireInstallableRecipe(_ version: Int) throws {
+        guard (1...10).contains(version) else { throw SNESRuntimeBinding.failure() }
+    }
     enum Direction:String,Codable,Sendable {case install,restore}
     let id:UUID,direction:Direction,paths:SNESFirmwarePaths
     let trial:PreparedSNESStartupTrial,proof:SNESFirmwareTrialProof,source:SNESPreparationSource,original:SNESActiveBoot2Package
@@ -311,6 +315,7 @@ struct SNESFirmwareMaterial:Sendable {
         try m.validateCurrent();return m
     }
     func validateCurrent()throws {
+        try Self.requireInstallableRecipe(trial.candidate.libraryRecipeVersion)
         try Task.checkCancellation();try restorationParentHistory?.validate();try paths.validate();try trial.validateCurrent();try proof.revalidate(trial:trial)
         if let firstInstall {try firstInstall.validate();guard direction == .install,parentOperationID==nil,firstInstall.startupPlanID != id else {throw SNESRuntimeBinding.failure()}}
         try original.revalidate(source:source);try reader.revalidate();try writer.revalidate()

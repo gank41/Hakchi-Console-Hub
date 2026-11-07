@@ -15,6 +15,18 @@ struct GameGenieView: View {
     @State private var hasManagedCopy = false
     @State private var sourceGameName = ""
     @State private var copyNotice: String?
+    @State private var catalog: GameGenieOfflineCatalog?
+    @State private var catalogError: String?
+
+    private var availableCodes: [GameGenieOfflineCatalog.Entry] {
+        guard let catalog, let system = GameGenieSystem(console: game.consoleType) else { return [] }
+        return GameGenieSuggestions.rows(gameNames: [game.name, game.defaultName, sourceGameName],
+                                         system: system, catalog: catalog, existing: profile.effects)
+    }
+    private var hasCodesToReview: Bool {
+        guard let catalog, let system = GameGenieSystem(console: game.consoleType) else { return false }
+        return GameGenieSuggestions.needsReview(gameNames: [game.name, game.defaultName, sourceGameName], system: system, catalog: catalog)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -55,6 +67,7 @@ struct GameGenieView: View {
             Text("To change or remove cheats later, update the same copy, then use Sync Library. Turning all effects off restores its original ROM bytes. The copy keeps its Cheat Code! cover. This is not an in-game switch. Codes must match the game's version; gameplay still needs testing.")
                 .font(.caption).foregroundStyle(.secondary)
             List {
+                Section("Your Choices") {
                 ForEach($profile.effects) { $effect in
                     VStack(alignment: .leading, spacing: 5) {
                         HStack {
@@ -65,9 +78,38 @@ struct GameGenieView: View {
                         Text(effect.codes.joined(separator: " + ")).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                     }.padding(.vertical, 4)
                 }
+                }
+                if !availableCodes.isEmpty {
+                    Section("Available Codes") {
+                        ForEach(Array(availableCodes.prefix(200))) { row in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(row.title)
+                                    Text((row.dependencies + row.codes).joined(separator: " + "))
+                                        .font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button("Add") { addCatalogEffect(row) }.disabled(session == nil)
+                            }.padding(.vertical, 4)
+                        }
+                    }
+                }
+                if hasCodesToReview {
+                    Section("More Codes") {
+                        HStack {
+                            Text("Some saved codes need checking before use.")
+                            Spacer()
+                            Button("Review in Catalog…") { showCatalog = true }
+                        }
+                    }
+                }
             }.overlay {
-                if profile.effects.isEmpty { Text("No cheats selected yet. Choose Browse Code Catalog to find saved codes, or enter your own below.").foregroundStyle(.secondary) }
+                if profile.effects.isEmpty && availableCodes.isEmpty && !hasCodesToReview { Text("No matching saved codes were found. Browse the code catalog or enter your own below.").foregroundStyle(.secondary) }
             }.frame(minHeight: 150)
+            if !availableCodes.isEmpty {
+                Text("These are title matches, not a guarantee for this game version. Add a code, turn it on, and test the separate copy. Browse the catalog for notes and more results.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             HStack {
                 TextField("Effect name, e.g. Infinite lives", text: $effectName).textFieldStyle(.roundedBorder)
                 TextField("Cheat codes separated by spaces", text: $codeText).textFieldStyle(.roundedBorder)
@@ -75,10 +117,11 @@ struct GameGenieView: View {
                 Button("Add Effect") { addEffect() }.disabled(session == nil || effectName.isEmpty || codeText.isEmpty)
             }
             if let error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+            if let catalogError { Text(catalogError).font(.caption).foregroundStyle(.secondary) }
             if let message { Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
             HStack {
                 Button("Browse Code Catalog…") { showCatalog = true }
-                Button("Save Codes Only") { perform { session in try session.saveProfile(profile, manager: appState.gameManager); message = "Codes saved. No game copy was created or updated." } }
+                Button("Save Codes Only") { perform { session in try session.saveProfile(profile, manager: appState.gameManager); message = "Codes saved. No game copy was created or updated." } }.disabled(session == nil)
                 Spacer()
                 Button(hasManagedCopy ? "Update Cheat Codes Copy" : "Create Cheat Codes Copy") {
                     perform { session in
@@ -92,8 +135,8 @@ struct GameGenieView: View {
                             + " Your console has not changed yet."
                     }
                 }.buttonStyle(.borderedProminent)
-                    .disabled(profile.enabledCodes.isEmpty && !hasManagedCopy)
-            }.disabled(session == nil)
+                    .disabled(session == nil || (profile.enabledCodes.isEmpty && !hasManagedCopy))
+            }
             DisclosureGroup("Advanced exports") {
             HStack {
                 if let exported { Button("Show Export") { NSWorkspace.shared.activateFileViewerSelecting([exported]) } }
@@ -114,6 +157,9 @@ struct GameGenieView: View {
             }
         }.padding().frame(width: 980, height: 630)
         .sheet(isPresented: $showCatalog) {
+            if session == nil {
+                GameGenieCatalogView(gameName: game.name, system: GameGenieSystem(console: game.consoleType) ?? .nes)
+            } else {
             GameGenieCatalogView(gameName: sourceGameName.isEmpty ? game.name : sourceGameName,system:session?.system ?? .nes) { effect in
                 var candidate = profile
                 guard !candidate.effects.contains(where: { Set($0.codes.map{$0.uppercased()}) == Set(effect.codes.map{$0.uppercased()}) }) else { message="This code group is already in this game’s effects.";return }
@@ -121,8 +167,10 @@ struct GameGenieView: View {
                 do { try candidate.validate(sha256: profile.romSHA256); _ = try candidate.encodedForStorage(); profile = candidate }
                 catch { self.error = error.localizedDescription }
             }
+            }
         }
         .onAppear {
+            reloadCatalog()
             do {
                 let opened = try GameGenieWorkflow.open(game: game, manager: appState.gameManager)
                 profile = try opened.loadProfile(); session = opened
@@ -130,7 +178,29 @@ struct GameGenieView: View {
                 sourceGameName = appState.gameManager.games.first(where: { $0.code == opened.target.code })?.name ?? game.name
             } catch { self.error = error.localizedDescription }
         }
+        .onChange(of: showCatalog) { _, isOpen in if !isOpen { reloadCatalog() } }
         .onChange(of: profile) { _, _ in message = nil; error = nil; exported = nil; copyNotice = nil }
+    }
+    private func reloadCatalog() {
+        guard let system = GameGenieSystem(console: game.consoleType) else { return }
+        do {
+            catalog = try GameGenieCatalogLibrary(workspace: AppConfig.shared.workspace.root).load(system)
+            catalogError = nil
+        } catch {
+            catalog = nil
+            catalogError = "Saved codes could not be opened. Browse the code catalog for details."
+        }
+    }
+    private func addCatalogEffect(_ row: GameGenieOfflineCatalog.Entry) {
+        guard let catalog else { return }
+        do {
+            let effect = try catalog.effect(from: row)
+            var candidate = profile
+            candidate.effects.append(effect)
+            try candidate.validate(sha256: profile.romSHA256)
+            _ = try candidate.encodedForStorage()
+            profile = candidate
+        } catch { self.error = error.localizedDescription }
     }
     private func addEffect() {
         var candidate = profile

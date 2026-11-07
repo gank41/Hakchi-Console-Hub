@@ -9,7 +9,7 @@ struct SNESMenuSelectionDiagnosticTests {
   let text=SNESMenuSelectionDiagnostic.failureMessage(arguments:["--select-snes-menu",op,review,"--confirm-reviewed-menu"],error:CancellationError())
   #expect(SNESMenuSelectionDiagnostic.handles("--select-snes-menu"))
   #expect(!SNESMenuSelectionDiagnostic.handles("--write-stock-boot2"))
-  #expect(text.contains("may already be saved") && text.contains(op) && text.contains(review))
+  #expect(text.contains("game menu may already be updated") && text.contains(op) && text.contains(review))
   #expect(text.contains("Do not repeat") && text.contains("read-only"))
   #expect(!text.contains("RAM") && !text.contains("firmware") && !text.contains("FEL"))
  }

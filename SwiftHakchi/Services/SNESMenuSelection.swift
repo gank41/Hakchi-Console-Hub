@@ -5,7 +5,7 @@ import Foundation
 struct SNESMenuSelectionUnverified:LocalizedError,Sendable {
  let operation:URL,reviewSHA256:String
  var errorDescription:String? {
-  "The menu selection may already be saved, but completion could not be verified. Saving was attempted at most once. Do not repeat the save. Run a read-only check of this operation before another action.\nRecovery record: \(operation.path)\nReview: \(reviewSHA256)"
+  "The console’s game menu may already be updated, but the app could not verify completion. The change was attempted at most once. Do not repeat it. Run a read-only check of this operation before another action.\nRecovery record: \(operation.path)\nReview: \(reviewSHA256)"
  }
 }
 

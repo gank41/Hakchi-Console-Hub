@@ -50,7 +50,7 @@ struct SNESBackupView: View {
                 Text("Start by saving the SNES startup software and checking its storage. The app will check whether the saved startup is the expected original version. This step does not install software or change games or saves.")
                 Text("This preview guides startup and game-folder updates. The complete setup flow has not yet been tested on a new SNES.")
                     .font(.callout).foregroundStyle(.secondary)
-                Text("This first version supports the US SNES Classic. Keep only that console connected.").foregroundStyle(.secondary)
+                Text("This first version supports the US SNES Classic. Keep only that console connected. The steps below put it into a temporary setup mode so the Mac can check it. The power light and TV screen staying dark is expected in this mode; the app will explain when to start it normally again.").foregroundStyle(.secondary)
                 GroupBox("Get your SNES ready") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("1. Turn the SNES OFF. Unplug USB from the console and wait 10 seconds.")
@@ -59,7 +59,7 @@ struct SNESBackupView: View {
                         Text("4. Keep holding RESET for 5 seconds, then release it.")
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Text("The SNES power light and TV screen should stay dark. The app cannot tell when you release RESET, so use the steps above.").font(.callout).foregroundStyle(.secondary)
+                Text("Once you have released RESET and confirmed the light and screen are dark, select the checkbox below, then choose Start Check. Keep the USB cable connected. The app cannot tell when you release RESET.").font(.callout).foregroundStyle(.secondary)
                 Toggle("I released RESET and the light and screen are dark", isOn: $ready)
                 HStack {
                     Button("Resume Previous Setup…") { ready = false; showingResume = true }

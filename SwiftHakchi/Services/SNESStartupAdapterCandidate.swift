@@ -35,9 +35,14 @@ struct SNESStartupAdapterCandidate: Sendable {
         }
         return try assemble(material:candidate.material,daemon:member("clovershell"),busybox:member("busybox"),backup:candidate.backup,recipeVersion:4)
     }
+    /// Recipe 11 is a RAM-only experiment based on an already accepted recipe 10.
+    static func allowsLibraryUpgrade(from: Int, to: Int) -> Bool {
+        if to == 11 { return from == 10 }
+        return [5,6,7,8,9,10].contains(to) && from >= 4 && from < to
+    }
     static func withLibrarySupport(_ candidate:Self, legacy:Bool=false, targetRecipe:Int=10) throws -> Self {
         let version=legacy ? 5:targetRecipe
-        guard [5,6,7,8,9,10].contains(version),candidate.recipeVersion>=4,candidate.recipeVersion<version else {throw SNESRuntimeBinding.failure()}
+        guard allowsLibraryUpgrade(from: candidate.recipeVersion, to: version) else {throw SNESRuntimeBinding.failure()}
         _=try candidate.checkedExport()
         let source=try LegacyBootImageBuilder.inspect(candidate.image)
         func member(_ name:String)throws->Data {
@@ -52,7 +57,7 @@ struct SNESStartupAdapterCandidate: Sendable {
         return try assemble(material:material,daemon:daemon,busybox:busybox,backup:backup,recipeVersion:3)
     }
     private static func assemble(material: SNESOriginalMenuMaterial, daemon: Data, busybox: Data, backup: SNESDataSnapshotPackage, recipeVersion:Int, validatingImage:Data? = nil) throws -> Self {
-        guard [1,2,3,4,5,6,7,8,9,10].contains(recipeVersion) else { throw SNESRuntimeBinding.failure() }
+        guard [1,2,3,4,5,6,7,8,9,10,11].contains(recipeVersion) else { throw SNESRuntimeBinding.failure() }
         try Task.checkCancellation();try material.revalidate();try backup.revalidate()
         let matched=try SNESDataSnapshotPackage.load(directory:backup.directory,expectedHWID:material.binding.expectedHWID)
         guard matched.sha256==backup.sha256, matched.byteCount==backup.byteCount,
@@ -75,7 +80,8 @@ struct SNESStartupAdapterCandidate: Sendable {
             assets["service"]=Data(scripts.service.replacingOccurrences(of:"6a04",with:recipeVersion>=10 ? "6a0b":recipeVersion>=9 ? "6a0a":recipeVersion>=8 ? "6a09":recipeVersion>=7 ? "6a08":recipeVersion>=6 ? "6a07":recipeVersion==5 ? "6a06":"6a05").utf8)
         }
         if recipeVersion>=5 {
-            assets["library-selector"]=Data((recipeVersion==5 ? SNESLibraryStartupScripts.legacyVerifier:recipeVersion>=10 ? SNESLibraryStartupScripts.verifier:SNESLibraryStartupScripts.legacyArtworkVerifier).utf8)
+            let verifier = try recipeVersion == 11 ? SNESLibraryStartupScripts.parallelChecksumVerifierCandidate() : (recipeVersion == 5 ? SNESLibraryStartupScripts.legacyVerifier : recipeVersion >= 10 ? SNESLibraryStartupScripts.verifier : SNESLibraryStartupScripts.legacyArtworkVerifier)
+            assets["library-selector"]=Data(verifier.utf8)
             assets["menu-route"]=Data((recipeVersion>=8 ? SNESLibraryStartupScripts.route:SNESLibraryStartupScripts.legacyRoute).utf8)
             assets["menu-change"]=Data((recipeVersion>=9 ? SNESLibraryStartupScripts.changePage:recipeVersion>=8 ? SNESLibraryStartupScripts.efficientChangePage:recipeVersion>=7 ? SNESLibraryStartupScripts.launchCompatibleChangePage:SNESLibraryStartupScripts.legacyChangePage).utf8)
             assets["menu-configure"]=Data(try SNESLibraryStartupScripts.configuration().utf8)
@@ -175,7 +181,7 @@ struct SNESStartupAdapterCandidate: Sendable {
               Set(try dir.names())==Set(["startup.img","manifest.json"]) else { throw SNESRuntimeBinding.failure() }
         let raw=try dir.read("manifest.json",maximum:65536),m=try JSONDecoder().decode(Manifest.self,from:raw)
         if let expectedManifestSHA256, BackupManifest.digest(raw) != expectedManifestSHA256 { throw SNESRuntimeBinding.failure() }
-        guard [1,2,3,4,5,6,7,8,9,10].contains(m.schemaVersion),m.complete,!m.bootEligible,!m.firmwareInstallEligible,!m.firmwareWritten,!m.firmwareRestoreEligible,
+        guard [1,2,3,4,5,6,7,8,9,10,11].contains(m.schemaVersion),m.complete,!m.bootEligible,!m.firmwareInstallEligible,!m.firmwareWritten,!m.firmwareRestoreEligible,
               m.scope=="snes-original-profile-startup",m.profilePolicy=="original-existing-data",m.managementStorage=="ram-tmpfs-8MiB",
               [m.setupPath,m.preparationPath,m.supportPath,m.componentsPath,m.runtimePath,m.currentDataPath].allSatisfy({ $0.hasPrefix("/") && !$0.contains("\0") && $0.utf8.count<=4096 }) else { throw SNESRuntimeBinding.failure() }
         let source=try SNESOfflineSource.load(snapshot:URL(fileURLWithPath:m.setupPath))

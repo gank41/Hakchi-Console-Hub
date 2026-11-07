@@ -26,6 +26,21 @@ import SwiftHakchiCore
             decisions: [:], order: .title, structure: .init(mode: mode, maximumGamesPerPage: .thirtyFive),
             artwork: .init(more: oneGameSyntheticArt(), back: oneGameSyntheticArt(), custom: [:]), id: id)
     }
+    @Test func consoleMenuRetainsCheatCodeBracketsInGameTitle() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (originalReview, originals) = try fixture(root)
+        let path = root.appendingPathComponent("CLV-U-A0001/CLV-U-A0001.desktop")
+        let title = "Example [Cheat Code]"
+        let metadata = try String(contentsOf: path, encoding: .utf8).replacingOccurrences(of: "Imported 1", with: title)
+        try Data(metadata.utf8).write(to: path)
+        var games = originalReview.rows.map(\.game)
+        games[0].name = title
+        let review = try SNESLibraryCompatibility.review(games: games, originals: originals)
+        let prepared = try menu(review, originals)
+        let desktop = try #require(prepared.files["pages/001/CLV-U-A0001/CLV-U-A0001.desktop"])
+        #expect(try SNESOneGameMenu.fields(desktop)["name"] == title)
+    }
     @Test func sharedContentIsStoredOnceAndMetadataOrLayoutDoesNotChangeROMObjects() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

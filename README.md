@@ -6,6 +6,12 @@ Hakchi Console Hub is a GitHub fork of Swift Hakchi2. Hakchi2 CE is a community 
 
 > **Development preview — use at your own risk:** An originally unmodified US SNES Classic was prepared and games were added during supervised development. This preview includes newer setup and recovery tools, but the complete first-time app workflow has not yet been independently verified on a fresh console. Keep backups in a safe place and review the limitations below before making changes.
 
+## What is new in 0.2.3
+
+- Clearer SNES sync steps, with a more visible progress indicator and simpler explanations of backups, restarting and cleanup.
+- Cheat-code improvements, including a separate editable copy for supported included SNES games and refreshed NES cheat-code artwork.
+- An experimental faster SNES file check ran from memory on one console, but folder navigation still felt slow. It is not installed automatically; further work is needed.
+
 ## Supported consoles and status
 
 | Console | Current status |
@@ -46,7 +52,7 @@ Firmware installation, memboot, and some recovery and module operations are disa
 
 ## Download
 
-Download the DMG from the [0.2.2 preview release](https://github.com/gank41/Hakchi-Console-Hub/releases/tag/v0.2.2-preview), open it, and drag Hakchi Console Hub into Applications. The preview is experimental: read the console status above before connecting or changing a console.
+Download the DMG from the [0.2.3 preview release](https://github.com/gank41/Hakchi-Console-Hub/releases/tag/v0.2.3-preview), open it, and drag Hakchi Console Hub into Applications. The preview is experimental: read the console status above before connecting or changing a console.
 
 This preview is not signed with a Developer ID and has not been notarized by Apple. macOS may block it or display an unidentified-developer warning. See [Apple's guidance for opening apps safely](https://support.apple.com/102445) before deciding whether to open it. The preview does not contain game ROMs or personal cheat-code catalogs.
 

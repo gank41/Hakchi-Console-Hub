@@ -10,6 +10,16 @@ enum GameGenieWorkflow {
               let size = values.fileSize, size <= 8 * 1024 * 1024 else { throw GameGenieError.unsupportedROM }
         return try Data(contentsOf: url)
     }
+    /// Identifies a managed source without claiming it can be patched.
+    static func managedSourceDigest(game: Game, manager: GameManagerService) throws -> String {
+        guard game.source == .local, !game.isCheatCodeCopy else { throw GameGenieError.unsupportedROM }
+        let target = try GameArtworkTarget(game: game, gamesDirectory: AppConfig.shared.gamesDirectory)
+        try manager.validateArtworkTarget(target)
+        let files = try FileManager.default.contentsOfDirectory(at: target.folder, includingPropertiesForKeys: nil)
+            .filter { ["nes", "fds", "sfc", "smc", "sfrom", "md", "gen", "bin", "smd"].contains($0.pathExtension.lowercased()) }
+        guard files.count == 1, let rom = files.first else { throw GameGenieError.unsupportedROM }
+        return digest(try readROM(rom))
+    }
     static func open(game: Game, manager: GameManagerService) throws -> GameGenieSession {
         guard let system=GameGenieSystem(console:game.consoleType) else { throw GameGenieError.unsupportedROM }
         let config = AppConfig.shared

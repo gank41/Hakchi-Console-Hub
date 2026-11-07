@@ -75,3 +75,15 @@ enum IncludedGameDuplicates {
         }
     }
 }
+
+/// Title matches are suggestions only; the person must choose a local source.
+enum IncludedGameCheatSources {
+    static func matches(for included: Game, games: [Game]) -> [Game] {
+        guard included.isStock, GameGenieSystem(console: included.consoleType) != nil else { return [] }
+        return games.filter { candidate in
+            candidate.source == .local && !candidate.isCheatCodeCopy &&
+            IncludedGameDuplicates.match(title: candidate.name, originalTitle: candidate.defaultName,
+                                         console: candidate.consoleType, stock: [included]) != nil
+        }.sorted { ($0.name, $0.code) < ($1.name, $1.code) }
+    }
+}

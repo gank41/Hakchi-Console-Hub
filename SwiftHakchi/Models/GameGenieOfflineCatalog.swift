@@ -73,7 +73,22 @@ struct GameGenieOfflineCatalog: Codable, Sendable {
     // Search aliases never alter effect identity or merge different games/versions.
     func searchKey(_ title:String)->String {
         let key=Entry.gameKey(title)
-        if system == .snes && key=="aliensvspredator" {return "alienvspredator"}
+        if system == .snes {
+            switch key {
+            case "aliensvspredator": return "alienvspredator"
+            case "thelegendofzeldaalinktothepast", "legendofzeldathealinktothepast", "legendofzeldaalinktothepast": return "legendofzelda"
+            case "gradiusiii": return "gradius3"
+            case "contraiiithealienwars": return "contra3thealienwars"
+            case "mortalkombatii": return "mortalkombat2"
+            case "doubledragonvtheshadowfalls": return "doubledragon5"
+            case "robocopversustheterminator": return "robocopvstheterminator"
+            case "superstarwarstheempirestrikesback": return "supertheempirestrikesback"
+            case "donkeykongcountry2diddyskongquest": return "donkeykongcountry2"
+            case "superstarwarsreturnofthejedi": return "superreturnofthejedi"
+            case "t2thearcadegame": return "terminator2thearcadegame"
+            default: break
+            }
+        }
         return key
     }
     func searchGames(_ query:String)->[String] {
@@ -111,5 +126,26 @@ struct GameGenieOfflineCatalog: Codable, Sendable {
     func effect(from entry:Entry)throws->GameGenieEffect {
         guard effects.contains(entry),let codes=entry.selectableCodes(system:system) else {throw GameGenieCatalog.CatalogError.reviewRequired}
         return GameGenieEffect(name:entry.title,codes:codes,enabled:false,source:entry.sources.joined(separator:"\n"),notes:entry.notes)
+    }
+}
+
+/// Suggestions are title matches, never evidence that a particular ROM revision matches.
+enum GameGenieSuggestions {
+    static func needsReview(gameNames: [String], system: GameGenieSystem,
+                            catalog: GameGenieOfflineCatalog) -> Bool {
+        guard catalog.system == system else { return false }
+        let titles = Set(gameNames.map { catalog.searchKey($0) }.filter { !$0.isEmpty })
+        return catalog.effects.contains { titles.contains(catalog.searchKey($0.game)) && $0.selectableCodes(system: system) == nil }
+    }
+    static func rows(gameNames: [String], system: GameGenieSystem,
+                     catalog: GameGenieOfflineCatalog, existing: [GameGenieEffect]) -> [GameGenieOfflineCatalog.Entry] {
+        guard catalog.system == system else { return [] }
+        let titles = Set(gameNames.map { catalog.searchKey($0) }.filter { !$0.isEmpty })
+        let selected = existing.map { Set($0.codes.map { $0.uppercased() }) }
+        return catalog.effects.filter { row in
+            guard titles.contains(catalog.searchKey(row.game)),
+                  let codes = row.selectableCodes(system: system) else { return false }
+            return !selected.contains(Set(codes.map { $0.uppercased() }))
+        }
     }
 }

@@ -16,7 +16,7 @@ struct SNESLibrarySyncView: View {
             if let model { content(model) }
             else { ProgressView("Opening the SNES review…").padding(40) }
         }
-        .frame(minWidth: 700, idealWidth: 800, maxWidth: 920, minHeight: 540, idealHeight: 680, maxHeight: 760)
+        .frame(minWidth: 780, idealWidth: 1000, maxWidth: 1100, minHeight: 600, idealHeight: 800, maxHeight: 950)
         .task {
             guard model == nil else { return }
             let value = SNESLibrarySyncModel(app: app, originalsOnly: originalsOnly, restoreSnapshot: restoreSnapshot, replacementSnapshot: replacementSnapshot); model = value; await value.start()
@@ -40,22 +40,40 @@ private struct SNESLibrarySyncBody: View {
     @State private var showStructure = false
     @State private var confirmDiscard = false
     @State private var confirmReturn = false
+    @AppStorage("showAdvancedFeatures") private var showAdvancedFeatures = false
+    @State private var showFolderOptions = false
+    @State private var showGameList = false
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Label(model.isReturningPrevious ? "Recover Unfinished Sync — SNES Classic" : model.isRestoringReplacement ? "Copy Games to Replacement — SNES Classic" : model.isRestoringSavedGames ? "Restore Games and Folders — SNES Classic" : model.originalsOnly ? "Return to Built-in Games — SNES Classic" : "Sync Library — SNES Classic", systemImage: "arrow.triangle.2.circlepath").font(.title2.bold())
                 Spacer()
-                Text(model.phase.isTerminal ? (model.phase == .cancelled ? "Cancelled" : "Finished") : model.isReturningPrevious ? "Review → Return → Remove unfinished copy" : "Review → Copy → Show → Finish").font(.callout).foregroundStyle(.secondary)
+                Picker("View", selection: $showAdvancedFeatures) {
+                    Text("Easy").tag(false)
+                    Text("Advanced").tag(true)
+                }.pickerStyle(.segmented).labelsHidden().frame(width: 160)
+                    .help("Easy shows the main steps. Advanced also shows folder and game details.")
+                if model.phase.isTerminal {
+                    Text(model.phase == .cancelled ? "Cancelled" : "Finished").foregroundStyle(.secondary)
+                } else if !model.isReturningPrevious, let step = model.phase.syncStep {
+                    Text("Step \(step) of 5").font(.headline).foregroundStyle(.secondary)
+                }
             }
             if model.phase.isBusy {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Working…").font(.headline)
-                        Text(model.phase.progressTitle)
+                VStack(spacing: 10) {
+                    HStack(spacing: 12) {
+                        ProgressView().controlSize(.large)
+                        Text("Working…").font(.title2.bold())
                     }
+                    Text(model.phase.progressTitle).font(.headline).multilineTextAlignment(.center)
+                    if !model.phase.progressDetail.isEmpty {
+                        Text(model.phase.progressDetail).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                    Text("Keep the SNES turned on, connected by USB, and on its game-selection screen. Keep this window open.")
+                        .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
                 }
-                Text("Leave the console powered and connected at its game menu. First turn off My Game Play Demo and Classic Demo in the SNES Options menu.").font(.callout).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity).padding(20)
+                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
             } else {
                 if [.restart, .rollbackRestart, .testing, .readyToFinish, .readyToDiscard, .readyToRollback].contains(model.phase) {
                     Label("Your turn", systemImage: "hand.raised.fill").font(.headline).foregroundStyle(.orange)
@@ -66,7 +84,9 @@ private struct SNESLibrarySyncBody: View {
             }
             capacity
             Divider()
-            if model.phase == .readyToRollback {
+            if model.phase.isBusy {
+                Spacer(minLength: 20)
+            } else if model.phase == .readyToRollback {
                 Text("Return to your previous game menu").font(.headline)
                 Text("Games and saves stay on the console. After restarting normally, you can review removal of the unfinished copy. The previous library is saved in your Mac backup.").fixedSize(horizontal:false,vertical:true)
                 Toggle("The game-selection menu is visible, with no game running",isOn:$atMenu)
@@ -78,11 +98,13 @@ private struct SNESLibrarySyncBody: View {
                 Text(model.selectedGameCount == 0 ? "Check the original games and artwork. Start two built-in games and test picture, sound and controls, then return to the first game-selection screen." : "1. Check the folder links and box art.\n2. Start an added game as a new game and test picture, sound and controls.\n3. Test a built-in game too.\n4. Return to the first game-selection screen.")
                     .fixedSize(horizontal: false, vertical: true)
                 Toggle("Both games and the menu work, and I am back at the first screen", isOn: $tested)
+                Text("After you confirm, the app will back up your tested games and saves on this Mac, then ask you to finish. Keep this window open until it says Sync complete.")
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Spacer()
             } else if model.phase == .readyToFinish {
                 Label("Your tested library is saved on the Mac", systemImage: "checkmark.shield")
-                Text("Temporary console files to remove: " + bytes(model.reclaimBytes)).font(.headline)
-                Text("This ends immediate rollback on the console. You can restore the saved library from your Mac backup.")
+                Text("Old console copy to remove: " + bytes(model.reclaimBytes)).font(.headline)
+                Text("The app kept the previous game menu temporarily so you could return to it if the test failed. Finishing removes that older copy to free space. Your tested games and saves remain, and a backup stays on this Mac. Returning immediately to the old menu will no longer be available.")
                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Toggle("The first game-selection screen is visible, with no game running", isOn: $atMenu)
                 backupLink
@@ -193,9 +215,9 @@ private struct SNESLibrarySyncBody: View {
     private var restartInstructions: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(model.phase == .rollbackRestart ? "Restart to show your previous games":"Restart to show your games").font(.headline)
-            Text("1. Turn the SNES OFF and wait for its light to go out.\n2. Unplug USB from the console for ten seconds.\n3. Reconnect USB with RESET released, then turn it ON normally.\n4. Leave the game-selection menu visible.")
+            Text("1. Leave this app open. On the SNES, slide the POWER switch to OFF and wait for the light to go out.\n\n2. Unplug the USB cable from the SNES for 10 seconds.\n\n3. Plug USB back in, then turn the SNES ON normally. Do not hold the RESET button.\n\n4. Wait until the list of games appears on your TV. Return here and choose the button below to continue.")
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Keep HDMI connected so you can check the menu. Do not hold RESET for this restart.").foregroundStyle(.secondary)
+            Text("Keep the HDMI cable connected so you can see the console’s game menu on your TV.").foregroundStyle(.secondary)
             Spacer()
         }
     }
@@ -211,39 +233,33 @@ private struct SNESLibrarySyncBody: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
         } else if let draft = model.draft {
-            if let graph = model.graph { ConsoleLayoutPreview(graph: graph).frame(maxHeight: 150) }
+            if model.phase == .review {
+                Text("Before you begin, leave the SNES on the list of games shown on your TV. If it starts games by itself, turn off My Game Play Demo and Classic Demo in the SNES Options menu.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if model.compatibilityLayoutOnly {
                 Text("Folder preview only. Additional emulator support is still being developed, so these games cannot be synced yet. You can keep them on your Mac and sync the other selected games.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            HStack {
-                Picker("Folder structure", selection: Binding(get: { draft.structure.mode }, set: { mode in Task { await model.setMode(mode) } })) {
-                    ForEach(ConsoleStructure.Mode.allCases, id: \.self) { Text($0.displayTitle).tag($0) }
+            if showAdvancedFeatures {
+                folderOptions(draft)
+            } else {
+                Text("Your games will use the saved folder arrangement on your console.").foregroundStyle(.secondary)
+                DisclosureGroup("Review or change console folders", isExpanded: $showFolderOptions) {
+                    folderOptions(draft).padding(.top, 10)
                 }
-                Picker("Games per page", selection: Binding(get: { draft.structure.maximumGamesPerPage }, set: { limit in Task { await model.setLimit(limit) } })) {
-                    ForEach(ConsoleMenuLimit.allCases) { Text($0.menuTitle + ($0.rawValue > 35 ? " — not available yet" : "")).tag($0).disabled($0.rawValue > 35) }
-                }.frame(maxWidth: 230)
-            }.disabled(!model.phase.canEdit)
-            HStack {
-                Button("Edit Folder Structure…") { showStructure = true }
-                Spacer()
-                Picker("Sort games by", selection: Binding(get: { draft.order.reviewKey }, set: { key in
-                    Task { await model.setOrder(key == "release-date" ? .releaseDate : key == "publisher" ? .publisher : .title) }
-                })) {
-                    Text("Title").tag("title"); Text("Release Date").tag("release-date"); Text("Publisher").tag("publisher")
-                }.frame(maxWidth: 280)
-            }.disabled(!model.phase.canEdit)
+            }
             if model.phase == .ready {
-                Text("Adds \(model.addedGames) • Removes \(model.removedGames) • \(model.totalGames) games in the updated menu")
+                Text("Adds \(model.addedGames) • Removes \(model.removedGames) • \(model.totalGames) games in the console’s updated game menu")
                     .font(.callout).fontWeight(.medium)
             }
-            HStack {
-                Button("Select All") { Task { await model.selectAll(true) } }
-                Button("Select None") { Task { await model.selectAll(false) } }
-                if !draft.unresolvedDuplicateCodes.isEmpty {
-                    Spacer(); Button("Keep All Built-in Versions") { Task { await model.keepBuiltIns() } }
+            if !draft.unresolvedDuplicateCodes.isEmpty {
+                HStack {
+                    Label("Choose which version to keep for matching games below.", systemImage: "exclamationmark.circle")
+                    Spacer()
+                    Button("Keep All Built-in Versions") { Task { await model.keepBuiltIns() } }.disabled(!model.phase.canEdit)
                 }
-            }.disabled(!model.phase.canEdit)
+            }
             if !draft.excludedCodes.isEmpty {
                 Toggle("Keep unsupported games on this Mac (\(draft.excludedCodes.count))", isOn: Binding(
                     get: { draft.allowSkippingUnavailable }, set: { skip in Task { await model.skipUnavailable(skip) } }))
@@ -257,20 +273,63 @@ private struct SNESLibrarySyncBody: View {
                     }
                 }
             }
+            if showAdvancedFeatures {
+                gameList(draft)
+            } else {
+                if !draft.unresolvedDuplicateCodes.isEmpty {
+                    gameList(draft, onlyUnresolved: true).frame(minHeight: 55, maxHeight: 140)
+                }
+                DisclosureGroup("Review selected Mac games (\(draft.review.rows.count))", isExpanded: $showGameList) {
+                    gameList(draft).frame(minHeight: 120).padding(.top, 10)
+                }
+                Spacer(minLength: 0)
+            }
+            Text("Currently showing the games selected in your Mac library. Built-in games are included; if a game matches one of them, the built-in version stays on the console unless you choose your imported version.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        } else {
+            if let graph = model.graph { ConsoleLayoutPreview(graph: graph).frame(maxHeight: 220) }
+            Text("Continue the saved sync using its reviewed games and folder layout.").foregroundStyle(.secondary)
+            Spacer()
+        }
+    }
+    @ViewBuilder private func folderOptions(_ draft: SNESLibraryReviewDraft) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let graph = model.graph { ConsoleLayoutPreview(graph: graph).frame(maxHeight: 150) }
+            HStack {
+                Picker("Folder structure", selection: Binding(get: { draft.structure.mode }, set: { mode in Task { await model.setMode(mode) } })) {
+                    ForEach(ConsoleStructure.Mode.allCases, id: \.self) { Text($0.displayTitle).tag($0) }
+                }
+                Picker("Games per page", selection: Binding(get: { draft.structure.maximumGamesPerPage }, set: { limit in Task { await model.setLimit(limit) } })) {
+                    ForEach(ConsoleMenuLimit.allCases) { Text($0.menuTitle + ($0.rawValue > 35 ? " — not available yet" : "")).tag($0).disabled($0.rawValue > 35) }
+                }.frame(maxWidth: 230)
+            }
+            HStack {
+                Button("Edit Folder Structure…") { showStructure = true }
+                Spacer()
+                Picker("Sort games by", selection: Binding(get: { draft.order.reviewKey }, set: { key in
+                    Task { await model.setOrder(key == "release-date" ? .releaseDate : key == "publisher" ? .publisher : .title) }
+                })) {
+                    Text("Title").tag("title"); Text("Release Date").tag("release-date"); Text("Publisher").tag("publisher")
+                }.frame(maxWidth: 280)
+            }
+        }.disabled(!model.phase.canEdit)
+    }
+    private func gameList(_ draft: SNESLibraryReviewDraft, onlyUnresolved: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !onlyUnresolved {
+                HStack {
+                    Button("Select All") { Task { await model.selectAll(true) } }
+                    Button("Select None") { Task { await model.selectAll(false) } }
+                }.disabled(!model.phase.canEdit)
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(draft.review.rows, id: \.game.code) { row in
+                    ForEach(draft.review.rows.filter { !onlyUnresolved || draft.unresolvedDuplicateCodes.contains($0.game.code) }, id: \.game.code) { row in
                         gameRow(row, draft: draft)
                         Divider()
                     }
                 }
             }
-            Text("Showing games checked in your Mac library. Built-in games stay included; matches keep the built-in version unless you choose an imported version.")
-                .font(.caption).foregroundStyle(.secondary)
-        } else {
-            if let graph = model.graph { ConsoleLayoutPreview(graph: graph).frame(maxHeight: 220) }
-            Text("Continue the saved sync using its reviewed games and folder layout.").foregroundStyle(.secondary)
-            Spacer()
         }
     }
     private func versionKey(_ row: SNESLibraryCompatibility.Row, draft: SNESLibraryReviewDraft) -> String {

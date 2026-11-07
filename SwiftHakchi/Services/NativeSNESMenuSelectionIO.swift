@@ -26,7 +26,7 @@ actor NativeSNESMenuSelectionIO:SNESMenuSelectionIO {
  }
  func publish(permit:SNESMenuSelectionPermit) async throws->Data {
   try permit.require(material);guard let client else {throw LegacyInspectionError.disconnected}
-  return try output(await client.publishSNESMenuSelection(material,permit:permit),stage:"menu selection save")
+  return try output(await client.publishSNESMenuSelection(material,permit:permit),stage:"console game-menu update")
  }
  func disconnect() async {await client?.disconnect();client=nil}
 }

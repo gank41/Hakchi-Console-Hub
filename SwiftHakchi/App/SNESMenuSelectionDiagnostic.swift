@@ -67,7 +67,7 @@ enum SNESMenuSelectionDiagnostic {
    try m.validate();let final=try await journal.phase();try await journal.close()
    return try json(["operation":operation.path,"reviewSHA256":args[2],"phase":final.rawValue,"firmwareWritten":false,"gameFilesChanged":false,
     "selectorSelected":r.selected,"displaySelected":r.displaySelected,"userGameplayConfirmed":false,"receiptBase64":r.raw.base64EncodedString(),"receiptSHA256":BackupManifest.digest(r.raw),
-    "status":selecting ? "The menu selection is saved. Restart normally, then check the added game and a built-in game.":checking ? "The selected game menu and Mac connection are verified after startup. Confirm picture, sound and controls before finishing.":"The saved menu selection and current game menu were checked without changing files."])
+    "status":selecting ? "The console’s game menu is set. Restart normally, then check the added game and a built-in game.":checking ? "The console’s game menu and Mac connection are verified after startup. Confirm picture, sound and controls before finishing.":"The console’s saved game-menu setting and current game menu were checked without changing files."])
   } catch {try? await journal.close();throw error}
  }
 }

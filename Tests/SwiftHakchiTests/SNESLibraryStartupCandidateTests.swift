@@ -5,6 +5,35 @@ import SwiftHakchiCore
 
 @Suite(.serialized) struct SNESLibraryStartupCandidateTests {
     private static let cleanMaskLiteral = #"test "$mcp_sigblk" = 0000000000000000"#
+    @Test func firmwareInstallRefusesRAMOnlyAndUnknownRecipes() throws {
+        try SNESFirmwareMaterial.requireInstallableRecipe(10)
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(11) }
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(12) }
+    }
+    @Test func parallelTrialOnlyUpgradesTheCurrentInstalledRecipe() {
+        #expect(SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 10, to: 11))
+        #expect(!SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 9, to: 11))
+        #expect(!SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 11, to: 11))
+        #expect(!SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 10, to: 12))
+        #expect(SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 4, to: 10))
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["HC_SNES_PARALLEL_CANDIDATE"] != nil))
+    func ramCandidateOnlyChangesTheVerifierAndItsIntegrityRecords() throws {
+        let env = ProcessInfo.processInfo.environment
+        let old = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_PARALLEL_OLD"])))
+        let candidate = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_PARALLEL_CANDIDATE"])))
+        #expect(old.libraryRecipeVersion == 10 && candidate.libraryRecipeVersion == 11)
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(candidate.libraryRecipeVersion) }
+        let before = try LegacyBootImageBuilder.inspect(old.image), after = try LegacyBootImageBuilder.inspect(candidate.image)
+        #expect(before.kernel == after.kernel)
+        #expect(before.header[64..<576] == after.header[64..<576])
+        let a = Dictionary(uniqueKeysWithValues: before.archive.entries.map { ($0.name, $0.data) })
+        let b = Dictionary(uniqueKeysWithValues: after.archive.entries.map { ($0.name, $0.data) })
+        #expect(Set(a.keys) == Set(b.keys))
+        let changed = Set(a.keys.filter { a[$0] != b[$0] })
+        #expect(changed == Set(["swifthakchi/library-selector", "swifthakchi/runtime-files.sha256", "swifthakchi/files.sha256"]))
+        #expect(b["swifthakchi/library-selector"] == Data(try SNESLibraryStartupScripts.parallelChecksumVerifierCandidate().utf8))
+    }
     @Test func libraryStartupHasItsOwnManagementIdentity() throws {
         let expected = SNESStartupTrialExpectation(hwid: String(repeating: "1", count: 32), runtimeSHA256: String(repeating: "a", count: 64),
             wrapperSHA256: String(repeating: "b", count: 64), deviceVersion: 0x6a0b, menuWrapperSHA256: String(repeating: "c", count: 64))

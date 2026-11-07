@@ -650,6 +650,7 @@ final class GameManagerService: ObservableObject {
     /// A failed or cancelled preparation never commits a game to the library.
     func importROMsResponsive(urls: [URL], consoleType: ConsoleType,
                               reviewIncluded: @MainActor ([IncludedGameDuplicate]) -> IncludedGameImportChoice,
+                              forceUnselected: Bool = false,
                               progress: @escaping @Sendable (String, Double?) async -> Void) async throws -> ROMImportSummary {
         guard !isInspectingLegacy, !isLoading, consoleType == config.lastConsoleType else { throw LegacyInspectionError.busy }
         let gamesDir = config.gamesDirectory, existingCodes = Set(games.map(\.code))
@@ -715,7 +716,7 @@ final class GameManagerService: ObservableObject {
                 let desktop = candidate.desktop, code = desktop.code
                 try FileManager.default.moveItem(at: stagingURL.appendingPathComponent(code), to: gamesDir.appendingPathComponent(code))
                 var game = Game(desktopFile: desktop, consoleType: consoleType, basePath: gamesDir.path, source: .local)
-                if candidate.match != nil { game.isSelected = false }
+                if candidate.match != nil || forceUnselected { game.isSelected = false }
                 added.append(game)
             }
         } catch {

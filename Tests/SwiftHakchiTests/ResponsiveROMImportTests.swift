@@ -14,6 +14,18 @@ private actor ImportCopyGate {
 }
 
 @MainActor struct ResponsiveROMImportTests {
+    @Test func explicitlyUnselectedImportStaysUncheckedWithoutATitleMatch() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let config = AppConfig(); config.workspacePath = root.path; config.lastConsoleType = .snesUsa
+        let source = root.appendingPathComponent("A Console Game.sfc")
+        let bytes = Data(repeating: 7, count: 65536); try bytes.write(to: source)
+        let manager = GameManagerService(config: config)
+        _ = try await manager.importROMsResponsive(urls: [source], consoleType: .snesUsa,
+            reviewIncluded: { _ in .keepCopies }, forceUnselected: true, progress: { _, _ in })
+        let game = try #require(manager.games.first)
+        #expect(!game.isSelected)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: game.romPath).appendingPathComponent(source.lastPathComponent)) == bytes)
+    }
     @Test func genesisLibraryIdentifiesExistingOptionalEmulatorCommandsForReview() {
         let old = Game(code: "CLV-P-AAAAA", desktopContent: "Code=CLV-P-AAAAA\nName=Older\nExec=/bin/retroarch-clover -L /bin/genesis_plus_gx_libretro.so /var/games/old.md\n", consoleType: .megaDrive, source: .local)
         let current = Game(code: "CLV-P-BBBBB", desktopContent: "Code=CLV-P-BBBBB\nName=Current\nExec=/bin/m2engage /var/games/new.md\n", consoleType: .megaDrive, source: .local)

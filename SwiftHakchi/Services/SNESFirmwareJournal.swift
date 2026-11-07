@@ -306,9 +306,15 @@ actor SNESFirmwareJournal {
         let accepted=try acceptedInstall(),value=try Self.libraryParent(material:accepted.material,review:accepted.reviewSHA256,directory:storage.operation!.url,currentData:currentData)
         _=try acceptedInstall();try value.validate();return value
     }
+    /// Creates a RAM-only candidate from an already accepted recipe 10 installation.
+    func parallelLibraryStartupParent(currentData:SNESDataSnapshotReceipt?=nil)throws->SNESMenuStartupParent {
+        let accepted=try acceptedInstall(),value=try Self.libraryParent(material:accepted.material,review:accepted.reviewSHA256,directory:storage.operation!.url,targetRecipe:11,currentData:currentData)
+        _=try acceptedInstall();try value.validate();return value
+    }
     private static func libraryParent(material:SNESFirmwareMaterial,review:String,directory:URL,legacy:Bool=false,targetRecipe:Int=10,currentData:SNESDataSnapshotReceipt?=nil)throws->SNESMenuStartupParent {
         let checked=try SNESFirmwareGuard.prepare(material),previous=material.trial.candidate
-        guard material.direction == .install,previous.hasMenuSupport,!previous.hasNativeArtworkSupport,
+        guard material.direction == .install,previous.hasMenuSupport,
+              (targetRecipe == 11 ? previous.libraryRecipeVersion == 10 : !previous.hasNativeArtworkSupport),
               (!legacy || !previous.hasLibrarySupport),
               material.parentOperationID != nil,BackupManifest.digest(try material.planData())==review else {throw RestoreDirectory.failure()}
         let base=try SNESStartupAdapterCandidate.withLibrarySupport(previous,legacy:legacy,targetRecipe:targetRecipe)

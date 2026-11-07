@@ -158,11 +158,11 @@ import SwiftHakchiCore
                     if value.attachment.registryEntryID != previous.registryEntryID {
                         let proof=try await source.verifyRestarted(plan:plan,previousAttachment:previous,destination:.previous)
                         try await journal.noteRolledBack(proof);try await showReturnedCopyReview(source)
-                    } else {phase = .rollbackRestart;message="The previous menu selection is saved. Restart normally to display it."}
+                    } else {phase = .rollbackRestart;message="The console is set to show your previous games. Restart the SNES normally to see them on your TV."}
                 } else {
                     try SNESLibraryActiveCheck.require(plan,inventory:observed.inventory,preserveProfiles:false)
                     canReturnToPrevious=true;phase = .interrupted
-                    message="The earlier return stopped before changing the selected menu. Review Return to Previous Games for a new attempt."
+                    message="The earlier return stopped before changing the console’s game menu. Review Return to Previous Games for a new attempt."
                 }
                 freeBytes=observed.capacity.freeBytes
             case .rolledBack:
@@ -174,21 +174,21 @@ import SwiftHakchiCore
                 let observed = try await source.observe(value)
                 try await journal.recordInspectedCopy(observed.inventory)
                 freeBytes = observed.capacity.freeBytes; phase = .copied
-                message = "The copied games are complete and checked. Show the updated menu next."
+                message = "The copied games have been checked. Choose Show Updated Games to set up the console’s game menu. The sync is not finished yet."
             case .copied:
                 let observed = try await source.observe(value)
                 try SNESLibraryInactiveCheck.require(plan, inventory: observed.inventory)
                 freeBytes = observed.capacity.freeBytes; phase = .copied
-                message = "The copied games are complete and checked. Show the updated menu next."
+                message = "The copied games have been checked. Choose Show Updated Games to set up the console’s game menu. The sync is not finished yet."
             case .selectionIntent, .selectionUncertain:
                 do {
                     let observed = try await source.observe(value)
                     if observed.inventory.selection == plan.before.selection {
                         try await journal.recordInspectedCopy(observed.inventory)
-                        phase = .copied; message = "The old menu is still selected. The complete copied games are ready for Show Updated Games."
+                        phase = .copied; message = "The console is still set to show the previous games. The copied games are ready; choose Show Updated Games to continue."
                     } else {
                         try SNESLibraryActiveCheck.require(plan, inventory: observed.inventory, preserveProfiles: false)
-                        canReturnToPrevious=true;phase = .restart; message = "The updated menu selection was saved. Restart normally to show it."
+                        canReturnToPrevious=true;phase = .restart; message = "The updated console game menu is ready. Restart the SNES normally to show it on your TV."
                     }
                     freeBytes = observed.capacity.freeBytes
                 } catch {
@@ -203,7 +203,7 @@ import SwiftHakchiCore
                 let observed = try await source.observe(value)
                 try SNESLibraryActiveCheck.require(plan, inventory: observed.inventory, preserveProfiles: false)
                 freeBytes = observed.capacity.freeBytes;canReturnToPrevious=true;phase = .restart
-                message = "The updated menu selection is saved. Restart normally to show it."
+                message = "The updated console game menu is ready. Restart the SNES normally to show it on your TV."
             case .awaitingTest:
                 let previous = try await journal.restartAttachment()
                 if value.attachment != previous {
@@ -479,7 +479,7 @@ import SwiftHakchiCore
         session = nil; context = nil; observation = nil
         // Finish the exact bytes already copied, independent of later edits to the editable library.
         try await useFrozenPlan()
-        phase = .copied; message = "The games are copied and checked. Show the updated menu next."
+        phase = .copied; message = "The games are copied and checked. Choose Show Updated Games to set up the console’s game menu. The sync is not finished yet."
     }
     private func useFrozenPlan() async throws {
         guard let old = plan, let operation, let records else { throw fail("The saved sync review is missing.") }
@@ -512,7 +512,7 @@ import SwiftHakchiCore
         let (source,_)=try await binding()
         _=try await SNESLibraryRollbackTransaction.run(plan:plan,journal:journal,device:source,review:review)
         session=nil;context=nil;rollbackReview=nil;phase = .rollbackRestart
-        message="The previous menu selection is saved. Restart the SNES normally to display it."
+        message="The console is set to show your previous games. Restart the SNES normally to see them on your TV."
     }
     private func showReturnedCopyReview(_ source:SNESLibraryConnectionSession) async throws {
         guard let plan,let journal else {throw fail("The saved sync review is missing.")}
@@ -534,7 +534,7 @@ import SwiftHakchiCore
         phase = .savingSelection; let (source, _) = try await binding()
         _ = try await SNESLibrarySelectionTransaction.run(plan: plan, journal: journal, device: source)
         session = nil; context = nil
-        phase = .restart; message = "Restart the SNES normally to display the updated games."
+        phase = .restart; message = "Restart the SNES normally to show the updated game menu on your TV. Then return here to continue."
     }
     private func checkRestart() async throws {
         guard let plan, let journal else { throw fail("The saved sync review is missing.") }
@@ -556,7 +556,7 @@ import SwiftHakchiCore
         let preview = try await source.previewCleanup(plan: plan, scope: scope)
         self.scope = scope; cleanup = preview; backupDirectory = current.directory; reclaimBytes = preview.presentFileBytes
         freeBytes = preview.freeBytes; phase = .readyToFinish
-        message = "Finish Sync removes the temporary old files from the SNES. Your tested games, saves and Mac backups stay available."
+        message = "Your tested games and saves are backed up on this Mac. Choose Finish Sync to remove the older console copy and free space. Your current games and saves stay."
     }
     private func finish() async throws {
         guard let plan, let journal, let scope, let cleanup else { throw fail("Refresh the cleanup review before finishing.") }

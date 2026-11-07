@@ -870,6 +870,33 @@ enum SNESLibraryStartupScripts {
     printf '%s\n' "$base/pages/$selected_page"
     """# + "\n"
 
+    /// File-only candidate: keep the historical verifier intact until a new recipe is reviewed.
+    /// Every worker receives a partition of the same checksum table; all four must succeed.
+    static func parallelChecksumVerifierCandidate() throws -> String {
+        let old = #"""
+    "$B" awk -v base="$base" -v root="$N/objects/" '$1=="FILE" {print $4 "  " base "/" $2} $1=="OBJECT" {print $4 "  " root $2}' "$manifest" | "$B" sha256sum -c - >/dev/null
+    """#
+        let replacement = #"""
+    table=$("$B" awk -v base="$base" -v root="$N/objects/" '$1=="FILE" {print $4 "  " base "/" $2} $1=="OBJECT" {print $4 "  " root $2}' "$manifest")
+    test -n "$table"
+    check_part() {
+      printf '%s\n' "$table" | "$B" awk -v part="$1" 'BEGIN { print "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /dev/null" } (NR-1)%4==part {print}' | "$B" sha256sum -c - >/dev/null
+    }
+    check_part 0 & c0=$!
+    check_part 1 & c1=$!
+    check_part 2 & c2=$!
+    check_part 3 & c3=$!
+    failed=0
+    wait "$c0" || failed=1
+    wait "$c1" || failed=1
+    wait "$c2" || failed=1
+    wait "$c3" || failed=1
+    test "$failed" = 0
+    """#
+        guard verifier.components(separatedBy: old).count == 2 else { throw SNESRuntimeBinding.failure() }
+        return verifier.replacingOccurrences(of: old, with: replacement)
+    }
+
     /// Recipe 7 accepts the stock manager's bounded launch options.
     static let launchCompatibleChangePage = #"""
     #!/bin/sh

@@ -30,6 +30,7 @@ protocol SNESLibraryConnectionIO: Sendable {
     func recoveryInventory(context: SNESLibraryContext, permit: SNESLibraryReconciliationPermit, challenge: UUID) async throws -> Data
     func librarySpace(context: SNESLibraryContext, selection: SNESLibraryInventory.Selection, challenge: UUID) async throws -> Data
     func libraryChunk(context: SNESLibraryContext, file: SNESLibraryInventory.File, offset: Int, challenge: UUID) async throws -> Data
+    func includedGameChunk(context: SNESLibraryContext, entry: SNESOriginalGamesFrame.Entry, offset: Int, challenge: UUID) async throws -> Data
     func copyLibrary(context: SNESLibraryContext, plan: SNESLibrarySyncPlan, permit: SNESLibraryCopyPermit, before: SNESLibraryInventory) async throws -> Data
     func restoreLibrarySelection(context:SNESLibraryContext,plan:SNESLibrarySyncPlan,permit:SNESLibraryRollbackPermit,before:SNESLibraryInventory) async throws->Data
     func rollbackPendingAbsent(context:SNESLibraryContext,plan:SNESLibrarySyncPlan,challenge:UUID) async throws->Data
@@ -44,6 +45,7 @@ protocol SNESLibraryConnectionIO: Sendable {
     func disconnect() async
 }
 extension SNESLibraryConnectionIO {
+    func includedGameChunk(context: SNESLibraryContext, entry: SNESOriginalGamesFrame.Entry, offset: Int, challenge: UUID) async throws -> Data { throw SNESOriginalGamesFrame.failure() }
     func inspectReplacementSaveStage(context: SNESLibraryContext, request: SNESReplacementSaveStageInspection.Request) async throws -> SNESReplacementSaveStageInspectionReceipt.Outcome { throw SNESLibraryInventory.failure() }
     func stageReplacementSave(context: SNESLibraryContext, request: SNESReplacementSaveStageCommands.Request, before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.StagePermit) async throws -> SNESReplacementSaveStageReceipt { throw SNESLibraryInventory.failure() }
     func deliverReplacementSaveHelper(context: SNESLibraryContext, request: SNESReplacementSaveHelperDelivery.Request, before: SNESLibraryInventory, permit: SNESReplacementSaveJournal.HelperDeliveryPermit) async throws { throw SNESLibraryInventory.failure() }
@@ -1146,6 +1148,31 @@ actor SNESLibraryConnectionSession: SNESLibraryCopyDevice, SNESLibrarySelectionD
             throw error
         }
     }
+    func readIncludedGame(_ value: SNESLibraryContext, code: String, progress: @Sendable (Int, Int) async -> Void = { _, _ in }) async throws -> Data {
+        try await requireCurrent(value)
+        guard let entry = value.installation.originals.frame.entries.first(where: { $0.code == code }), !busy else {
+            throw SNESOriginalGamesFrame.failure()
+        }
+        busy = true; defer { busy = false }
+        let token = generation
+        do {
+            var image = Data()
+            while image.count < entry.romBytes {
+                try check(token); try await checkAttachment(token)
+                let offset = image.count, challenge = UUID()
+                let raw = try await io.includedGameChunk(context: value, entry: entry, offset: offset, challenge: challenge)
+                try check(token); try await checkAttachment(token)
+                try value.requireCurrent(attachment: attachment, sessionID: value.sessionID)
+                image.append(try SNESIncludedGameCopy.chunk(raw, entry: entry, offset: offset, challenge: challenge, context: value.sha256))
+                await progress(image.count, entry.romBytes)
+            }
+            return try SNESIncludedGameCopy.rawROM(from: image, entry: entry)
+        } catch {
+            context = nil; connected = false
+            if !closed { closed = true; generation += 1; await io.disconnect() }
+            throw error
+        }
+    }
     func disconnect() async {
         generation += 1; context = nil; connected = false
         guard !closed else { return }; closed = true
@@ -1392,6 +1419,12 @@ actor NativeSNESLibraryIO: SNESLibraryConnectionIO {
         let result = try await client.readSNESLibraryChunk(context, file: file, offset: offset, challenge: challenge)
         try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
         return try checkedResult(result, maximum: SNESLibraryBackupChunk.maximumBytes + 2048)
+    }
+    func includedGameChunk(context: SNESLibraryContext, entry: SNESOriginalGamesFrame.Entry, offset: Int, challenge: UUID) async throws -> Data {
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        let result = try await client.readSNESIncludedGameChunk(context, entry: entry, offset: offset, challenge: challenge)
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        return try checkedResult(result, maximum: SNESIncludedGameCopy.chunkSize + 2048)
     }
     func copyLibrary(context: SNESLibraryContext, plan: SNESLibrarySyncPlan, permit: SNESLibraryCopyPermit, before: SNESLibraryInventory) async throws -> Data {
         try SNESLibraryJournalPolicy.requireOperation(permit.operation)

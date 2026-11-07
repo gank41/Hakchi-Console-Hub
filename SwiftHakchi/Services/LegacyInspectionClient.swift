@@ -121,6 +121,11 @@ actor LegacyInspectionClient: LegacyRequestExecuting {
         return try await executeCommand(envelope.command, maximumBytes: maximumBytes, binary: false,
                                         timeoutMilliseconds: 30000, input: envelope.input)
     }
+    /// Explicitly invoked diagnostic only. This reads the current menu and never installs the candidate.
+    func readSNESParallelVerifierCandidate() async throws -> SSHResult {
+        let idle = #"B=/mnt/swifthakchi/busybox; test -z "$("$B" pidof canoe-shvc clover-canoe-shvc kachikachi clover-kachikachi || :)" || exit 1"#
+        return try await executeSNESLibraryRead(idle + "\n" + SNESLibraryStartupScripts.parallelChecksumVerifierCandidate(), maximumBytes: 1024, timeoutMilliseconds: 60000)
+    }
     /// Fixed read-only startup report, streamed to avoid the old daemon's small exec buffer.
     func readSNESStartupTrial(_ trial: PreparedSNESStartupTrial, challenge: UUID) async throws -> SSHResult {
         guard leaseID == nil else { throw LegacyInspectionError.busy }
@@ -388,6 +393,11 @@ actor LegacyInspectionClient: LegacyRequestExecuting {
             hwid: context.installation.expected.hwid, runtimeSHA256: context.installation.expected.runtimeSHA256,
             file: file, offset: offset, challenge: challenge), maximumBytes: SNESLibraryBackupChunk.maximumBytes + 2048,
             binary: true, timeoutMilliseconds: 30000)
+    }
+    func readSNESIncludedGameChunk(_ context: SNESLibraryContext, entry: SNESOriginalGamesFrame.Entry, offset: Int, challenge: UUID) async throws -> SSHResult {
+        try context.requireCurrent(attachment: context.attachment, sessionID: context.sessionID)
+        return try await executeSNESLibraryRead(SNESIncludedGameCopy.command(context: context, entry: entry, offset: offset, challenge: challenge),
+            maximumBytes: SNESIncludedGameCopy.chunkSize + 2048, binary: true, timeoutMilliseconds: 30000)
     }
     func copySNESLibrary(_ context: SNESLibraryContext, plan: SNESLibrarySyncPlan, permit: SNESLibraryCopyPermit, before: SNESLibraryInventory) async throws -> SSHResult {
         guard leaseID == nil else { throw LegacyInspectionError.busy }

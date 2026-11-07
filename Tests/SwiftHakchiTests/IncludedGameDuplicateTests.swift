@@ -30,6 +30,20 @@ import SwiftHakchiCore
     private func stock(_ title: String, console: ConsoleType = .nes) -> Game {
         Game(code: "CLV-P-AAAAA", desktopContent: "Code=CLV-P-AAAAA\nName=\(title)", consoleType: console, source: .stock)
     }
+    @Test func cheatSourceChoicesOnlyIncludeMatchingLocalGamesForTheSameConsole() {
+        let original = stock("The Legend of Zelda: A Link to the Past", console: .snesUsa)
+        func candidate(_ code: String, _ title: String, _ console: ConsoleType, _ source: GameSource) -> Game {
+            Game(code: code, desktopContent: "Code=\(code)\nName=\(title)", consoleType: console, source: source)
+        }
+        let match = candidate("CLV-U-AAAAA", "Legend of Zelda, The - A Link to the Past", .snesUsa, .local)
+        let other = candidate("CLV-U-BBBBB", "Super Mario World", .snesUsa, .local)
+        let wrongConsole = candidate("CLV-U-CCCCC", match.name, .snesEur, .local)
+        let remote = candidate("CLV-U-DDDDD", match.name, .snesUsa, .console)
+        let variant = candidate("CLV-U-EEEEE", match.name + " [Cheat Code]", .snesUsa, .local)
+        let matches = IncludedGameCheatSources.matches(for: original, games: [other, wrongConsole, remote, variant, match])
+        #expect(matches.map(\.code) == [match.code])
+        #expect(IncludedGameCheatSources.matches(for: match, games: [match]).isEmpty)
+    }
     @Test func titleMatchesStayWithinTheActualConsoleAndExcludeCheatCopies() {
         let original = stock("Super Mario Bros.")
         #expect(IncludedGameDuplicates.match(title: "SUPER MARIO BROS", console: .nes, stock: [original])?.name == "Super Mario Bros.")

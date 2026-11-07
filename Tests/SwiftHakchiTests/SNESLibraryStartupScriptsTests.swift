@@ -97,7 +97,27 @@ struct SNESLibraryStartupScriptsTests {
             try #require(menu.objects[romName]).write(to: URL(fileURLWithPath: romPath), options: .atomic)
         }
     }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["HC_TEST_READONLY_SNES_PARALLEL_VERIFIER"] == "1"))
+    @MainActor func liveParallelCandidateReadsCurrentMenuWithoutInstallingIt() async throws {
+        try RecoveryProbeUSBRegistry.requireOrdinaryAppClosed()
+        let devices = try RecoveryProbeUSBRegistry.inventory()
+        guard devices.count == 1, let device = devices.first, ConsoleAttachmentPolicy.kind(of: device) == .nativeSNES else { throw SNESLibraryMenu.failure() }
+        let client = LegacyInspectionClient()
+        try await client.connect(timeoutMilliseconds: 5000)
+        do {
+            let result = try await client.readSNESParallelVerifierCandidate()
+            await client.disconnect()
+            #expect(result.succeeded)
+            #expect(result.stderr.isEmpty)
+            let value = String(decoding: result.stdoutData, as: UTF8.self)
+            #expect(value == "/usr/share/games\n" || (value.hasPrefix("/var/lib/swifthakchi/snes-v2/menus/") && value.hasSuffix("/pages/000\n")))
+        } catch {
+            await client.disconnect()
+            throw error
+        }
+    }
     @Test func oldStartupRecipeRemainsByteExact() {
+        #expect(BackupManifest.digest(Data(SNESLibraryStartupScripts.verifier.utf8)) == "92c5438b38bcc8e89382b6d333ebacc62683a4ace42e4e44abc3c5ced5f2ddae")
         #expect(BackupManifest.digest(Data(SNESLibraryStartupScripts.legacyVerifier.utf8)) == "cac56e7005ad94bec9b99162c4090c8c761241973ceb1e8920361e96af42ab00")
         #expect(BackupManifest.digest(Data(SNESLibraryStartupScripts.legacyArtworkVerifier.utf8)) == "d45187b4a8029bb303ac5691cb0e7fbcb4a4df50497fb61afc9fb76acc0bcfe0")
     }
@@ -110,7 +130,11 @@ struct SNESLibraryStartupScriptsTests {
     func experimentalVerifierKeepsNativeMenusAndRejectsDamage(_ fault: String) async throws {
         try await checkNativeMenu(fault, experimental: true)
     }
-    private func checkNativeMenu(_ fault: String, experimental: Bool) async throws {
+    @Test(arguments: ["valid", "inactive", "builtin", "missing", "changed", "linked", "hardlink", "extra", "object", "selector", "path", "duplicate", "target", "worker-producer-failure", "worker-checksum-failure", "worker-manifest-change"])
+    func parallelVerifierCandidateRetainsNativeMenuSafety(_ fault: String) async throws {
+        try await checkNativeMenu(fault, experimental: false, parallel: true)
+    }
+    private func checkNativeMenu(_ fault: String, experimental: Bool, parallel: Bool = false) async throws {
         let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
         let (menu, originals) = try await MainActor.run {
             let helper = SNESLibraryMaterialTests(), (review, originals) = try helper.fixture(root, count: fault == "decimal-pages" ? 220 : fault == "large" ? 70 : 2)
@@ -162,13 +186,18 @@ struct SNESLibraryStartupScriptsTests {
         let bb = root.appendingPathComponent("busybox")
         let shim = """
         #!/bin/sh
+        if test "${HC_FAIL_WORKER:-}" = producer && test "$1" = awk; then
+          for arg in "$@"; do test "$arg" != part=2 || exit 88; done
+        fi
+        if test "${HC_FAIL_WORKER:-}" = checksum && test "$1" = sha256sum && test "${2:-}" = -c; then exit 89; fi
+        if test "${HC_FAIL_WORKER:-}" = manifest-change && test "$1" = sha256sum && test "${2:-}" = -c; then printf x >> "$HC_TEST_MANIFEST"; fi
         case "$1" in
           stat) case "$3" in '%h') /usr/bin/stat -f '%l' "$4";; '%u') echo 0;; '%s') /usr/bin/stat -f '%z' "$4";; *) exit 97;; esac;;
           *) exec "$@";;
         esac
         """
         try put(bb, Data(shim.utf8)); try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: bb.path)
-        let source = try experimental ? SNESLibraryStartupScripts.experimentalCompatibilityVerifier() : SNESLibraryStartupScripts.verifier
+        let source = try parallel ? SNESLibraryStartupScripts.parallelChecksumVerifierCandidate() : (experimental ? SNESLibraryStartupScripts.experimentalCompatibilityVerifier() : SNESLibraryStartupScripts.verifier)
         let script = source.replacingOccurrences(of: "/mnt/swifthakchi/busybox", with: bb.path)
             .replacingOccurrences(of: SNESLibraryMenu.namespace, with: namespace.path).replacingOccurrences(of: "/usr/share/games", with: stockRoot.path)
             .replacingOccurrences(of: #"icon="$N/objects/$art""#, with: #"icon=""# + SNESLibraryMenu.namespace + #"/objects/$art""#)
@@ -180,6 +209,10 @@ struct SNESLibraryStartupScriptsTests {
         let process = Process(), output = Pipe(), error = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = [file.path] + (fault == "inactive" ? [menu.id.uuidString, hash] : [])
+        if fault.hasPrefix("worker-") {
+            let failure = fault == "worker-producer-failure" ? "producer" : (fault == "worker-manifest-change" ? "manifest-change" : "checksum")
+            process.environment = ProcessInfo.processInfo.environment.merging(["HC_FAIL_WORKER": failure, "HC_TEST_MANIFEST": base.appendingPathComponent("menu.manifest").path]) { _, new in new }
+        }
         process.standardOutput = output; process.standardError = error
         try process.run(); let stdout = output.fileHandleForReading.readDataToEndOfFile(), stderr = error.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
         #expect(try Data(contentsOf: selector) == Data(selection.utf8))
