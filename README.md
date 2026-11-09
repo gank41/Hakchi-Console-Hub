@@ -16,7 +16,7 @@ Hakchi Console Hub is a GitHub fork of Swift Hakchi2. Hakchi2 CE is a community 
 
 | Console | Current status |
 | --- | --- |
-| NES Classic (USA) | Library management and synchronization were exercised on an already-modified console during development. Some older device-specific operations are unavailable in this public preview; first-time setup is not validated. |
+| NES Classic (USA) | The Mac library can be organized. Sync, backup, saved-menu restore and cleanup currently depend on a specific development console and are not generally available to other NES owners. First-time setup is not validated. |
 | SNES Classic (USA) | A stock console was prepared during supervised development; added games, folders, artwork and native sync worked on that console. The app includes guided setup, backup and recovery steps, but the complete first-time and replacement-console workflows have not been verified end to end on separate stock hardware. |
 | Famicom Mini, Super Famicom Mini, European models | Library and console choices exist, but hardware operations are not generally verified. |
 | Sega Genesis / Mega Drive Mini | Library support is experimental; console setup and synchronization are not ready. |
@@ -28,7 +28,7 @@ Consoles of the same model generally follow the same basic process, but the app 
 ## Features
 
 - Import game files into a local library, edit metadata and artwork, and organize console menus into folders.
-- Review supported NES and SNES sync operations, space requirements, duplicates and backups before applying changes to a recognized, prepared console.
+- Review supported SNES sync operations, space requirements, duplicates and backups before applying changes to a recognized, prepared console. NES device operations remain restricted as described below.
 - Search for game metadata and artwork using supported providers.
 - Manage cheat codes and create a separate patched game copy where supported. Cheat availability and patching vary by platform and game.
 - Review available console restore options. Their availability depends on the console, its setup and verified recovery files.
@@ -40,8 +40,8 @@ Firmware installation, memboot, and some recovery and module operations are disa
 ## Current limitations
 
 - **First-time setup:** SNES setup steps are available for review, but the full app-led process still needs end-to-end testing on another stock console. A startup backup is not necessarily original stock software if the console was previously modified. First-time NES setup has not been validated.
-- **Backups and recovery:** A verified library backup can be copied to another Mac. Restoring games and progress to a replacement SNES remains experimental and has not been tested between two physical consoles; not all save layouts are supported. Startup-software recovery is separate from library and save restoration. Preserve each console's own recovery files.
-- **NES device-specific operations:** Some legacy operations were tied to the development console and remain unavailable in this public preview. Do not treat the earlier NES hardware test as validation of those operations in this build.
+- **Backups and recovery:** A verified library backup can be copied to another Mac. Restoring games and progress to a replacement SNES remains experimental and has not been tested between two physical consoles; not all save layouts are supported. A complete SNES data-snapshot restore and factory-like reset are not implemented. Startup-software recovery is separate from library and save restoration. Preserve each console's own recovery files.
+- **NES device-specific operations:** Sync, backup verification, saved-menu restore and cleanup are tied to a development console and do not generally work for other NES owners in this preview. First-time firmware setup has not been validated on an unmodified NES. Do not treat the earlier hardware test as validation for other consoles.
 - **Other console models:** Genesis / Mega Drive setup and synchronization are not ready; Famicom, Super Famicom and European hardware operations need further verification.
 - **Additional emulators:** Games requiring the experimental SNES compatibility emulator cannot yet be synced through the app. Module management and some other advanced tools are incomplete.
 
