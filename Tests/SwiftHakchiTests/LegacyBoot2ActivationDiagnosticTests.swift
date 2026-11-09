@@ -7,11 +7,18 @@ struct LegacyBoot2ActivationDiagnosticTests {
         let expected = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Development/NES/Backups/StockKernelRestoreJournals", isDirectory: true)
         #expect(RecoveryFirmwareJournalPolicy.root == expected.standardizedFileURL)
-        try RecoveryFirmwareJournalPolicy.require(expected)
+        // This legacy workflow is intentionally bound to the evidence owner's
+        // account. CI uses another account and must be refused without writing.
+        if (try? RecoveryFirmwareJournalPolicy.requireOwner()) != nil {
+            try RecoveryFirmwareJournalPolicy.require(expected)
+        } else {
+            #expect(throws: (any Error).self) {
+                try RecoveryFirmwareJournalPolicy.require(expected)
+            }
+        }
         #expect(throws: (any Error).self) {
             try RecoveryFirmwareJournalPolicy.require(expected.deletingLastPathComponent())
         }
-        try RecoveryFirmwareJournalPolicy.requireOwner()
         #expect(throws: (any Error).self) {
             try RecoveryFirmwareJournalPolicy.requireOwner(uid: 0)
         }

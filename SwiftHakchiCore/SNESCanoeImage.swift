@@ -34,7 +34,9 @@ public enum SNESCanoeImage {
   let headers=[(0x7fc0,false),(0xffc0,true)].filter {h,hi in
    guard h+64<=length else{return false}
    let map=payload[h+0x15],size=Int(payload[h+0x17])
-   return (hi ? [0x21,0x31]:[0x20,0x30]).contains(Int(map)) && size<=12 && 1<<(size+10)==addressSpan &&
+   let contra = !hi && length == 1024*1024 && map == 0x53 && payload[h+0x16] == 0 && size == 10 && payload[h+0x18] == 0 && payload[h+0x19] == 1 &&
+    Array(payload[h..<h+22]) == Array("CONTRA3 THE ALIEN WARS".utf8)
+   return (contra || (hi ? [0x21,0x31]:[0x20,0x30]).contains(Int(map))) && size<=12 && 1<<(size+10)==addressSpan &&
     word(h+0x1c)^word(h+0x1e)==0xffff && (0x8000..<0xffff).contains(word(h+0x3c)) &&
     cartridgeTitle(payload,h) != nil
   }
@@ -92,6 +94,7 @@ public enum SNESCanoeImage {
   "FINAL FANTASY 3":0x10DC,
   "SUPER CASTLEVANIA 4":0x1030,
   "CONTRA3 THE ALIEN WA":0x1036,
+  "CONTRA3 THE ALIEN WAR":0x1036,
   "STAR FOX":0x1242,
   "STARFOX2":0x123C,
   "SHVC FIREEMBLEM":0x102B,

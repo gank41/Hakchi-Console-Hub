@@ -261,12 +261,12 @@ struct SNESFirmwareMaterialTests {
         #expect(throws:(any Error).self) {try SNESFirstInstallOfflineReview.load(wrongType,expectedSHA256:BackupManifest.digest(wrongType))}
     }
     @Test func oldOversizedReviewExplainsHowToProceed() throws {
-        let root=try testDirectory();defer {try? FileManager.default.removeItem(at:root)}
+        let root=try testDirectory().standardizedFileURL;defer {try? FileManager.default.removeItem(at:root)}
         let plan=Data(repeating:0x20,count:16385)
         let review=try SNESFirstInstallOfflineReview(startupPlanSHA256:BackupManifest.digest(plan),
-            dataDirectory:root.appendingPathComponent("SNES-Current-Data-11111111-1111-1111-1111-111111111111"),
+            dataDirectory:root.appendingPathComponent("SNES-Current-Data-11111111-1111-1111-1111-111111111111",isDirectory:true),
             dataManifestSHA256:String(repeating:"a",count:64),dataSHA256:String(repeating:"b",count:64),dataBytes:1048576)
-        let directory=root.appendingPathComponent("SNES-First-Install-Review-"+UUID().uuidString)
+        let directory=root.appendingPathComponent("SNES-First-Install-Review-"+UUID().uuidString,isDirectory:true)
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:false)
         try plan.write(to:directory.appendingPathComponent("startup-plan.json"))
         try review.canonicalBytes().write(to:directory.appendingPathComponent("manifest.json"))

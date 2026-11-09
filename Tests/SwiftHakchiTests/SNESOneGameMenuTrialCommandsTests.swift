@@ -6,7 +6,11 @@ import SwiftHakchiCore
 struct SNESOneGameMenuTrialCommandsTests {
  @Test(arguments:["none","shutdown","foreign-bind","existing","init","game","tree","ui-exe","ui-parent","ui-framebuffer","ui-multiple","mcp-exe","compatibility-game","compatibility-supervisor"])
  func temporaryMenuUsesOnlyRAMAndRejectsUnsafeState(_ fault:String)throws {
-  let root=try testDirectory();defer{try? FileManager.default.removeItem(at:root)}
+  let testRoot=try testDirectory();defer{try? FileManager.default.removeItem(at:testRoot)}
+  // Match GitHub Actions' /Users/runner path so test path substitutions cannot
+  // accidentally rewrite a component of the host fixture directory.
+  let root=testRoot.appendingPathComponent("runner",isDirectory:true)
+  try FileManager.default.createDirectory(at:root,withIntermediateDirectories:false)
   let originals=try SNESOriginalGamesFrame(originalGamesFrameFixture(),binding:originalGamesBinding(),challenge:originalGamesChallenge)
   let menu=try SNESOneGameMenu.prepare(originals:originals,code:"CLV-U-ABCDE",metadata:oneGameMetadata,rom:oneGameSyntheticROM(),artwork:oneGameSyntheticArt(),id:originalGamesChallenge)
   func path(_ s:String)->URL {root.appendingPathComponent(s)}
@@ -51,11 +55,12 @@ struct SNESOneGameMenuTrialCommandsTests {
   """
   let bb=path("busybox"),shimData=Data(shim.utf8);try shimData.write(to:bb);try FileManager.default.setAttributes([.posixPermissions:0o700],ofItemAtPath:bb.path)
   func rewrite(_ source:String)->String {
-   source.replacingOccurrences(of:"/mnt/swifthakchi/busybox",with:bb.path).replacingOccurrences(of:SNESRAMProbeScripts.busyboxSHA256,with:BackupManifest.digest(shimData))
+   source.replacingOccurrences(of:"/run",with:path("run").path)
+    .replacingOccurrences(of:"/mnt/swifthakchi/busybox",with:bb.path).replacingOccurrences(of:SNESRAMProbeScripts.busyboxSHA256,with:BackupManifest.digest(shimData))
     .replacingOccurrences(of:SNESOneGameMenuTrialCommands.originalInitSHA256,with:BackupManifest.digest(initData))
     .replacingOccurrences(of:SNESMenuAdapterScripts.mcpDesktopSHA256,with:BackupManifest.digest(template))
     .replacingOccurrences(of:"/var/lib",with:path("var/lib").path).replacingOccurrences(of:"/usr/share",with:path("usr/share").path)
-    .replacingOccurrences(of:"/usr/bin/clover-canoe-shvc",with:path("usr/bin/clover-canoe-shvc").path).replacingOccurrences(of:"/etc/",with:path("etc").path+"/").replacingOccurrences(of:"/proc/",with:path("proc").path+"/").replacingOccurrences(of:"/run",with:path("run").path).replacingOccurrences(of:"/mnt/swifthakchi/daemon.pid",with:path("mnt/swifthakchi/daemon.pid").path)
+    .replacingOccurrences(of:"/usr/bin/clover-canoe-shvc",with:path("usr/bin/clover-canoe-shvc").path).replacingOccurrences(of:"/etc/",with:path("etc").path+"/").replacingOccurrences(of:"/proc/",with:path("proc").path+"/").replacingOccurrences(of:"/mnt/swifthakchi/daemon.pid",with:path("mnt/swifthakchi/daemon.pid").path)
   }
   func execute(_ script:String)throws->(Int32,Data,Data) {
    let errorFile=path("stderr-"+UUID().uuidString);FileManager.default.createFile(atPath:errorFile.path,contents:nil);let errorHandle=try FileHandle(forWritingTo:errorFile);defer{try? errorHandle.close()};let p=Process(),out=Pipe();p.executableURL=URL(fileURLWithPath:"/bin/sh");p.arguments=["-c",rewrite(script)];p.standardOutput=out;p.standardError=errorHandle;try p.run();let o=out.fileHandleForReading.readDataToEndOfFile();p.waitUntilExit();let e=try Data(contentsOf:errorFile);return(p.terminationStatus,o,Data(e.suffix(6000)))

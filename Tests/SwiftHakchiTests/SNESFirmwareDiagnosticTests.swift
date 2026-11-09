@@ -26,8 +26,10 @@ struct SNESFirmwareDiagnosticTests {
         #expect(completed.detail.localizedCaseInsensitiveContains("saved"))
     }
     @Test func resumedUpgradeIdentifiesItsParentAndRejectsSubstitution() throws {
-        let root=try testDirectory();defer {try? FileManager.default.removeItem(at:root)}
-        func operation()->URL {root.appendingPathComponent("SNESFirmware-"+UUID().uuidString)}
+        // These URLs denote directories. Give them explicit directory semantics
+        // rather than relying on Foundation's filesystem-dependent inference.
+        let root=try testDirectory().standardizedFileURL;defer {try? FileManager.default.removeItem(at:root)}
+        func operation()->URL {root.appendingPathComponent("SNESFirmware-"+UUID().uuidString,isDirectory:true)}
         let initial=operation(),menu=SNESFirmwareJournal.Prepared(operation:operation(),reviewSHA256:String(repeating:"a",count:64))
         let check=SNESReviewedConsoleCheck(operation:initial,planSHA256:String(repeating:"b",count:64),review:.init(directory:root,sha256:String(repeating:"c",count:64)))
         let direct=SNESFirmwareJournal.Prepared(operation:initial,reviewSHA256:check.planSHA256)
