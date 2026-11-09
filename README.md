@@ -52,7 +52,7 @@ Firmware installation, memboot, and some recovery and module operations are disa
 
 ## Download
 
-Download the DMG from the [0.2.3 preview release](https://github.com/gank41/Hakchi-Console-Hub/releases/tag/v0.2.3-preview), open it, and drag Hakchi Console Hub into Applications. The preview is experimental: read the console status above before connecting or changing a console.
+The 0.2.3 preview installer is temporarily unavailable while a privacy issue is addressed. A corrected installer will be posted when ready. The preview is experimental: read the console status above before connecting or changing a console.
 
 This preview is not signed with a Developer ID and has not been notarized by Apple. macOS may block it or display an unidentified-developer warning. See [Apple's guidance for opening apps safely](https://support.apple.com/102445) before deciding whether to open it. The preview does not contain game ROMs or personal cheat-code catalogs.
 
