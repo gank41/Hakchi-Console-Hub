@@ -7,6 +7,22 @@ import SwiftHakchiCore
 struct LegacyHistoricalCleanupTests {
     private let id = UUID(uuidString: "82DBB4BB-13E6-4159-9475-69AE54024531")!
 
+    @Test func cleanupRecordIdentitySupportsDifferentConsolesAndRejectsMismatch() throws {
+        let first = String(repeating: "1", count: 32)
+        let second = String(repeating: "2", count: 32)
+        for chip in [first, second] {
+            try LegacyDeviceIdentity.requireOperationIdentity(chip,
+                fingerprint: BackupManifest.digest(Data(chip.utf8)))
+        }
+        #expect(throws: (any Error).self) {
+            try LegacyDeviceIdentity.requireOperationIdentity(second,
+                fingerprint: BackupManifest.digest(Data(first.utf8)))
+        }
+        #expect(throws: (any Error).self) {
+            try LegacyDeviceIdentity.requireOperationIdentity(second, fingerprint: nil)
+        }
+    }
+
     @Test func cleanupCanOnlyNameOwnedTemporaryDirectories() throws {
         for path in ["/var/lib/hakchi/games/nes", "/var/lib/hakchi/games/nes/000",
                      "/var/squashfs/usr/share/games/nes/kachikachi", "/var/lib/hakchi/.swift-hakchi-transactions",

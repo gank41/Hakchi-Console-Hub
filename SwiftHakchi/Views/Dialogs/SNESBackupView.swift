@@ -21,6 +21,8 @@ struct SNESBackupView: View {
     @State private var initialSavedReview: SNESFirstInstallReviewReceipt?
     @State private var firstStageInstalled = false
     @State private var showingRestorePreparation = false
+    @State private var copyingDataBackup = false
+    @State private var dataCopyMessage: String?
     init(execute: @escaping @Sendable (@escaping RecoveryProgressSink) async throws -> SNESSetupRecordReceipt,
          prepareRecovery: @escaping @Sendable (SNESSetupRecordReceipt) async throws -> URL,
          prepareHelpers: @escaping @Sendable () async throws -> URL,
@@ -44,6 +46,11 @@ struct SNESBackupView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Label("Set Up SNES — Backup", systemImage: "externaldrive.badge.checkmark").font(.title2.bold())
+            if copyingDataBackup {
+                HStack { ProgressView().controlSize(.small); Text("Copying and checking the backup…").font(.headline) }
+                Text("Keep this window open. Your original backup stays where it is. This may take a few minutes.").foregroundStyle(.secondary)
+            }
+            if let dataCopyMessage { Text(dataCopyMessage).font(.callout).textSelection(.enabled) }
             switch guide.phase {
             case .instructions:
                 Label("Your turn", systemImage: "hand.raised.fill").font(.headline).foregroundStyle(.orange)
@@ -66,6 +73,8 @@ struct SNESBackupView: View {
                     Button("Check Saved Review…") { ready = false; initialSavedReview = nil; showingSavedReview = true }
                     Spacer()
                 }
+                Button("Copy an Existing Data Backup…") { chooseExistingDataBackup() }
+                Text("Copy a previously saved full-data backup without connecting a console. It belongs to its original SNES. Keep your other setup backups too; full-data restore is not available yet.").font(.callout).foregroundStyle(.secondary)
                 Button("Restore Original SNES Startup…") { ready = false; showingRestorePreparation = true }
                 Text("Uses a saved installation record. The app checks the console and asks before restoring startup software.").font(.callout).foregroundStyle(.secondary)
                 HStack {
@@ -122,7 +131,7 @@ struct SNESBackupView: View {
                 Text(guide.phase == .complete ? "SNES backup and checks complete. Your console is back in normal use." : "The console is back in normal use. No completed setup backup was saved.")
                 if guide.phase == .complete { Text("Continue with the saved review to check and install the startup update.").foregroundStyle(.secondary) }
                 if guide.phase == .complete, guide.recoveryDirectory != nil {
-                    Text("A separate recovery package was also prepared and checked on this Mac. Restoring startup software from it is still being added to the app.")
+                    Text("A separate recovery package was also prepared and checked on this Mac. Original startup restoration has limited preview support; it does not erase games or saves.")
                         .foregroundStyle(.secondary)
                 }
                 if guide.phase == .complete, let error = guide.recoveryError {
@@ -395,6 +404,10 @@ struct SNESBackupView: View {
                 Text("Your SNES is back in normal use. First-time setup is a preview.")
                 if let error = guide.dataError { DisclosureGroup("Backup details") { Text(error).textSelection(.enabled) } }
                 if let directory = guide.dataDirectory { Button("Show Data Backup in Finder") { NSWorkspace.shared.activateFileViewerSelecting([directory]) } }
+                if guide.phase == .dataComplete {
+                    Button("Copy Data Backup…") { chooseDataBackupDestination(updated: false) }
+                    Text("Keep another copy on a drive or Mac, along with your other setup backups. This backup belongs to this SNES; full-data restore is not available yet.").font(.callout).foregroundStyle(.secondary)
+                }
                 if let directory = guide.dataDiagnosticDirectory { Button("Show Saved Backup in Finder") { NSWorkspace.shared.activateFileViewerSelecting([directory]) } }
                 recoveryFileButtons
                 HStack {
@@ -661,6 +674,10 @@ struct SNESBackupView: View {
                     .foregroundStyle(guide.phase == .freshDataComplete ? Color.green : Color.orange)
                 if let error = guide.freshDataError { DisclosureGroup("Backup details") { Text(error).textSelection(.enabled) } }
                 if let directory = guide.freshDataDirectory { Button("Show Updated Backup in Finder") { NSWorkspace.shared.activateFileViewerSelecting([directory]) } }
+                if guide.phase == .freshDataComplete {
+                    Button("Copy Updated Data Backup…") { chooseDataBackupDestination(updated: true) }
+                    Text("Keep another copy on a drive or Mac, along with your other setup backups. This backup belongs to this SNES; full-data restore is not available yet.").font(.callout).foregroundStyle(.secondary)
+                }
                 if let directory = guide.freshDataDiagnosticDirectory { Button("Show Saved Backup in Finder") { NSWorkspace.shared.activateFileViewerSelecting([directory]) } }
                 Text("Your earlier backup is still on this Mac. First-time setup is a preview.")
                 if guide.phase == .freshDataComplete { Text("If you start the console again, you can save another updated backup without repeating the game test.").foregroundStyle(.secondary) }
@@ -760,7 +777,7 @@ struct SNESBackupView: View {
                 HStack { Spacer(); Button("Done") { finish() }.keyboardShortcut(.defaultAction) }
             }
         }
-        .padding(24).frame(width: 560)
+        .padding(24).frame(width: 560).disabled(copyingDataBackup)
         .interactiveDismissDisabled()
         .sheet(isPresented: $showingResume) {
             SNESSetupResumeView(root: appState.snesBackupsDirectory, onResume: { result in
@@ -772,6 +789,37 @@ struct SNESBackupView: View {
                                 reportFirstStageComplete: { firstStageInstalled = true })
         }
         .sheet(isPresented: $showingRestorePreparation, onDismiss: { ready = false }) { SNESStartupRestorePreparationView() }
+    }
+    private func chooseExistingDataBackup() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a Full-Data Backup"
+        panel.message = "Select the saved SNES-Current-Data backup folder. The app will check it before copying."
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+        chooseDataBackupDestination(updated: false, existing: directory)
+    }
+    private func chooseDataBackupDestination(updated: Bool, existing: URL? = nil) {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Where to Copy the SNES Backup"
+        panel.message = "Choose a folder on this Mac or a connected drive. The original backup will be kept."
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        copyingDataBackup = true; dataCopyMessage = nil
+        Task {
+            defer { copyingDataBackup = false }
+            do {
+                let copy: URL
+                if let existing {
+                    copy = try await Task.detached { try SNESPortableDataSnapshot.copy(directory: existing, to: destination) }.value
+                } else {
+                    copy = try await guide.copyFullDataBackup(to: destination, updated: updated)
+                }
+                dataCopyMessage = "Backup copied and its files checked. The original is still in its previous location. The app has not checked this copy against a console. Full-data restore is not available yet."
+                NSWorkspace.shared.activateFileViewerSelecting([copy])
+            } catch { dataCopyMessage = error.localizedDescription }
+        }
     }
     @ViewBuilder private var recoveryFileButtons: some View {
         if let directory = guide.backupDirectory {

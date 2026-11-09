@@ -9,6 +9,8 @@ private struct ReclaimFixtureDevice: LegacyArchiveReclaimDevice {
     let archive: LegacyArchiveReclaimCommands.Inspection
     func inspect() async throws -> LegacyConsoleReport { report }
     func requireIdentity() async throws {}
+    func requireLegacyIdentity() async throws {}
+    func chipID() async throws -> String { String(repeating: "1", count: 32) }
     func inspectOperation(operationID: UUID, treeSHA256: String) async throws -> LegacySyncInspection { operation }
     func inventoryLive(operationID: UUID) async throws -> Data { Data() }
     func inspectArchive(operationID: UUID, treeSHA256: String,
@@ -64,7 +66,8 @@ struct LegacyArchiveReclaimTests {
         var record = try LegacySyncJournal(operationID: id, reviewSHA256: tree,
             archiveSHA256: digest, treeSHA256: tree, backupSHA256: digest,
             backupDirectory: backup, stageDirectory: stage, trialCode: "CLV-H-ABCDE",
-            maximumGamesPerPage: 30, archiveBytes: 1024)
+            maximumGamesPerPage: 30, archiveBytes: 1024,
+            chipIDFingerprint: BackupManifest.digest(Data(String(repeating: "1", count: 32).utf8)))
         record.phase = .accepted
         let report = LegacyConsoleReport(bootVersion: "1.0.1", kernelVersion: "3.4.112.madmonkey",
             scriptVersion: "[master]v1.0.3-110(7f31082)",

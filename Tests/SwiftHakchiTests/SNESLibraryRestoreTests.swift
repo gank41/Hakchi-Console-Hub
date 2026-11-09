@@ -7,6 +7,96 @@ import SwiftHakchiCore
 // These fixtures use a real 60-second inventory freshness window. Running all
 // the publication fault cases at once can age an unrelated fixture past it.
 @Suite(.serialized) @MainActor struct SNESLibraryRestoreTests {
+    @Test func sameConsoleSavedDataReviewProtectsExistingFilesAndReopens() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = SNESLibraryMaterialTests(), (review, originals) = try fixture.fixture(root)
+        let menu = try fixture.menu(review, originals), hwid = originals.hwid
+        let base = "clover/profiles/0/CLV-U-A0001/"
+        let saves = [base + "cartridge.sram": Data([1, 2, 3]), base + "cartridge.sram.hash": Data([4, 5])]
+        let source = try await backup(root, originals: originals, menu: menu, profileFiles: saves)
+        let destination = try await backup(root, originals: originals, menu: menu)
+        #expect(throws: (any Error).self) {
+            try SNESLibraryRestore.prepareReplacement(backup: source, originals: originals, destinationHWID: hwid)
+        }
+        #expect(throws: (any Error).self) {
+            try SNESLibraryRestore.prepareSameConsoleSavedData(backup: source, originals: originals, destinationHWID: String(repeating: "2", count: 32))
+        }
+        let same = try SNESLibraryRestore.prepareSameConsoleSavedData(backup: source, originals: originals, destinationHWID: hwid)
+        let comparison = try same.compareSaves(to: destination)
+        let plan = try SNESReplacementSavePlan.prepare(replacement: same, comparison: comparison, gameCodes: ["CLV-U-A0001"])
+        #expect(Set(plan.files.map(\.path)) == Set(saves.keys))
+        #expect(try plan.read(path: base + "cartridge.sram") == saves[base + "cartridge.sram"])
+        let savedReview = try SNESReplacementSaveEnvelope.prepare(plan: plan)
+        let encoded = try #require(JSONSerialization.jsonObject(with: savedReview.data) as? [String: Any])
+        #expect(encoded["version"] as? Int == 3)
+        let reopened = try SNESReplacementSaveEnvelope.load(data: savedReview.data, expectedSHA256: savedReview.sha256, originals: originals)
+        #expect(reopened.sha256 == savedReview.sha256)
+        #expect(try reopened.plan.read(path: base + "cartridge.sram") == saves[base + "cartridge.sram"])
+        let receipt = try SNESReplacementSaveReviewStore.save(reopened, root: root)
+        let fromDisk = try SNESReplacementSaveReviewStore.open(receipt, originals: originals)
+        #expect(fromDisk.sha256 == savedReview.sha256)
+        let reviewText = try #require(String(data: savedReview.data, encoding: .utf8))
+        let forgedLegacy = reviewText.replacingOccurrences(of: "snes-same-console-saves-offline-review", with: "snes-replacement-saves-offline-review")
+            .replacingOccurrences(of: "\"version\":3", with: "\"version\":2")
+        #expect(forgedLegacy != reviewText)
+        let forgedData = Data(forgedLegacy.utf8)
+        #expect(throws: (any Error).self) {
+            try SNESReplacementSaveEnvelope.load(data: forgedData, expectedSHA256: BackupManifest.digest(forgedData), originals: originals)
+        }
+        let options = try SNESReplacementSaveJournal.stagingOptions(review: reopened, before: destination.inventory, runtimeSHA256: String(repeating: "b", count: 64))
+        #expect(options.count == 1 && options[0].summary.gameCode == "CLV-U-A0001")
+        let journals = root.appendingPathComponent("same-console-journals")
+        try FileManager.default.createDirectory(at: journals, withIntermediateDirectories: false)
+        let prepared = try SNESReplacementSaveJournal.prepare(review: reopened, root: journals)
+        let journal = try SNESReplacementSaveJournal(operation: prepared.operation, reviewSHA256: prepared.reviewSHA256, originals: originals)
+        #expect(try await journal.phase() == .prepared)
+        try await journal.close()
+        #expect(try SNESReplacementSaveJournal.pending(root: journals, hwid: hwid) != nil)
+        #expect(throws: (any Error).self) { try SNESLibraryJournal.backupDeletionLease(directory: source.directory, root: journals) }
+        #expect(throws: (any Error).self) { try SNESLibraryJournal.backupDeletionLease(directory: destination.directory, root: journals) }
+        let conflicting = try await backup(root, originals: originals, menu: menu,
+            profileFiles: [base + "cartridge.sram": Data([9]), base + "cartridge.sram.hash": Data([8])])
+        #expect(throws: (any Error).self) {
+            try SNESReplacementSavePlan.prepare(replacement: same, destination: conflicting, gameCodes: ["CLV-U-A0001"])
+        }
+        let missing = try await backup(root, originals: originals)
+        #expect(throws: (any Error).self) {
+            try SNESReplacementSavePlan.prepare(replacement: same, destination: missing, gameCodes: ["CLV-U-A0001"])
+        }
+        let (otherReview, _) = try fixture.fixture(root.appendingPathComponent("different-game"), romBytes: 131072)
+        let differentMenu = try fixture.menu(otherReview, originals)
+        let different = try await backup(root, originals: originals, menu: differentMenu)
+        #expect(throws: (any Error).self) {
+            try SNESReplacementSavePlan.prepare(replacement: same, destination: different, gameCodes: ["CLV-U-A0001"])
+        }
+        try source.validate(); try destination.validate(); try conflicting.validate()
+    }
+    @Test func replacementSaveReviewCannotBeRelabeledAsSameConsole() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = SNESLibraryMaterialTests(), (review, originals) = try fixture.fixture(root)
+        let menu = try fixture.menu(review, originals), sourceID = originalGamesBinding(), target = String(repeating: "2", count: 32)
+        let base = "clover/profiles/0/CLV-U-A0001/"
+        let source = try await backup(root, originals: originals, menu: menu,
+            profileFiles: [base + "cartridge.sram": Data([1]), base + "cartridge.sram.hash": Data([2])])
+        var frame = originalGamesFrameFixture()
+        let range = try #require(frame.range(of: Data(("HWID " + sourceID.expectedHWID).utf8)))
+        frame.replaceSubrange(range, with: Data(("HWID " + target).utf8))
+        let binding = SNESRuntimeBinding(sourceSnapshot: sourceID.sourceSnapshot, setupManifestSHA256: sourceID.setupManifestSHA256, expectedHWID: target)
+        let targetOriginals = try SNESOriginalGamesFrame(frame, binding: binding, challenge: originalGamesChallenge)
+        let destination = try await backup(root, originals: originals, menu: menu, hwid: target)
+        let replacement = try SNESLibraryRestore.prepareReplacement(backup: source, originals: targetOriginals, destinationHWID: target)
+        let plan = try SNESReplacementSavePlan.prepare(replacement: replacement, destination: destination, gameCodes: ["CLV-U-A0001"])
+        let saved = try SNESReplacementSaveEnvelope.prepare(plan: plan)
+        #expect(try SNESReplacementSaveEnvelope.load(data: saved.data, expectedSHA256: saved.sha256, originals: targetOriginals).sha256 == saved.sha256)
+        let text = try #require(String(data: saved.data, encoding: .utf8))
+        let altered = text.replacingOccurrences(of: "snes-replacement-saves-offline-review", with: "snes-same-console-saves-offline-review")
+            .replacingOccurrences(of: "\"version\":2", with: "\"version\":3")
+        #expect(altered != text)
+        let bytes = Data(altered.utf8)
+        #expect(throws: (any Error).self) {
+            try SNESReplacementSaveEnvelope.load(data: bytes, expectedSHA256: BackupManifest.digest(bytes), originals: targetOriginals)
+        }
+    }
     @Test func nativeSaveInspectionRequiresTheAppRecoveryFolder() throws {
         let root = try SNESLibraryJournalPolicy.root(), id = UUID()
         let operation = root.appendingPathComponent("SNESSaveTransfer-" + id.uuidString)
@@ -240,19 +330,21 @@ import SwiftHakchiCore
         #expect(throws:(any Error).self) {try savePlan.validate()}
     }
 
-    @Test(arguments: ["valid", "large", "empty", "space", "truncated", "truncated-body", "truncated-plan", "empty-stage", "before-plan", "after-plan", "missing-file", "gap", "short-gap", "incomplete-extra", "wrong-stage-challenge", "corrupt", "occupied", "linked", "game", "changed-selector", "staged-mutation", "plan-mutation", "extra", "foreign-device", "inspection-race"])
+    @Test(arguments: ["valid", "same-console", "large", "empty", "space", "truncated", "truncated-body", "truncated-plan", "empty-stage", "before-plan", "after-plan", "missing-file", "gap", "short-gap", "incomplete-extra", "wrong-stage-challenge", "corrupt", "occupied", "linked", "game", "changed-selector", "staged-mutation", "plan-mutation", "extra", "foreign-device", "inspection-race"])
     func saveStageCopiesOnlyReviewedDataWithoutChangingLiveSaves(_ fault: String) async throws {
         let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
         let fixture = SNESLibraryMaterialTests(), (library, originals) = try fixture.fixture(root), menu = try fixture.menu(library, originals)
         let base = "clover/profiles/0/CLV-U-A0001/", data = fault == "large" ? Data(repeating: 21, count: 524300) : (fault == "empty" ? Data() : Data([1, 2, 3])), hash = Data([4, 5])
         let source = try await backup(root, originals: originals, menu: menu, profileFiles: [base + "cartridge.sram": data, base + "cartridge.sram.hash": hash])
-        let target = String(repeating: "2", count: 32), old = originalGamesBinding()
+        let old = originalGamesBinding(), target = fault == "same-console" ? old.expectedHWID : String(repeating: "2", count: 32)
         var frame = originalGamesFrameFixture()
         let range = try #require(frame.range(of: Data(("HWID " + old.expectedHWID).utf8)))
         frame.replaceSubrange(range, with: Data(("HWID " + target).utf8))
         let binding = SNESRuntimeBinding(sourceSnapshot: old.sourceSnapshot, setupManifestSHA256: old.setupManifestSHA256, expectedHWID: target)
         let targetOriginals = try SNESOriginalGamesFrame(frame, binding: binding, challenge: originalGamesChallenge)
-        let replacement = try SNESLibraryRestore.prepareReplacement(backup: source, originals: targetOriginals, destinationHWID: target)
+        let replacement = try fault == "same-console"
+            ? SNESLibraryRestore.prepareSameConsoleSavedData(backup: source, originals: targetOriginals, destinationHWID: target)
+            : SNESLibraryRestore.prepareReplacement(backup: source, originals: targetOriginals, destinationHWID: target)
         let destination = try await backup(root, originals: originals, menu: menu, hwid: target)
         let plan = try SNESReplacementSavePlan.prepare(replacement: replacement, destination: destination, gameCodes: ["CLV-U-A0001"])
         let review = try SNESReplacementSaveEnvelope.prepare(plan: plan), challenge = UUID(), id = UUID()
@@ -321,7 +413,7 @@ import SwiftHakchiCore
         }
         #expect(try Data(contentsOf: existing) == sentinel)
         #expect(try Data(contentsOf: selectorPath) == (fault == "changed-selector" ? sentinel : selector))
-        if ["valid", "large", "empty", "inspection-race", "wrong-stage-challenge"].contains(fault) {
+        if ["valid", "same-console", "large", "empty", "inspection-race", "wrong-stage-challenge"].contains(fault) {
             #expect(process.terminationStatus == 0, "\(String(decoding: errors, as: UTF8.self))")
             _ = try SNESReplacementSaveStageReceipt(reply, request: request)
             #expect(try Data(contentsOf: stage.appendingPathComponent("0000")) == data)
@@ -331,7 +423,7 @@ import SwiftHakchiCore
             #expect(throws: (any Error).self) { try SNESReplacementSaveStageReceipt(reply, request: request) }
             if fault == "occupied" { #expect(try Data(contentsOf: stage.appendingPathComponent("foreign")) == sentinel) }
         }
-        if ["valid", "space", "truncated-body", "truncated-plan", "empty-stage", "before-plan", "after-plan", "missing-file", "gap", "short-gap", "incomplete-extra", "wrong-stage-challenge", "corrupt", "occupied", "linked", "extra", "staged-mutation", "plan-mutation", "inspection-race"].contains(fault) {
+        if ["valid", "same-console", "space", "truncated-body", "truncated-plan", "empty-stage", "before-plan", "after-plan", "missing-file", "gap", "short-gap", "incomplete-extra", "wrong-stage-challenge", "corrupt", "occupied", "linked", "extra", "staged-mutation", "plan-mutation", "inspection-race"].contains(fault) {
             func stageSnapshot() throws -> [String: Data]? {
                 guard FileManager.default.fileExists(atPath: stage.path) else { return nil }
                 let names = try FileManager.default.contentsOfDirectory(atPath: stage.path)
@@ -346,7 +438,7 @@ import SwiftHakchiCore
             #expect(throws: (any Error).self) {
                 try inspect.requireBinding(contextSHA256: destination.inventory.contextSHA256, hwid: String(repeating: "3", count: 32), runtimeSHA256: runtimeHash)
             }
-            if fault == "valid" {
+            if fault == "valid" || fault == "same-console" {
                 var sends = 0
                 let result = try await SNESReplacementSaveStageInspection.dispatch(inspect,
                     contextSHA256: destination.inventory.contextSHA256, hwid: target, runtimeSHA256: runtimeHash) { request in
@@ -389,7 +481,7 @@ import SwiftHakchiCore
             inspector.waitUntilExit()
             #expect(try Data(contentsOf: existing) == sentinel)
             if fault != "inspection-race" { #expect(try stageSnapshot() == beforeInspection) }
-            if fault == "valid" {
+            if fault == "valid" || fault == "same-console" {
                 #expect(inspector.terminationStatus == 0, "\(String(decoding: details, as: UTF8.self))")
                 #expect(try SNESReplacementSaveStageInspectionReceipt(observation, request: inspect).outcome == .verified)
             } else if fault == "space" {
@@ -406,12 +498,12 @@ import SwiftHakchiCore
         }
     }
 
-    @Test(arguments: ProcessInfo.processInfo.environment["SNES_PUBLICATION_TEST_CASE"].map { [$0] } ?? ["valid", "suspend", "occupied", "symlink", "bad-stage", "wrong-stage", "selector", "no-space", "ready-tamper", "destination-race", "extra-after-rename", "interrupted-before-rename", "interrupted-after-rename", "helper-missing", "helper-changed", "game", "slot-valid", "slot-occupied", "slot-prior-tamper", "slot-prior-race", "slot-profile-mode", "slot-interrupted-before", "slot-interrupted-after"])
+    @Test(arguments: ProcessInfo.processInfo.environment["SNES_PUBLICATION_TEST_CASE"].map { [$0] } ?? ["valid", "same-valid", "same-occupied", "same-interrupted-before-rename", "same-interrupted-after-rename", "same-slot-valid", "same-slot-occupied", "same-slot-interrupted-before", "same-slot-interrupted-after", "suspend", "occupied", "symlink", "bad-stage", "wrong-stage", "selector", "no-space", "ready-tamper", "destination-race", "extra-after-rename", "interrupted-before-rename", "interrupted-after-rename", "helper-missing", "helper-changed", "game", "slot-valid", "slot-occupied", "slot-prior-tamper", "slot-prior-race", "slot-profile-mode", "slot-interrupted-before", "slot-interrupted-after"])
     func newProfilePublicationKeepsExistingProgressAndPublishesWholeSave(_ fault: String) async throws {
         let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
         let fixture = SNESLibraryMaterialTests(), (library, originals) = try fixture.fixture(root), menu = try fixture.menu(library, originals)
         let code = "CLV-U-A0001", base = "clover/profiles/0/\(code)/", save = Data([1, 2, 3]), hash = Data([4, 5])
-        let isSlot = fault.hasPrefix("slot-")
+        let isSlot = fault.hasPrefix("slot-") || fault.hasPrefix("same-slot-")
         let contents: [String: Data] = fault == "suspend" || isSlot ? [
             "suspendpoint1/state.png": Data([10]), "suspendpoint1/state.time": Data([11]),
             "suspendpoint1/rollback/sram.hash": Data([12]), "suspendpoint1/rollback/0.break": Data([13])
@@ -420,13 +512,16 @@ import SwiftHakchiCore
         let priorFiles = [base + "cartridge.sram": Data([21, 22]), base + "cartridge.sram.hash": Data([23])]
         let source = try await backup(root, originals: originals, menu: menu,
             profileFiles: isSlot ? profileFiles.merging(priorFiles) { _, new in new } : profileFiles, profileModified: 1700000000)
-        let target = String(repeating: "2", count: 32), old = originalGamesBinding()
+        let old = originalGamesBinding(), sameConsole = fault.hasPrefix("same-")
+        let target = sameConsole ? old.expectedHWID : String(repeating: "2", count: 32)
         var frame = originalGamesFrameFixture()
         let range = try #require(frame.range(of: Data(("HWID " + old.expectedHWID).utf8)))
         frame.replaceSubrange(range, with: Data(("HWID " + target).utf8))
         let binding = SNESRuntimeBinding(sourceSnapshot: old.sourceSnapshot, setupManifestSHA256: old.setupManifestSHA256, expectedHWID: target)
         let targetOriginals = try SNESOriginalGamesFrame(frame, binding: binding, challenge: originalGamesChallenge)
-        let replacement = try SNESLibraryRestore.prepareReplacement(backup: source, originals: targetOriginals, destinationHWID: target)
+        let replacement = try sameConsole
+            ? SNESLibraryRestore.prepareSameConsoleSavedData(backup: source, originals: targetOriginals, destinationHWID: target)
+            : SNESLibraryRestore.prepareReplacement(backup: source, originals: targetOriginals, destinationHWID: target)
         let destination = try await backup(root, originals: originals, menu: menu, profileFiles: isSlot ? priorFiles : [:],
                                            profileModified: isSlot ? 1700000000 : 0, hwid: target)
         let plan = try SNESReplacementSavePlan.prepare(replacement: replacement, destination: destination, gameCodes: [code])
@@ -501,14 +596,14 @@ import SwiftHakchiCore
                 try data.write(to: file)
                 try FileManager.default.setAttributes([.posixPermissions: 0o600, .modificationDate: Date(timeIntervalSince1970: 1700000000)], ofItemAtPath: file.path)
             }
-            if fault == "slot-occupied" {
+            if fault == "slot-occupied" || fault == "same-slot-occupied" {
                 try FileManager.default.createDirectory(at: publicationTarget, withIntermediateDirectories: false)
                 try sentinel.write(to: publicationTarget.appendingPathComponent("existing"))
             }
             if fault == "slot-prior-tamper" { try Data([99]).write(to: targetPath.appendingPathComponent("cartridge.sram")) }
             if fault == "slot-profile-mode" { try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: targetPath.path) }
         }
-        if fault == "occupied" {
+        if fault == "occupied" || fault == "same-occupied" {
             try FileManager.default.createDirectory(at: targetPath, withIntermediateDirectories: false)
             try sentinel.write(to: targetPath.appendingPathComponent("existing"))
         } else if fault == "symlink" {
@@ -533,10 +628,10 @@ import SwiftHakchiCore
             .replacingOccurrences(of: "440b72b46c50939356768f35ea02b682176ca49ef07b3702ee75912af74aabd6", with: pin)
             .replacingOccurrences(of: runtimeHash, with: actualRuntimeHash)
             .replacingOccurrences(of: "test \"$chip\" = '\(target)'", with: "test \"$chip\" = '\(String(repeating: "1", count: 32))'")
-        if fault == "interrupted-before-rename" || fault == "slot-interrupted-before" {
+        if ["interrupted-before-rename", "same-interrupted-before-rename", "slot-interrupted-before", "same-slot-interrupted-before"].contains(fault) {
             script = script.replacingOccurrences(of: "result=$(\"$H\" ", with: "exit 99\nresult=$(\"$H\" ")
         }
-        if fault == "interrupted-after-rename" || fault == "slot-interrupted-after" {
+        if ["interrupted-after-rename", "same-interrupted-after-rename", "slot-interrupted-after", "same-slot-interrupted-after"].contains(fault) {
             script = script.replacingOccurrences(of: "test \"$result\" = PROFILE_SWITCHED\n", with: "test \"$result\" = PROFILE_SWITCHED\nexit 98\n")
         }
         if fault == "ready-tamper" {
@@ -567,7 +662,7 @@ import SwiftHakchiCore
         for (index, name) in contents.keys.sorted().enumerated() where fault != "bad-stage" || index != 0 {
             #expect(try Data(contentsOf: stage.appendingPathComponent(String(format: "%04d", index))) == contents[name])
         }
-        if fault == "valid" || fault == "suspend" || fault == "slot-valid" {
+        if fault == "valid" || fault == "same-valid" || fault == "same-slot-valid" || fault == "suspend" || fault == "slot-valid" {
             #expect(process.terminationStatus == 0, "\(String(decoding: error, as: UTF8.self))")
             #expect(reply == request.receipt)
             for (name, data) in contents {
@@ -579,13 +674,13 @@ import SwiftHakchiCore
             }
         } else {
             #expect(process.terminationStatus != 0)
-            if fault == "occupied" { #expect(try Data(contentsOf: targetPath.appendingPathComponent("existing")) == sentinel) }
+            if fault == "occupied" || fault == "same-occupied" { #expect(try Data(contentsOf: targetPath.appendingPathComponent("existing")) == sentinel) }
             if fault == "symlink" { #expect(try FileManager.default.destinationOfSymbolicLink(atPath: targetPath.path) == runtime.path) }
-            if fault == "interrupted-before-rename" {
+            if fault == "interrupted-before-rename" || fault == "same-interrupted-before-rename" {
                 #expect(try FileManager.default.contentsOfDirectory(atPath: targetPath.path).isEmpty)
                 #expect(try Data(contentsOf: stage.appendingPathComponent("publication/cartridge.sram")) == save)
             }
-            if fault == "interrupted-after-rename" {
+            if fault == "interrupted-after-rename" || fault == "same-interrupted-after-rename" {
                 #expect(try Data(contentsOf: targetPath.appendingPathComponent("cartridge.sram")) == save)
                 #expect(try Data(contentsOf: targetPath.appendingPathComponent("cartridge.sram.hash")) == hash)
                 #expect(reply.isEmpty)
@@ -600,15 +695,15 @@ import SwiftHakchiCore
             if fault == "helper-missing" || fault == "helper-changed" { #expect(!FileManager.default.fileExists(atPath: targetPath.path)) }
             if fault == "destination-race" { #expect(try Data(contentsOf: targetPath.appendingPathComponent("other")) == Data("other".utf8)) }
             if fault == "extra-after-rename" { #expect(try Data(contentsOf: targetPath.appendingPathComponent("foreign")) == Data("foreign".utf8)) }
-            if fault == "slot-occupied" { #expect(try Data(contentsOf: publicationTarget.appendingPathComponent("existing")) == sentinel) }
+            if fault == "slot-occupied" || fault == "same-slot-occupied" { #expect(try Data(contentsOf: publicationTarget.appendingPathComponent("existing")) == sentinel) }
             if fault == "slot-prior-tamper" { #expect(try Data(contentsOf: targetPath.appendingPathComponent("cartridge.sram")) == Data([99])) }
             if fault == "slot-prior-race" { #expect(try Data(contentsOf: targetPath.appendingPathComponent("cartridge.sram")) == Data("changed".utf8)) }
             if fault == "slot-profile-mode" { #expect(!FileManager.default.fileExists(atPath: stage.appendingPathComponent("publication").path)) }
-            if fault == "slot-interrupted-before" {
+            if fault == "slot-interrupted-before" || fault == "same-slot-interrupted-before" {
                 #expect(try FileManager.default.contentsOfDirectory(atPath: publicationTarget.path).isEmpty)
                 #expect(try Data(contentsOf: stage.appendingPathComponent("publication/state.png")) == Data([10]))
             }
-            if fault == "slot-interrupted-after" { #expect(try Data(contentsOf: publicationTarget.appendingPathComponent("state.png")) == Data([10])) }
+            if fault == "slot-interrupted-after" || fault == "same-slot-interrupted-after" { #expect(try Data(contentsOf: publicationTarget.appendingPathComponent("state.png")) == Data([10])) }
         }
         if isSlot && fault != "slot-prior-tamper" && fault != "slot-prior-race" {
             #expect(try Data(contentsOf: targetPath.appendingPathComponent("cartridge.sram")) == Data([21, 22]))
@@ -803,11 +898,19 @@ import SwiftHakchiCore
         let journals = root.appendingPathComponent("slot-journals")
         try FileManager.default.createDirectory(at: journals, withIntermediateDirectories: false)
         let prepared = try SNESReplacementSaveJournal.prepare(review: review, root: journals)
-        let journal = try SNESReplacementSaveJournal(operation: prepared.operation, reviewSHA256: prepared.reviewSHA256, originals: targetOriginals)
+        var journal = try SNESReplacementSaveJournal(operation: prepared.operation, reviewSHA256: prepared.reviewSHA256, originals: targetOriginals)
         let runtime = String(repeating: "b", count: 64), helper = SNESReplacementSaveHelper.sha256
         await #expect(throws: (any Error).self) { try await journal.publicationSummary(group: 0) }
+        await #expect(throws: (any Error).self) { try await journal.markInterruptedStageForReview() }
         _ = try await journal.recordStageIntent(group: 0, before: before.inventory, runtimeSHA256: runtime, challenge: UUID(), approved: true)
-        try await journal.markUncertain()
+        // A restart after intent must be reviewable without authorizing a retry.
+        try await journal.close()
+        let resumed = try SNESReplacementSaveJournal(operation: prepared.operation, reviewSHA256: prepared.reviewSHA256, originals: targetOriginals)
+        try await resumed.markInterruptedStageForReview()
+        #expect(try await resumed.phase() == .uncertain)
+        await #expect(throws: (any Error).self) { try await resumed.markInterruptedStageForReview() }
+        try await resumed.close()
+        journal = try SNESReplacementSaveJournal(operation: prepared.operation, reviewSHA256: prepared.reviewSHA256, originals: targetOriginals)
         let summary = try await journal.publicationSummary(group: 0)
         #expect(summary.gameCode == code && summary.saveDescription == "Suspend point 1")
         #expect(summary.fileCount == 4 && summary.byteCount == 4 && summary.existingProfile)
@@ -1298,6 +1401,9 @@ import SwiftHakchiCore
             runtimeSHA256: String(repeating: "b", count: 64), challenge: transferID)
         #expect(reopenedStage.receipt == stageRequest.receipt)
         #expect(reopenedStage.input == stageRequest.input)
+        // An older unbound intent has no identifiable temporary stage and
+        // must not enter the newer staged-review path.
+        await #expect(throws: (any Error).self) { try await resumed.markInterruptedStageForReview() }
         try await resumed.markUncertain()
         await #expect(throws: (any Error).self) { try await resumed.preparePayload(group: 0, challenge: transferID) }
         // Older records without a bound stage cannot prove which attempt

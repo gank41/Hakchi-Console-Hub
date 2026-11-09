@@ -22,11 +22,19 @@ private actor LegacyIdentityFixture: LegacyRequestExecuting {
 private actor LegacyBackupIdentityFixture: LegacyRequestExecuting {
     let underlying = LegacyConsoleFixture()
     let chipID: Data
-    init(_ chipID: String) { self.chipID = Data(chipID.utf8) }
+    let alternate: Data?
+    let changeAtRead: Int
+    var identityReads = 0
+    init(_ chipID: String, alternate: String? = nil, changeAtRead: Int = .max) {
+        self.chipID = Data(chipID.utf8); self.alternate = alternate.map { Data($0.utf8) }
+        self.changeAtRead = changeAtRead
+    }
     func execute(_ request: LegacyReadRequest, timeoutMilliseconds: Int) async throws -> SSHResult {
         if case .chipID = request {
-            return SSHResult(stdout: String(decoding: chipID, as: UTF8.self), stderr: "",
-                             stdoutData: chipID, exitCode: 0)
+            identityReads += 1
+            let output = identityReads >= changeAtRead ? alternate ?? chipID : chipID
+            return SSHResult(stdout: String(decoding: output, as: UTF8.self), stderr: "",
+                             stdoutData: output, exitCode: 0)
         }
         return await underlying.execute(request, timeoutMilliseconds: timeoutMilliseconds)
     }
@@ -53,7 +61,19 @@ struct LegacyDeviceIdentityTests {
             fingerprint: BackupManifest.digest(Data(id.utf8))))
         #expect(!LegacyDeviceIdentity.matches("7777777789abcdef0011223344556677",
             fingerprint: BackupManifest.digest(Data(id.utf8))))
-        #expect(throws: (any Error).self) { try LegacyDeviceIdentity.requireFirstNES(id) }
+        #expect(throws: (any Error).self) { try LegacyDeviceIdentity.requireOperationIdentity(id, fingerprint: nil) }
+    }
+
+    @Test func readOnlyInspectionReportsUnboundAndRefusesMismatchedBoundConsole() throws {
+        let id = try LegacyDeviceIdentity.parse(Data(fixture.utf8))
+        #expect(try !LegacyDeviceIdentity.requireReadOnlyInspection(id, fingerprint: nil))
+        #expect(try LegacyDeviceIdentity.requireReadOnlyInspection(id, fingerprint: BackupManifest.digest(Data(id.utf8))))
+        #expect(throws: (any Error).self) {
+            try LegacyDeviceIdentity.requireReadOnlyInspection(id, fingerprint: String(repeating: "f", count: 64))
+        }
+        #expect(throws: (any Error).self) {
+            try LegacyDeviceIdentity.requireReadOnlyInspection(String(repeating: "0", count: 32), fingerprint: nil)
+        }
     }
 
     @Test(arguments: [
@@ -82,11 +102,22 @@ struct LegacyDeviceIdentityTests {
         #expect(!output.contains(id))
     }
 
+    @Test func readOnlyDiagnosticAcceptsMultipleValidConsolesWithoutExposingIDs() async throws {
+        let alternate = fixture.replacingOccurrences(of: "0x01234567", with: "0x11223344")
+        for response in [fixture, alternate] {
+            let id = try LegacyDeviceIdentity.parse(Data(response.utf8))
+            let output = try await LegacyDeviceIdentityDiagnostic.run(client: LegacyIdentityFixture(response))
+            #expect(output.contains("\"identityRead\" : true"))
+            #expect(!output.contains("identityMatched"))
+            #expect(!output.contains(id))
+        }
+    }
+
     @Test func diagnosticRejectsMismatchedLiveIdentity() async {
         await #expect(throws: (any Error).self) {
             try await LegacyDeviceIdentityDiagnostic.run(
                 client: LegacyIdentityFixture(fixture),
-                expectedFingerprint: LegacyBoot2ActivationPlan.supportedHWIDSHA256)
+                expectedFingerprint: BackupManifest.digest(Data(String(repeating: "f", count: 32).utf8)))
         }
     }
 
@@ -101,5 +132,34 @@ struct LegacyDeviceIdentityTests {
         let children = try FileManager.default.contentsOfDirectory(at: destination, includingPropertiesForKeys: nil)
         #expect(children.count == 1)
         try LegacyGameChangeService.verifyBackup(children[0])
+    }
+
+    @Test func backupWorksForEitherConsoleAndChecksIdentityThroughout() async throws {
+        let alternate = fixture.replacingOccurrences(of: "0x01234567", with: "0x11223344")
+        for response in [fixture, alternate] {
+            let destination = try testDirectory(); defer { try? FileManager.default.removeItem(at: destination) }
+            let output = try await LegacyBackupDiagnostic.run(client: LegacyBackupIdentityFixture(response),
+                                                              destination: destination)
+            #expect(output.contains("\"verified\" : true"))
+            #expect(!output.contains(try LegacyDeviceIdentity.parse(Data(response.utf8))))
+        }
+        let destination = try testDirectory(); defer { try? FileManager.default.removeItem(at: destination) }
+        await #expect(throws: (any Error).self) {
+            _ = try await LegacyBackupDiagnostic.run(client: LegacyBackupIdentityFixture(fixture,
+                alternate: alternate, changeAtRead: 3), destination: destination)
+        }
+        let partials = try FileManager.default.contentsOfDirectory(at: destination, includingPropertiesForKeys: nil)
+        for directory in partials {
+            #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("manifest.json").path))
+        }
+    }
+
+    @Test func backupExplicitIdentityMismatchCreatesNoArchive() async throws {
+        let destination = try testDirectory(); defer { try? FileManager.default.removeItem(at: destination) }
+        await #expect(throws: (any Error).self) {
+            _ = try await LegacyBackupDiagnostic.run(client: LegacyBackupIdentityFixture(fixture),
+                destination: destination, expectedFingerprint: String(repeating: "f", count: 64))
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: destination.path).isEmpty)
     }
 }

@@ -1,8 +1,41 @@
 import Foundation
+import Darwin
 import Testing
 @testable import SwiftHakchi
 
 @MainActor struct SNESPortableLibraryBackupTests {
+    @Test(arguments: ["file", "group", "output", "staging", "destination"])
+    func copyReportsFailedDurabilityWithoutDamagingTheOriginal(_ point: String) async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let sourceRoot = root.appendingPathComponent("source"), target = root.appendingPathComponent("target")
+        for directory in [sourceRoot, target] { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+        let fixture = SNESLibraryInventoryTests(), challenge = UUID()
+        let inventory = try fixture.parse(fixture.frame(challenge: challenge), challenge: challenge)
+        let source = try await SNESLibraryBackup.capture(inventory: inventory, root: sourceRoot,
+            read: { _, _ in Data("{}".utf8) }, refresh: { inventory })
+        var injected = false
+        do {
+            _ = try SNESPortableLibraryBackup.copy(source.directory, to: target, synchronize: { fd, checkpoint in
+                if String(describing: checkpoint) == point { injected = true; return -1 }
+                return Darwin.fsync(fd)
+            })
+            Issue.record("The copy must not report success when its \(point) flush fails")
+        } catch {
+            if point == "destination" { #expect(error.localizedDescription.contains("copy was created")) }
+            else { #expect(error.localizedDescription.contains(".portable-")) }
+        }
+        #expect(injected)
+        try source.validate()
+        let destination = target.appendingPathComponent(source.directory.lastPathComponent)
+        if point == "destination" {
+            let retained = try SNESLibraryBackup.open(directory: destination)
+            #expect(retained.manifestSHA256 == source.manifestSHA256)
+        } else {
+            let remaining = try FileManager.default.contentsOfDirectory(atPath: target.path)
+            #expect(remaining.count == 1 && remaining[0].hasPrefix(".portable-"))
+            #expect(!FileManager.default.fileExists(atPath: destination.path))
+        }
+    }
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_PORTABLE_BACKUP"] != nil))
     func existingLibraryBackupCanBeCopiedAndReopenedWithoutAConsole() throws {
         let path = try #require(ProcessInfo.processInfo.environment["SWIFTHAKCHI_PORTABLE_BACKUP"])
@@ -22,6 +55,11 @@ import Testing
         for directory in [source, target] { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
         let save = "clover/profiles/0/CLV-U-A0001/cartridge.sram"
         let backup = try await SNESLibraryRestoreTests().backup(source, originals: originals, menu: menu, profileFiles: [save: Data([1, 2, 3])])
+        // Never create a temporary copy inside the original snapshot or one
+        // of its data directories: that would make the backup invalid.
+        #expect(throws: (any Error).self) { try SNESPortableLibraryBackup.copy(backup.directory, to: backup.directory) }
+        #expect(throws: (any Error).self) { try SNESPortableLibraryBackup.copy(backup.directory, to: backup.directory.appendingPathComponent("data-0")) }
+        try backup.validate()
         let objects = backup.inventory.files.filter { $0.path.hasPrefix("objects/") }
         #expect(!objects.isEmpty)
         let expected = try objects.map { ($0.path, try backup.read(path: $0.path)) }
@@ -40,6 +78,54 @@ import Testing
         let review = try SNESLibraryRestore.prepareReplacement(backup: reopened, originals: targetOriginals, destinationHWID: targetID)
         #expect(try #require(review.menu).objects == menu.objects)
         #expect(try review.readSave(path: save) == Data([1, 2, 3]))
+    }
+    @Test func staleDestinationHandleCannotOverwriteAnotherFolder() throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("stage"), moved = root.appendingPathComponent("held")
+        let other = root.appendingPathComponent("other")
+        try FileManager.default.createDirectory(at: original, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: false)
+        let victim = other.appendingPathComponent("manifest.json")
+        try Data("do not replace".utf8).write(to: victim)
+        let held = try RestoreDirectory(original)
+        try FileManager.default.moveItem(at: original, to: moved)
+        try FileManager.default.createSymbolicLink(at: original, withDestinationURL: other)
+        #expect(throws: (any Error).self) {
+            try SNESPortableLibraryBackup.writeForCopy(Data("wrong".utf8), name: "manifest.json", folder: held, synchronize: { Darwin.fsync($0) })
+        }
+        #expect(try Data(contentsOf: victim) == Data("do not replace".utf8))
+    }
+    @Test func substitutedStageIsNotRemovedOrOfferedAsTheUnfinishedCopy() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let sourceRoot = root.appendingPathComponent("source"), target = root.appendingPathComponent("target")
+        for directory in [sourceRoot, target] { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false) }
+        let fixture = SNESLibraryInventoryTests(), challenge = UUID()
+        let inventory = try fixture.parse(fixture.frame(challenge: challenge), challenge: challenge)
+        let backup = try await SNESLibraryBackup.capture(inventory: inventory, root: sourceRoot,
+            read: { _, _ in Data("{}".utf8) }, refresh: { inventory })
+        var replaced: URL?
+        do {
+            _ = try SNESPortableLibraryBackup.copy(backup.directory, to: target, synchronize: { _, point in
+                if case .file = point {
+                    do {
+                        let name = try #require(FileManager.default.contentsOfDirectory(atPath: target.path).first { $0.hasPrefix(".portable-") })
+                        let oldPath = target.appendingPathComponent(name)
+                        try FileManager.default.moveItem(at: oldPath, to: root.appendingPathComponent("moved-stage"))
+                        try FileManager.default.createDirectory(at: oldPath, withIntermediateDirectories: false)
+                        try Data("unrelated".utf8).write(to: oldPath.appendingPathComponent("keep"))
+                        replaced = oldPath
+                    } catch { Issue.record("Could not substitute the test stage: \(error)") }
+                    return -1
+                }
+                return -1
+            })
+            Issue.record("A changed staging folder must not be accepted")
+        } catch {
+            #expect(error.localizedDescription.contains("folder moved or changed"))
+        }
+        let directory = try #require(replaced)
+        #expect(try Data(contentsOf: directory.appendingPathComponent("keep")) == Data("unrelated".utf8))
+        try backup.validate()
     }
     @Test func copyCanBeImportedAndVerifiedOnAnotherMacWithoutTheOriginal() async throws {
         let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
@@ -63,6 +149,14 @@ import Testing
         let reopened = try SNESLibraryBackup.open(directory: imported)
         #expect(reopened.manifestSHA256 == original.manifestSHA256)
         #expect(try reopened.read(path: "clover/settings.json") == Data("{}".utf8))
+        for directory in [imported, imported.appendingPathComponent("data-0")] {
+            let mode = try #require(FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber)
+            #expect(mode.intValue & 0o777 == 0o700)
+        }
+        for file in [imported.appendingPathComponent("manifest.json"), imported.appendingPathComponent("data-0/file-0000.bin")] {
+            let mode = try #require(FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)
+            #expect(mode.intValue & 0o777 == 0o600)
+        }
     }
 
     @Test(arguments: ["changed", "link", "existing"])
@@ -83,6 +177,8 @@ import Testing
         let existing = targetRoot.appendingPathComponent(backup.directory.lastPathComponent)
         if fault == "existing" { try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: true) }
         #expect(throws: (any Error).self) { try SNESPortableLibraryBackup.copy(backup.directory, to: targetRoot) }
-        #expect(try FileManager.default.contentsOfDirectory(atPath: targetRoot.path) == (fault == "existing" ? [existing.lastPathComponent] : []))
+        let remaining = try FileManager.default.contentsOfDirectory(atPath: targetRoot.path)
+        if fault == "existing" { #expect(remaining == [existing.lastPathComponent]) }
+        else { #expect(remaining.count == 1 && remaining[0].hasPrefix(".portable-")) }
     }
 }

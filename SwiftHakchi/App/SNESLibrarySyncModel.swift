@@ -17,6 +17,7 @@ import SwiftHakchiCore
     @Published private(set) var addedGames = 0
     @Published private(set) var removedGames = 0
     @Published private(set) var totalGames = 0
+    @Published var createFinalBackup = false
     @Published private(set) var isReturningPrevious=false
     @Published private var canReturnToPrevious=false
     private var rollbackReview:SNESLibraryInventory?
@@ -33,12 +34,15 @@ import SwiftHakchiCore
     private var session: SNESLibraryConnectionSession?, context: SNESLibraryContext?, observation: SNESLibraryObservation?
     private var journal: SNESLibraryJournal?, operation: URL?, plan: SNESLibrarySyncPlan?, scope: SNESLibraryCleanupPlan?, cleanup: SNESLibraryCleanupObservation?
     private var discardReview: SNESLibraryConnectionSession.DiscardReview?
-    private enum BackupContinuation { case prepare, confirmTest, inspect }
+    private enum BackupContinuation { case prepare, confirmTest, inspect, deferredCleanup }
     private var backupContinuation = BackupContinuation.prepare, backupCreationApproved = false
     private var unownedMaterial: SNESLibraryMaterial?
     private var reviewedFingerprint: String?
     private var navigation: SNESLibraryMenu.NavigationArtwork?
     private var ownsConnection = false, closed = false
+    private var pendingReviewContext: SNESLibraryContext?
+    private var deferredBackupForReuse: SNESLibraryBackup?
+    private var approvedRecoveryBackupForReview = false
     init(app: AppState, originalsOnly: Bool = false, restoreSnapshot: SNESLibrarySnapshotReference? = nil,
          replacementSnapshot: SNESLibrarySnapshotReference? = nil) {
         self.app = app; self.originalsOnly = originalsOnly; self.restoreSnapshot = restoreSnapshot
@@ -76,7 +80,23 @@ import SwiftHakchiCore
             guard let current = app.deviceManager.nativeSNESContext, let reader = app.deviceManager.nativeSNES else { throw fail("Connect your SNES before opening Sync Library.") }
             try await reader.requireCurrent(current)
             records = try current.ownerRecords()
-            if current.supportsLibraryRecovery, try await openPendingReview(current) { return }
+            pendingReviewContext = current
+            if current.supportsLibraryRecovery, try await openPendingReview(current) {
+                guard try await journal?.phase() == .finishedKeepingPrevious else { return }
+                phase = .deferredReady
+                message = "Before this sync, the app will back up your current console and remove the previous sync’s old copy. Your current games and saves stay."
+                return
+            }
+            try await openReview(current, app: app)
+        } catch is SNESLibraryBackupCreationRequired {
+            backupCreationApproved = false; phase = .backupNeeded; detail = nil
+            message = "A recovery backup is needed before the previous console copy can be removed. Choose Back Up Now and Review to continue."
+        } catch {
+            await session?.disconnect(); session = nil; context = nil
+            phase = .interrupted; detail = error.localizedDescription; message = "The SNES review could not be opened. Your saved recovery files are kept."
+        }
+    }
+    private func openReview(_ current: SNESLibraryContext, app: AppState) async throws {
             let originals = current.installation.originals.frame
             guard restoreSnapshot == nil || replacementSnapshot == nil else { throw fail("Choose one saved library to review.") }
             if let snapshot = replacementSnapshot ?? restoreSnapshot {
@@ -98,14 +118,13 @@ import SwiftHakchiCore
                 phase = .needsSetup; message = "This SNES needs setup before games can be synced. Open Set Up SNES to review the preview setup steps. Your console has not been changed."
                 rebuildPreview(); return
             }
-            await app.deviceManager.pauseForRecovery(); ownsConnection = true
+            if !ownsConnection { await app.deviceManager.pauseForRecovery(); ownsConnection = true }
             let (source, value) = try await binding()
             let observed = try await source.observe(value)
             observation = observed; freeBytes = observed.capacity.freeBytes
             phase = .review
             message = isRestoringReplacement ? "Review games and folders from the other SNES. Saved-game progress is not copied yet; saves already on this console are kept." : isRestoringSavedGames ? "Restore this saved game library and its folders. Keep the saves and settings currently on your console and leave your Mac library unchanged." : originalsOnly ? "Show only the console’s original games. Your added games are backed up on the Mac before this change; saves and your Mac library stay." : "Review your selected games and console folders."
             rebuildPreview()
-        } catch { phase = .interrupted; detail = error.localizedDescription; message = "The SNES review could not be opened." }
     }
     /// Retry only opening a review; interrupted writes always use the saved-operation inspection instead.
     func retryOpening() async {
@@ -149,6 +168,9 @@ import SwiftHakchiCore
             await session?.disconnect(); session = nil; context = nil
             let (source, value) = try await binding()
             switch try await journal.phase() {
+            case .finishedKeepingPrevious:
+                phase = .deferredReady
+                message = "Before the next sync, the app needs to safely remove the previous game-menu copy. Leave the SNES at its game menu, then choose Continue Sync."
             case .rollbackIntent,.rollbackUncertain,.rollbackAwaitingRestart:
                 isReturningPrevious=true
                 if try await journal.phase() == .rollbackIntent {try await journal.rollbackUncertain()}
@@ -214,7 +236,7 @@ import SwiftHakchiCore
                     try SNESLibraryActiveCheck.require(plan, inventory: observed.inventory, preserveProfiles: false)
                     freeBytes = observed.capacity.freeBytes
                 }
-                canReturnToPrevious=true;phase = .testing; message = "Check the menu and play an added game and a built-in game before finishing."
+                canReturnToPrevious=true;phase = .testing; message = "Your updated game menu is ready. Choose whether to save an additional backup, then finish syncing."
             case .discardIntent, .discardUncertain:
                 if try await journal.phase() == .discardIntent { try await journal.discardUncertain() }
                 let permit = try await journal.reconciliation()
@@ -247,7 +269,7 @@ import SwiftHakchiCore
                 let preview = try await source.previewCleanup(plan: plan, scope: scope, reconciliation: updatedPermit)
                 self.scope = scope; cleanup = preview; backupDirectory = current.directory; reclaimBytes = preview.presentFileBytes
                 freeBytes = preview.freeBytes; phase = .readyToFinish
-                message = "Your tested library and current saves are backed up on the Mac. Review Finish Sync to remove the remaining temporary files."
+                message = "Your current games and saves are backed up on the Mac. Finish syncing to remove the older console copy."
             default: throw fail("Close this review and reopen Sync Library to read its current status.")
             }
             if phase.isTerminal { await clearFinishedCache() }
@@ -404,12 +426,20 @@ import SwiftHakchiCore
             case .rollback: try await returnPreviousGames()
             case .checkRollbackRestart: try await checkPreviousRestart()
             case .prepare: try await prepare()
+            case .clearDeferred:
+                try await clearPreviousCopyForNextSync()
+                guard let current = pendingReviewContext, let app else { throw fail("Reconnect the SNES and reopen Sync Library.") }
+                try await openReview(current, app: app)
             case .createBackup:
                 backupCreationApproved = true
                 switch backupContinuation {
                 case .prepare: phase = .review; try await prepare()
                 case .confirmTest: try await confirmTest()
                 case .inspect: phase = .interrupted; await inspectInterruptedSync()
+                case .deferredCleanup:
+                    try await clearPreviousCopyForNextSync()
+                    guard let current = pendingReviewContext, let app else { throw fail("Reconnect the SNES and reopen Sync Library.") }
+                    try await openReview(current, app: app)
                 }
             case .copy: try await copy()
             case .show: try await show()
@@ -448,8 +478,9 @@ import SwiftHakchiCore
         let before = try await source.observe(value), roots = workspace.knownBackupRoots
         let matching = try await Task.detached { try SNESLibraryBackup.matching(inventory: before.inventory, roots: roots) }.value
         backupContinuation = .prepare
-        let backup = try await source.captureBackup(before, root: workspace.backups, reusing: [matching].compactMap { $0 }, allowCreation: AppConfig.shared.automaticallyCreateMissingBackup || backupCreationApproved)
+        let backup = try await source.captureBackup(before, root: workspace.backups, reusing: [matching, deferredBackupForReuse].compactMap { $0 }, allowCreation: AppConfig.shared.automaticallyCreateMissingBackup || backupCreationApproved || approvedRecoveryBackupForReview)
         backupCreationApproved = false
+        approvedRecoveryBackupForReview = false; deferredBackupForReuse = nil
         let fresh = try await source.observe(value)
         // Don't create a full temporary ROM package for a failed read or an unanswered backup decision.
         let material = try SNESLibraryMaterial.freeze(menu: menu, in: materials)
@@ -542,13 +573,68 @@ import SwiftHakchiCore
         let previous = try await journal.restartAttachment()
         let proof = try await source.verifyRestarted(plan: plan, previousAttachment: previous)
         try await journal.noteRestarted(proof)
-        canReturnToPrevious=true;phase = .testing; message = "Check your folder links and artwork. Play an added game and a built-in game, then return to the first game screen."
+        canReturnToPrevious=true;phase = .testing; message = "Your updated game menu is ready. Choose whether to save an additional backup, then finish syncing."
+    }
+    /// Reclaim the one deferred previous copy before starting a new sync. The
+    /// ordinary current backup and the original cleanup checks remain required.
+    private func clearPreviousCopyForNextSync() async throws {
+        guard let plan, let journal, let records, try await journal.phase() == .finishedKeepingPrevious else {
+            throw fail("The previous sync needs to be checked before continuing.")
+        }
+        phase = .clearingPrevious
+        let (source, value) = try await binding()
+        let before = try await source.observe(value)
+        try SNESLibraryActiveCheck.require(plan, inventory: before.inventory, preserveProfiles: false)
+        try workspace.requireActiveBackupsAvailable()
+        try FileManager.default.createDirectory(at: workspace.backups, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let roots = workspace.knownBackupRoots
+        let matching = try await Task.detached { try SNESLibraryBackup.matching(inventory: before.inventory, roots: roots) }.value
+        backupContinuation = .deferredCleanup
+        let current = try await source.captureBackup(before, root: workspace.backups, material: plan.material,
+            reusing: [matching, plan.backup].compactMap { $0 }, allowCreation: AppConfig.shared.automaticallyCreateMissingBackup || backupCreationApproved)
+        let approvedForReview = backupCreationApproved
+        backupCreationApproved = false
+        let fresh = try await source.observe(value)
+        try await journal.accept(backup: current, originals: records.installation.originals.frame, current: fresh.inventory)
+        let scope = try SNESLibraryCleanupPlan.prepare(plan: plan, current: fresh.inventory, backup: current, originals: records.installation.originals.frame)
+        let preview = try await source.previewCleanup(plan: plan, scope: scope)
+        if preview.allGone {
+            let permit = try await journal.reconciliation()
+            let inventory = try await source.observe(value, reconciliation: permit)
+            let updated = try await source.previewCleanup(plan: plan, scope: scope, reconciliation: permit)
+            try await journal.recordInspectedCleanup(scope: scope, preview: updated, inventory: inventory.inventory)
+            freeBytes = updated.freeBytes
+            await source.disconnect()
+        } else {
+            let result = try await SNESLibraryCleanupTransaction.run(plan: plan, journal: journal, scope: scope, preview: preview, device: source,
+                refresh: {
+                    let permit = try await journal.reconciliation()
+                    return try await source.previewCleanup(plan: plan, scope: scope, reconciliation: permit)
+                })
+            freeBytes = result.after.freeBytes
+        }
+        session = nil; context = nil
+        if let issue = try await journal.closeCompleted() { detail = issue }
+        self.journal = nil; self.plan = nil; operation = nil; self.scope = nil; cleanup = nil
+        deferredBackupForReuse = current; approvedRecoveryBackupForReview = approvedForReview
+        backupDirectory = current.directory; canReturnToPrevious = false
     }
     private func confirmTest() async throws {
         guard let plan, let journal, let records else { throw fail("The saved sync review is missing.") }
+        if !createFinalBackup {
+            phase = .checkingCompletion
+            let (source, value) = try await binding()
+            let current = try await source.observe(value)
+            try await journal.finishKeepingPrevious(current: current.inventory)
+            freeBytes = current.capacity.freeBytes
+            await source.disconnect(); session = nil; context = nil; canReturnToPrevious = false
+            phase = .complete
+            message = "Sync complete. Your updated games are ready. No additional backup was created. The previous console copy will be removed safely during your next sync. To change console setup or transfer saves first, open Sync Library and choose Continue Sync."
+            return
+        }
         phase = .savingBackup; let (source, value) = try await binding(), before = try await source.observe(value)
         backupContinuation = .confirmTest
-        let current = try await source.captureBackup(before, root: workspace.backups, material: plan.material, reusing: [plan.backup], allowCreation: AppConfig.shared.automaticallyCreateMissingBackup || backupCreationApproved)
+        let current = try await source.captureBackup(before, root: workspace.backups, material: plan.material, reusing: [plan.backup], allowCreation: true)
         backupCreationApproved = false
         let fresh = try await source.observe(value)
         try await journal.accept(backup: current, originals: records.installation.originals.frame, current: fresh.inventory)
@@ -556,7 +642,8 @@ import SwiftHakchiCore
         let preview = try await source.previewCleanup(plan: plan, scope: scope)
         self.scope = scope; cleanup = preview; backupDirectory = current.directory; reclaimBytes = preview.presentFileBytes
         freeBytes = preview.freeBytes; phase = .readyToFinish
-        message = "Your tested games and saves are backed up on this Mac. Choose Finish Sync to remove the older console copy and free space. Your current games and saves stay."
+        message = "Your current games and saves are backed up. The app is finishing the sync."
+        try await finish()
     }
     private func finish() async throws {
         guard let plan, let journal, let scope, let cleanup else { throw fail("Refresh the cleanup review before finishing.") }
@@ -587,7 +674,7 @@ import SwiftHakchiCore
         guard !closed else { return }; closed = true
         if !phase.isBusy, let journal {
             if (try? await journal.phase()) == .prepared { try? await journal.cancelUnstarted() }
-            if let state = try? await journal.phase(), [.finished, .discarded].contains(state) { try? await journal.purgePreparedMaterial() }
+            if let state = try? await journal.phase(), state.isTerminal { try? await journal.purgePreparedMaterial() }
         }
         try? await journal?.close(); journal = nil
         await session?.disconnect(); session = nil; context = nil

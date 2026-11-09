@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+# Private/local packaging only. Public builds must use build-public-dmg.sh.
+printf 'Local DMG builder: public releases require the build-public-dmg.sh check.\n' >&2
 app="${1:?Pass the signed app bundle printed by build-app.sh}"
 [[ -d "$app/Contents" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == com.swifthakchi.app ]]

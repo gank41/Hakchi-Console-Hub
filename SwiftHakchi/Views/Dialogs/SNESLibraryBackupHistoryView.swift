@@ -106,7 +106,7 @@ struct SNESLibraryBackupHistoryView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                             Button("Check Previous Transfer") { Task { await inspectPendingSaveTransfer() } }
                                 .disabled(working || !app.canReviewLibrarySync)
-                            if pendingSaveTransfer.phase == .uncertain {
+                            if [.writeIntent, .uncertain].contains(pendingSaveTransfer.phase) {
                                 Button("Review Saved Files…") { Task { await previewPendingSavePublication() } }
                                     .disabled(working || !app.canReviewLibrarySync)
                                 if let preview = publicationPreview {
@@ -148,7 +148,8 @@ struct SNESLibraryBackupHistoryView: View {
                 }
             }
             if let replacement {
-                GroupBox("Replacement console review") {
+                let sameConsole = replacement.sourceHWID == replacement.destinationHWID
+                GroupBox(sameConsole ? "Saved games for this SNES" : "Replacement console review") {
                     VStack(alignment: .leading, spacing: 5) {
                         Text("\(replacement.menu?.description.placements.filter { $0.kind == "import" }.count ?? 0) added games and \(replacement.saveFiles.count) saved-game files found.")
                         if !replacement.unmatchedProfileFiles.isEmpty {
@@ -156,12 +157,12 @@ struct SNESLibraryBackupHistoryView: View {
                                 .foregroundStyle(.orange)
                         }
                         if let replacementSaves {
-                            Text("Replacement backup: \(replacementSaves.entries.filter { $0.disposition == .new }.count) new, \(replacementSaves.entries.filter { $0.disposition == .unchanged }.count) already match, \(replacementSaves.entries.filter { $0.disposition == .conflict }.count) need a choice.")
+                            Text("Current console backup: \(replacementSaves.entries.filter { $0.disposition == .new }.count) not yet on the console, \(replacementSaves.entries.filter { $0.disposition == .unchanged }.count) already match, \(replacementSaves.entries.filter { $0.disposition == .conflict }.count) need review.")
                             let missing = replacementSaves.entries.filter { $0.gameMatch == .addedGameMissing }.count
                             let different = replacementSaves.entries.filter { $0.gameMatch == .addedGameDifferent }.count
-                            if missing > 0 { Text("\(missing) saved files belong to added games not currently on the replacement.").foregroundStyle(.orange) }
-                            if different > 0 { Text("\(different) saved files belong to added games that differ on the replacement.").foregroundStyle(.orange) }
-                            Text("This compares saved files and game details. It does not yet confirm that saved games or suspend points will work on the replacement.")
+                            if missing > 0 { Text("\(missing) saved files belong to games not currently on this SNES.").foregroundStyle(.orange) }
+                            if different > 0 { Text("\(different) saved files belong to games that differ on this SNES.").foregroundStyle(.orange) }
+                            Text("This experimental review can copy supported saved-game sets into empty locations. It does not overwrite existing saves or restore the entire console. The copied progress still needs to be tested.")
                                 .foregroundStyle(.secondary)
                             if !saveOptions.isEmpty {
                                 DisclosureGroup("Choose saved games to review") {
@@ -204,14 +205,16 @@ struct SNESLibraryBackupHistoryView: View {
                                 }
                             }
                         } else {
-                            Text("Make a current backup of the replacement to compare its saved games.")
+                            Text("Make a current backup of this SNES to compare its saved games.")
                                 .foregroundStyle(.secondary)
                         }
                         Text("Review games and saved progress separately before copying.").foregroundStyle(.secondary)
                         Button("Open Saved Review…") { chooseSavedSaveReview() }
                             .disabled(working || !app.canReviewLibrarySync)
-                        Button("Review Copying Games…") { beginReplacementCopy() }
-                            .disabled(working || replacementReference == nil || !app.canReviewLibrarySync)
+                        if !sameConsole {
+                            Button("Review Copying Games…") { beginReplacementCopy() }
+                                .disabled(working || replacementReference == nil || !app.canReviewLibrarySync)
+                        }
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -237,8 +240,14 @@ struct SNESLibraryBackupHistoryView: View {
             HStack {
                 Button("Move to Trash…") { Task { await reviewRemoval() } }.disabled(working || selected?.summary == nil || app.isPreparingSync)
                 Spacer()
-                Button("Review for Replacement…") { Task { await reviewReplacement() } }
-                    .disabled(working || selected?.summary == nil || currentHWID == nil || selected?.summary?.hwid == currentHWID || !app.canReviewLibrarySync)
+                if currentHWID != nil && selected?.summary?.hwid == currentHWID {
+                    Button("Review Saved Games…") { Task { await reviewReplacement(sameConsole: true) } }
+                        .disabled(working || !app.canReviewLibrarySync)
+                        .help("Review supported saved games that can be copied into empty locations. Existing saves are kept.")
+                } else {
+                    Button("Review for Replacement…") { Task { await reviewReplacement() } }
+                        .disabled(working || selected?.summary == nil || currentHWID == nil || !app.canReviewLibrarySync)
+                }
                 Button("Restore Games and Folders…") { Task { await reviewRestore() } }
                     .buttonStyle(.borderedProminent)
                     .disabled(working || selected?.summary?.hwid != currentHWID || currentHWID == nil || !app.canReviewLibrarySync)
@@ -421,7 +430,7 @@ struct SNESLibraryBackupHistoryView: View {
     }
     private func previewPendingSavePublication() async {
         guard !working, app.canReviewLibrarySync, let pending = pendingSaveTransfer, let stage = pending.stage,
-              pending.phase == .uncertain, let context = app.deviceManager.nativeSNESContext,
+              [.writeIntent, .uncertain].contains(pending.phase), let context = app.deviceManager.nativeSNESContext,
               let session = app.deviceManager.nativeSNES else { return }
         working = true; message = nil; defer { working = false }
         do {
@@ -431,9 +440,18 @@ struct SNESLibraryBackupHistoryView: View {
             }.value
             let preview: SNESReplacementSavePublicationPreview
             do {
+                // A crash may have left only the write-intent record. Preserve
+                // it as unresolved before the usual fresh console inspection.
+                // This changes only the Mac record and grants no write permit.
+                try await journal.requireNativeInspection(context: context)
+                if try await journal.phase() == .writeIntent {
+                    guard try await journal.recordedStage()?.group == stage.group else { throw SNESLibraryInventory.failure() }
+                    try await journal.markInterruptedStageForReview()
+                }
                 preview = try await session.previewReplacementSavePublication(journal: journal, group: stage.group)
                 try await journal.close()
             } catch { try? await journal.close(); throw error }
+            await refreshPendingSaveTransfer()
             guard app.deviceManager.nativeSNESContext?.sha256 == context.sha256,
                   pendingSaveTransfer?.operation == pending.operation else {
                 throw SNESLibraryBackupHistory.failure("The console connection changed. Check the transfer again.")
@@ -443,7 +461,10 @@ struct SNESLibraryBackupHistoryView: View {
             let place = item.existingProfile ? "This game already has saved files that must be kept." : "This game does not have a saved-data folder yet."
             let game = app.gameManager.games.first(where: { $0.code == item.gameCode })?.name ?? item.gameCode
             message = "\(item.saveDescription) for \(game): \(item.fileCount) files, \(bytes(item.byteCount)). \(place) The temporary files match. Nothing has been copied to the game yet. Keep both backups."
-        } catch { message = "The saved files could not be reviewed. Nothing was changed; keep both backups. \(error.localizedDescription)" }
+        } catch {
+            await refreshPendingSaveTransfer()
+            message = "The saved files could not be reviewed. Nothing was copied to the console; keep both backups. \(error.localizedDescription)"
+        }
     }
     private func inspectPendingSavePublication() async {
         guard !working, app.canReviewLibrarySync, let pending = pendingSaveTransfer,
@@ -712,7 +733,7 @@ struct SNESLibraryBackupHistoryView: View {
         }
     }
 
-    private func reviewReplacement() async {
+    private func reviewReplacement(sameConsole: Bool = false) async {
         guard let selection, !working, app.deviceManager.consoleType == .snesUsa, app.canReviewLibrarySync,
               let context = app.deviceManager.nativeSNESContext, let reader = app.deviceManager.nativeSNES else { return }
         let hwid = context.installation.expected.hwid
@@ -723,7 +744,9 @@ struct SNESLibraryBackupHistoryView: View {
             let (plan, saveReview, options, reference) = try await Task.detached {
                 try SNESLibraryBackupHistory.requireLocation(selection, workspace: paths)
                 let backup = try SNESLibraryBackup.open(directory: selection)
-                let plan = try SNESLibraryRestore.prepareReplacement(backup: backup, originals: originals, destinationHWID: hwid)
+                let plan = try sameConsole
+                    ? SNESLibraryRestore.prepareSameConsoleSavedData(backup: backup, originals: originals, destinationHWID: hwid)
+                    : SNESLibraryRestore.prepareReplacement(backup: backup, originals: originals, destinationHWID: hwid)
                 let current = try SNESLibraryBackup.matching(inventory: before.inventory, roots: paths.knownBackupRoots)
                 let comparison = try current.map { try plan.compareSaves(to: $0) }
                 let options = try comparison.map { try plan.saveOptions(comparison: $0) } ?? []
@@ -802,18 +825,18 @@ struct SNESLibraryBackupHistoryView: View {
             }
             savedSaveReview = .init(directory: directory.standardizedFileURL, sha256: review.sha256)
             if !result.conflictingPaths.isEmpty {
-                message = "Some saved files conflict with the replacement. Nothing was copied; these files need a separate review."
+                message = "Some saved files conflict with this SNES. Nothing was copied; these files need a separate review."
             } else if !result.canResume {
                 message = "A saved-game set is only partly present. Nothing was copied; it needs a separate review."
             } else if result.pendingPaths.isEmpty {
                 message = "The reviewed files are already present. Nothing was copied; check the games and progress on the console."
             } else {
-                message = "The review has \(result.pendingPaths.count) files not yet on the replacement. Choose Review Saved-Game Copy to see which sets can be copied."
+                message = "The review has \(result.pendingPaths.count) files not yet on this SNES. Choose Review Saved-Game Copy to see which sets can be copied."
             }
         } catch { message = error.localizedDescription }
     }
     private func beginReplacementCopy() {
-        guard replacement != nil, replacementReference != nil, app.canReviewLibrarySync,
+        guard let replacement, replacement.sourceHWID != replacement.destinationHWID, replacementReference != nil, app.canReviewLibrarySync,
               app.deviceManager.nativeSNESContext?.sha256 == replacementContextSHA256 else {
             clearReplacement(); message = "The console or selection changed. Review the backup again."; return
         }

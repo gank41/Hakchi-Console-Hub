@@ -12,7 +12,8 @@ import Foundation
         do {
             let lease = try await client.reserveForChange()
             do {
-                try LegacyDeviceIdentity.requireFirstNES(try await LegacyDeviceIdentity.read(client: lease))
+                let identityVerified = try LegacyDeviceIdentity.requireReadOnlyInspection(
+                    try await LegacyDeviceIdentity.read(client: lease), fingerprint: journal.effectiveChipIDFingerprint)
                 let result = try await lease.perform(.inspectStage(operationID, journal.treeSHA256))
                 guard result.succeeded, result.stderr.isEmpty else {
                     throw LegacyInspectionError.invalidResponse
@@ -25,6 +26,7 @@ import Foundation
                 let fields: [String: Any] = [
                     "mode": "inspect-legacy-transaction", "USBOpened": true,
                     "gamesChanged": false, "operationID": operationID.uuidString,
+                    "recordedIdentityMatched": identityVerified,
                     "hostPhase": journal.phase.rawValue, "consolePhase": state.phase.rawValue,
                     "activePage": console.activePage,
                     "bootVersion": console.bootVersion,

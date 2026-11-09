@@ -9,12 +9,23 @@ import SwiftHakchiCore
         try SNESFirmwareMaterial.requireInstallableRecipe(10)
         #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(11) }
         #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(12) }
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(13) }
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(14) }
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(15) }
     }
     @Test func parallelTrialOnlyUpgradesTheCurrentInstalledRecipe() {
         #expect(SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 10, to: 11))
         #expect(!SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 9, to: 11))
         #expect(!SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 11, to: 11))
-        #expect(!SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 10, to: 12))
+        #expect(SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 10, to: 12))
+        #expect(!SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 9, to: 12))
+        #expect(!SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 11, to: 12))
+        #expect(!SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 12, to: 12))
+        #expect(SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 10, to: 13))
+        for previous in [9, 11, 12, 13] { #expect(!SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: previous, to: 13)) }
+        #expect(SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 10, to: 14))
+        for previous in [9, 11, 12, 13, 14] { #expect(!SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: previous, to: 14)) }
+        #expect(!SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 10, to: 15))
         #expect(SNESStartupAdapterCandidate.allowsLibraryUpgrade(from: 4, to: 10))
     }
     @Test(.enabled(if: ProcessInfo.processInfo.environment["HC_SNES_PARALLEL_CANDIDATE"] != nil))
@@ -33,6 +44,190 @@ import SwiftHakchiCore
         let changed = Set(a.keys.filter { a[$0] != b[$0] })
         #expect(changed == Set(["swifthakchi/library-selector", "swifthakchi/runtime-files.sha256", "swifthakchi/files.sha256"]))
         #expect(b["swifthakchi/library-selector"] == Data(try SNESLibraryStartupScripts.parallelChecksumVerifierCandidate().utf8))
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["HC_SNES_COMBINED_CANDIDATE"] != nil))
+    func combinedRAMCandidateOnlyChangesTheVerifierAndItsIntegrityRecords() throws {
+        let env = ProcessInfo.processInfo.environment
+        let old = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_COMBINED_OLD"])))
+        let candidate = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_COMBINED_CANDIDATE"])))
+        #expect(old.libraryRecipeVersion == 10 && candidate.libraryRecipeVersion == 12)
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(candidate.libraryRecipeVersion) }
+        let before = try LegacyBootImageBuilder.inspect(old.image), after = try LegacyBootImageBuilder.inspect(candidate.image)
+        #expect(before.kernel == after.kernel)
+        #expect(before.header[64..<576] == after.header[64..<576])
+        let a = Dictionary(uniqueKeysWithValues: before.archive.entries.map { ($0.name, $0.data) })
+        let b = Dictionary(uniqueKeysWithValues: after.archive.entries.map { ($0.name, $0.data) })
+        #expect(Set(a.keys) == Set(b.keys))
+        #expect(Set(a.keys.filter { a[$0] != b[$0] }) == Set(["swifthakchi/library-selector", "swifthakchi/runtime-files.sha256", "swifthakchi/files.sha256"]))
+        #expect(b["swifthakchi/library-selector"] == Data(try SNESLibraryStartupScripts.combinedStatVerifierCandidate().utf8))
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["HC_SNES_COMBINED_PREPARE_ROOT"] != nil))
+    func prepareCombinedCandidateFromSavedStartupWithoutOpeningConsole() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let old = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_COMBINED_OLD"])))
+        #expect(old.libraryRecipeVersion == 10)
+        let candidate = try SNESStartupAdapterCandidate.withLibrarySupport(old, targetRecipe: 12)
+        #expect(candidate.libraryRecipeVersion == 12)
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(candidate.libraryRecipeVersion) }
+        let store = try RecoveryBootSnapshotStore(root: URL(fileURLWithPath: try #require(env["HC_SNES_COMBINED_PREPARE_ROOT"])))
+        let saved = try await store.saveSNESStartupCandidate(candidate)
+        #expect(try SNESStartupAdapterCandidate.load(directory: saved).image == candidate.image)
+        let summary: [String: Any] = ["candidate": saved.path, "imageBytes": candidate.image.count,
+            "imageSHA256": BackupManifest.digest(candidate.image), "consoleAccessed": false, "firmwareWritten": false]
+        let output = URL(fileURLWithPath: try #require(env["HC_SNES_COMBINED_PREPARE_ROOT"])).appendingPathComponent("combined-prepared.json")
+        try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys]).write(to: output, options: .withoutOverwriting)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["HC_SNES_COMBINED_PARENT_COPY"] != nil))
+    func combinedCandidateBindsToAcceptedParentAndSimulatedPreparation() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let operation = URL(fileURLWithPath: try #require(env["HC_SNES_COMBINED_PARENT_COPY"]))
+        let review = try #require(env["HC_SNES_COMBINED_PARENT_REVIEW"])
+        let pins = try PinnedFELInputs.load()
+        let inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        let journal: SNESFirmwareJournal
+        do { journal = try await SNESFirmwareJournal.reopen(operation: operation, reviewSHA256: review, recovery: inputs) }
+        catch { Issue.record("Copied parent journal could not be reopened: \(error)"); throw error }
+        let parent: SNESMenuStartupParent
+        do { parent = try await journal.combinedLibraryStartupParent(); try await journal.close() }
+        catch { try? await journal.close(); Issue.record("Combined trial parent could not be reconstructed: \(error)"); throw error }
+        let candidate = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_COMBINED_CANDIDATE"])))
+        do { try parent.require(candidate) }
+        catch { Issue.record("Saved candidate did not match its reconstructed parent: \(error)"); throw error }
+        #expect(candidate.libraryRecipeVersion == 12)
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(candidate.libraryRecipeVersion) }
+        let io = try MenuStartupPreflightFake(parent: parent, fault: "none")
+        let result: SNESStartupPreflightResult
+        do { result = try await SNESStartupPreflightService(wait: {}).capture(candidate: candidate, inputs: inputs, io: io, parent: parent) }
+        catch { Issue.record("Simulated preparation did not complete: \(error)"); throw error }
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let evidence = try await RecoveryBootSnapshotStore(root: root).saveSNESStartupPreflight(result)
+        let trial = try PreparedSNESStartupTrial.prepare(candidate: candidate, evidence: evidence, recovery: inputs, parent: parent)
+        try trial.validateCurrent()
+        #expect(trial.image == candidate.image)
+        #expect(await io.base.stages == 1)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["HC_SNES_CONCURRENT_CANDIDATE"] != nil))
+    func concurrentRAMCandidateOnlyChangesTheVerifierAndItsIntegrityRecords() throws {
+        let env = ProcessInfo.processInfo.environment
+        let old = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_CONCURRENT_OLD"])))
+        let candidate = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_CONCURRENT_CANDIDATE"])))
+        #expect(old.libraryRecipeVersion == 10 && candidate.libraryRecipeVersion == 14)
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(candidate.libraryRecipeVersion) }
+        let before = try LegacyBootImageBuilder.inspect(old.image), after = try LegacyBootImageBuilder.inspect(candidate.image)
+        #expect(before.kernel == after.kernel)
+        #expect(before.header[64..<576] == after.header[64..<576])
+        let a = Dictionary(uniqueKeysWithValues: before.archive.entries.map { ($0.name, $0.data) })
+        let b = Dictionary(uniqueKeysWithValues: after.archive.entries.map { ($0.name, $0.data) })
+        #expect(Set(a.keys) == Set(b.keys))
+        #expect(Set(a.keys.filter { a[$0] != b[$0] }) == Set(["swifthakchi/library-selector", "swifthakchi/runtime-files.sha256", "swifthakchi/files.sha256"]))
+        #expect(b["swifthakchi/library-selector"] == Data(try SNESLibraryStartupScripts.parallelEntryVerifierCandidate().utf8))
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["HC_SNES_CONCURRENT_PREPARE_ROOT"] != nil))
+    func prepareConcurrentCandidateFromSavedStartupWithoutOpeningConsole() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let old = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_CONCURRENT_OLD"])))
+        #expect(old.libraryRecipeVersion == 10)
+        let candidate = try SNESStartupAdapterCandidate.withLibrarySupport(old, targetRecipe: 14)
+        #expect(candidate.libraryRecipeVersion == 14)
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(candidate.libraryRecipeVersion) }
+        let store = try RecoveryBootSnapshotStore(root: URL(fileURLWithPath: try #require(env["HC_SNES_CONCURRENT_PREPARE_ROOT"])))
+        let saved = try await store.saveSNESStartupCandidate(candidate)
+        #expect(try SNESStartupAdapterCandidate.load(directory: saved).image == candidate.image)
+        let summary: [String: Any] = ["candidate": saved.path, "imageBytes": candidate.image.count,
+            "imageSHA256": BackupManifest.digest(candidate.image), "consoleAccessed": false, "firmwareWritten": false]
+        let output = URL(fileURLWithPath: try #require(env["HC_SNES_CONCURRENT_PREPARE_ROOT"])).appendingPathComponent("concurrent-prepared.json")
+        try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys]).write(to: output, options: .withoutOverwriting)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["HC_SNES_CONCURRENT_PARENT_COPY"] != nil))
+    func concurrentCandidateBindsToAcceptedParentAndSimulatedPreparation() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let operation = URL(fileURLWithPath: try #require(env["HC_SNES_CONCURRENT_PARENT_COPY"]))
+        let review = try #require(env["HC_SNES_CONCURRENT_PARENT_REVIEW"])
+        let pins = try PinnedFELInputs.load()
+        let inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        let journal: SNESFirmwareJournal
+        do { journal = try await SNESFirmwareJournal.reopen(operation: operation, reviewSHA256: review, recovery: inputs) }
+        catch { Issue.record("Copied parent journal could not be reopened: \(error)"); throw error }
+        let parent: SNESMenuStartupParent
+        do { parent = try await journal.concurrentLibraryStartupParent(); try await journal.close() }
+        catch { try? await journal.close(); Issue.record("Concurrent trial parent could not be reconstructed: \(error)"); throw error }
+        let candidate = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_CONCURRENT_CANDIDATE"])))
+        do { try parent.require(candidate) }
+        catch { Issue.record("Saved candidate did not match its reconstructed parent: \(error)"); throw error }
+        #expect(candidate.libraryRecipeVersion == 14)
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(candidate.libraryRecipeVersion) }
+        let io = try MenuStartupPreflightFake(parent: parent, fault: "none")
+        let result: SNESStartupPreflightResult
+        do { result = try await SNESStartupPreflightService(wait: {}).capture(candidate: candidate, inputs: inputs, io: io, parent: parent) }
+        catch { Issue.record("Simulated preparation did not complete: \(error)"); throw error }
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let evidence = try await RecoveryBootSnapshotStore(root: root).saveSNESStartupPreflight(result)
+        let trial = try PreparedSNESStartupTrial.prepare(candidate: candidate, evidence: evidence, recovery: inputs, parent: parent)
+        try trial.validateCurrent()
+        #expect(trial.image == candidate.image)
+        #expect(await io.base.stages == 1)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["HC_SNES_QUEUED_CANDIDATE"] != nil))
+    func queuedRAMCandidateOnlyChangesTheExpectedAssets() throws {
+        let env = ProcessInfo.processInfo.environment
+        let old = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_QUEUED_OLD"])))
+        let candidate = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_QUEUED_CANDIDATE"])))
+        #expect(old.libraryRecipeVersion == 10 && candidate.libraryRecipeVersion == 13)
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(candidate.libraryRecipeVersion) }
+        let before = try LegacyBootImageBuilder.inspect(old.image), after = try LegacyBootImageBuilder.inspect(candidate.image)
+        #expect(before.kernel == after.kernel)
+        #expect(before.header[64..<576] == after.header[64..<576])
+        let a = Dictionary(uniqueKeysWithValues: before.archive.entries.map { ($0.name, $0.data) })
+        let b = Dictionary(uniqueKeysWithValues: after.archive.entries.map { ($0.name, $0.data) })
+        #expect(Set(a.keys) == Set(b.keys))
+        #expect(Set(a.keys.filter { a[$0] != b[$0] }) == Set(["swifthakchi/library-selector", "swifthakchi/menu-change", "swifthakchi/runtime-files.sha256", "swifthakchi/files.sha256"]))
+        #expect(b["swifthakchi/library-selector"] == Data(try SNESLibraryStartupScripts.combinedStatVerifierCandidate().utf8))
+        #expect(b["swifthakchi/menu-change"] == Data(try SNESLibraryStartupScripts.queuedChangePageCandidate().utf8))
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["HC_SNES_QUEUED_PREPARE_ROOT"] != nil))
+    func prepareQueuedCandidateFromSavedStartupWithoutOpeningConsole() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let old = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_QUEUED_OLD"])))
+        #expect(old.libraryRecipeVersion == 10)
+        let candidate = try SNESStartupAdapterCandidate.withLibrarySupport(old, targetRecipe: 13)
+        #expect(candidate.libraryRecipeVersion == 13)
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(candidate.libraryRecipeVersion) }
+        let store = try RecoveryBootSnapshotStore(root: URL(fileURLWithPath: try #require(env["HC_SNES_QUEUED_PREPARE_ROOT"])))
+        let saved = try await store.saveSNESStartupCandidate(candidate)
+        #expect(try SNESStartupAdapterCandidate.load(directory: saved).image == candidate.image)
+        let summary: [String: Any] = ["candidate": saved.path, "imageBytes": candidate.image.count,
+            "imageSHA256": BackupManifest.digest(candidate.image), "consoleAccessed": false, "firmwareWritten": false]
+        let output = URL(fileURLWithPath: try #require(env["HC_SNES_QUEUED_PREPARE_ROOT"])).appendingPathComponent("queued-prepared.json")
+        try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys]).write(to: output, options: .withoutOverwriting)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["HC_SNES_QUEUED_PARENT_COPY"] != nil))
+    func queuedCandidateBindsToAcceptedParentAndSimulatedPreparation() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let operation = URL(fileURLWithPath: try #require(env["HC_SNES_QUEUED_PARENT_COPY"]))
+        let review = try #require(env["HC_SNES_QUEUED_PARENT_REVIEW"])
+        let pins = try PinnedFELInputs.load()
+        let inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        let journal: SNESFirmwareJournal
+        do { journal = try await SNESFirmwareJournal.reopen(operation: operation, reviewSHA256: review, recovery: inputs) }
+        catch { Issue.record("Copied parent journal could not be reopened: \(error)"); throw error }
+        let parent: SNESMenuStartupParent
+        do { parent = try await journal.queuedLibraryStartupParent(); try await journal.close() }
+        catch { try? await journal.close(); Issue.record("Queued trial parent could not be reconstructed: \(error)"); throw error }
+        let candidate = try SNESStartupAdapterCandidate.load(directory: URL(fileURLWithPath: try #require(env["HC_SNES_QUEUED_CANDIDATE"])))
+        do { try parent.require(candidate) }
+        catch { Issue.record("Saved candidate did not match its reconstructed parent: \(error)"); throw error }
+        #expect(candidate.libraryRecipeVersion == 13)
+        #expect(throws: (any Error).self) { try SNESFirmwareMaterial.requireInstallableRecipe(candidate.libraryRecipeVersion) }
+        let io = try MenuStartupPreflightFake(parent: parent, fault: "none")
+        let result: SNESStartupPreflightResult
+        do { result = try await SNESStartupPreflightService(wait: {}).capture(candidate: candidate, inputs: inputs, io: io, parent: parent) }
+        catch { Issue.record("Simulated preparation did not complete: \(error)"); throw error }
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let evidence = try await RecoveryBootSnapshotStore(root: root).saveSNESStartupPreflight(result)
+        let trial = try PreparedSNESStartupTrial.prepare(candidate: candidate, evidence: evidence, recovery: inputs, parent: parent)
+        try trial.validateCurrent()
+        #expect(trial.image == candidate.image)
+        #expect(await io.base.stages == 1)
     }
     @Test func libraryStartupHasItsOwnManagementIdentity() throws {
         let expected = SNESStartupTrialExpectation(hwid: String(repeating: "1", count: 32), runtimeSHA256: String(repeating: "a", count: 64),

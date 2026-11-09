@@ -77,6 +77,17 @@ struct RecoveryDiagnosticMain {
         let arguments = Array(CommandLine.arguments.dropFirst())
         let writeRequested = arguments.first == "--write-stock-boot2" || arguments.first == "--write-legacy-boot2"
         do {
+            if arguments == ["--check-packaged-resources"] {
+                let bundle = Bundle.appBundle
+                for (name, ext) in [("hakchi", "hmod"), ("basehmods", "tar"),
+                                    ("SNESCompatibilityController", "cfg")] {
+                    guard bundle.url(forResource: name, withExtension: ext) != nil else {
+                        throw RecoveryProbeError.refused("A required packaged resource is missing.")
+                    }
+                }
+                print("Packaged resources are available.")
+                return
+            }
             try await SNESOfflineBuildDiagnostic.dispatch(arguments, progress: {
                 FileHandle.standardError.write(Data(($0 + "\n").utf8))
             }) {

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SwiftHakchiCore
 @testable import SwiftHakchi
 
 private actor RecoveryCancellationProbe {
@@ -22,6 +23,34 @@ private func setupReceipt(_ kind: SNESSetupRecordReceipt.Kind, _ url: URL, hash:
 }
 
 @Suite(.serialized) @MainActor struct SNESBackupGuideTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_SETUP"] != nil && ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_CURRENT_DATA"] != nil))
+    func fullDataCopyFromSetupUsesTheCheckedBackupWithoutConsoleIO() async throws {
+        let setupURL = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_SETUP"]))
+        let dataURL = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_CURRENT_DATA"]))
+        let setup = setupReceipt(.backup, setupURL, hash: BackupManifest.digest(try Data(contentsOf: setupURL.appendingPathComponent("manifest.json"))))
+        let data = SNESDataSnapshotReceipt(directory: dataURL, manifestSHA256: BackupManifest.digest(try Data(contentsOf: dataURL.appendingPathComponent("manifest.json"))))
+        let fake = URL(fileURLWithPath: "/tmp/unused-snes-guide-fixture")
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let guide = SNESBackupGuide(execute: { _ in setup }, prepareRecovery: { _ in fake }, prepareHelpers: { fake },
+            prepareStartup: { _,_,_,_ in setupReceipt(.startup, fake) },
+            captureMenuSupport: { _,_,_,_,_ in setupReceipt(.menuSupport, fake) },
+            captureComponents: { _,_,_,_,_,_ in setupReceipt(.components, fake) },
+            captureData: { _,_,_,_,_,_ in data })
+        await #expect(throws: (any Error).self) { try await guide.copyFullDataBackup(to: root, updated: false) }
+        await guide.start(ready: true); guide.confirmNormalBoot()
+        guide.reviewStartupCheck(); await guide.startStartupCheck(ready: true); guide.confirmStartupNormalBoot()
+        guide.reviewMenuSupport(); await guide.startMenuSupport(ready: true); guide.confirmMenuSupportNormalBoot()
+        guide.reviewComponents(); await guide.startComponents(ready: true); guide.confirmComponentsNormalBoot()
+        guide.reviewDataBackup(); await guide.startDataBackup(ready: true); guide.confirmDataNormalBoot()
+        #expect(guide.phase == .dataComplete)
+        await #expect(throws: (any Error).self) { try await guide.copyFullDataBackup(to: root, updated: true) }
+        let output = try await guide.copyFullDataBackup(to: root, updated: false)
+        let source = try SNESPreparationSource.load(SNESOfflineSource.load(snapshot: setupURL))
+        let copied = try SNESDataSnapshotPackage.load(receipt: .init(directory: output, manifestSHA256: data.manifestSHA256), source: source)
+        let original = try SNESDataSnapshotPackage.load(receipt: data, source: source)
+        #expect(copied.sha256 == original.sha256)
+        try original.revalidate()
+    }
     @Test(arguments: ["success", "save-fails", "save-fails-normal", "refresh-fails", "refresh-fails-normal"]) func latestDataBackupIsIndependentAndRequiresPowerOff(_ scenario: String) async {
         let fail = scenario == "save-fails" || scenario == "save-fails-normal"
         let old = URL(fileURLWithPath: "/tmp/earlier"), latest = URL(fileURLWithPath: "/tmp/latest"), calls = ConnectionCallCounter()

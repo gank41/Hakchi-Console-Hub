@@ -27,7 +27,7 @@ public enum SNESRAMMenuSRAMTrialBuilder {
         }
         for (old, new) in [
             ("S=/tmp/hc-alien3-trial", "S=/tmp/hc-simcity-trial"),
-            ("check \"$R/alien3.smc\" 0000000000000000000000000000000000000000000000000000000000000000", "check \"$R/simcity.smc\" 0000000000000000000000000000000000000000000000000000000000000000"),
+            ("check \"$R/alien3.smc\" 65feac0ff8bf834bdb3f1eade09102496e1bd021a261ca05fc3a75983c357c84", "check \"$R/simcity.smc\" bf74c58e4190faca2f3a967dc190fe529d13887d1262b72e057b5353e43cf67f"),
             ("c2025cc98f2b755ef6759ead70a8e6dfe5aa85ff6772b78daa92bf91ad936e14", "9fd3707d1fcc3257cd8c57a988c75eefaf4d7b5e6838e34e67df74e277c6a2df"),
             ("d8dd1659a886e110745171e448055aa11497d44b82e4ac35f879668ac2f3d59b", "68a1951f54441c93f3dfa653f88bae32afe72ebb68b66422be212e1c54a1904f"),
             (SNESRAMMenuSignalTrialBuilder.ownerSHA256, ownerSHA256)

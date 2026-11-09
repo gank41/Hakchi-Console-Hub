@@ -85,8 +85,12 @@ struct SNESLibraryCopyCommandsTests {
                     entry.files.filter { $0.name.hasSuffix(".desktop") }.map { (entry.code + "/" + $0.name, $0.data.base64EncodedString()) }
                 })], options: [.sortedKeys]).write(to: target.appendingPathComponent("fixture.json"))
         }
-        let process = Process(), out = Pipe(), err = Pipe(), handle = try FileHandle(forReadingFrom: input)
-        defer { try? handle.close() }
+        let process = Process(), handle = try FileHandle(forReadingFrom: input)
+        let outputURL = root.appendingPathComponent("copy-stdout"), errorURL = root.appendingPathComponent("copy-stderr")
+        guard FileManager.default.createFile(atPath: outputURL.path, contents: nil),
+              FileManager.default.createFile(atPath: errorURL.path, contents: nil) else { throw SNESLibraryMenu.failure() }
+        let out = try FileHandle(forWritingTo: outputURL), err = try FileHandle(forWritingTo: errorURL)
+        defer { try? handle.close(); try? out.close(); try? err.close() }
         if fault == "file-limit" {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
             process.arguments = ["-c", "import resource,subprocess,sys; resource.setrlimit(resource.RLIMIT_FSIZE,(524288,resource.getrlimit(resource.RLIMIT_FSIZE)[1])); r=subprocess.run(['/bin/sh',sys.argv[1]]); assert resource.getrlimit(resource.RLIMIT_FSIZE)[0]==524288; sys.exit(r.returncode)", command.path]
@@ -98,7 +102,9 @@ struct SNESLibraryCopyCommandsTests {
         let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
         DispatchQueue.global().asyncAfter(deadline: .now() + 30, execute: deadline)
         defer { deadline.cancel() }
-        let reply = out.fileHandleForReading.readDataToEndOfFile(), errors = err.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+        process.waitUntilExit()
+        try out.close(); try err.close()
+        let reply = try Data(contentsOf: outputURL), errors = try Data(contentsOf: errorURL)
         #expect(Date().timeIntervalSince(started) < 29, "The synthetic copy reader did not stop promptly.")
         #expect(try Data(contentsOf: data.appendingPathComponent("clover/settings.json")) == sentinel)
         #expect(!FileManager.default.fileExists(atPath: namespace.appendingPathComponent("active-menu").path))

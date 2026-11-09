@@ -127,6 +127,47 @@ struct SNESFirmwareDiagnosticTests {
         #expect(calls.withLock { $0 } == 1)
     }
 
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_LATEST_PARENT"] != nil))
+    @MainActor func appRestoresDeepAcceptedStartupUsingSimulatedConsole() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_LATEST_PARENT"]))
+        let operations = root.appendingPathComponent("operations")
+        try FileManager.default.createDirectory(at: operations, withIntermediateDirectories: false)
+        var current = original
+        while true {
+            try FileManager.default.copyItem(at: current, to: operations.appendingPathComponent(current.lastPathComponent))
+            let plan = try JSONDecoder().decode(SNESFirmwarePlan.self, from: Data(contentsOf: current.appendingPathComponent("plan.json")))
+            guard let parent = plan.parentOperationID else { break }
+            current = original.deletingLastPathComponent().appendingPathComponent("SNESFirmware-" + parent.uuidString)
+        }
+        let copied = operations.appendingPathComponent(original.lastPathComponent)
+        let hostCalls = OSAllocatedUnfairLock(initialState: 0)
+        let devices = OSAllocatedUnfairLock(initialState: [SNESFirmwareFakeIO]())
+        let config = AppConfig(); config.lastConsoleType = .snesUsa; config.workspacePath = root.path; config.backupDirectoryPath = root.path
+        let app = AppState(startDeviceMonitoring: false, config: config, saveConfiguration: {},
+            checkRecoveryHost: { hostCalls.withLock { $0 += 1 } }, firmwareJournalRoot: { operations },
+            makeSNESFirmwareIO: { material, _ in
+                let io = SNESFirmwareFakeIO(material: material, fault: "none")
+                devices.withLock { $0.append(io) }; return io
+            })
+        app.isPreparingSync = true
+        let restore = try await app.prepareSNESStartupRestore(operation: copied)
+        #expect(restore.hasTestedWriter)
+        #expect(hostCalls.withLock { $0 } == 0 && devices.withLock { $0.isEmpty })
+        await #expect(throws: (any Error).self) {
+            try await app.runSNESStartupRestore(restore, mode: .write, ready: true, progress: { _ in })
+        }
+        #expect(hostCalls.withLock { $0 } == 0 && devices.withLock { $0.isEmpty })
+        try await app.runSNESStartupRestore(restore, mode: .preflight, ready: true, progress: { _ in })
+        let preflight = try #require(devices.withLock { $0.first })
+        #expect(await preflight.writes == 0)
+        try await app.runSNESStartupRestore(restore, mode: .write, ready: true, approved: true, progress: { _ in })
+        let writer = try #require(devices.withLock { $0.last })
+        #expect(await writer.writes == 1)
+        #expect(await writer.active == writer.material.original.active)
+        #expect(try await app.openSNESStartupRestore(operation: restore.operation).phase == .readbackVerified)
+    }
+
     @Test(.enabled(if:ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_ACTIVE_PREIMAGE"] != nil))
     @MainActor func appPreparesSavedOriginalStartupWithoutConsoleAccess() async throws {
         let material = try await SNESFirmwareFixtureCache.shared.value()

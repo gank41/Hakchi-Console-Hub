@@ -1231,7 +1231,7 @@ final class AppState: ObservableObject {
     }
 
     /// Save a fresh read-only data backup for an already confirmed first installation.
-    func backupSNESReviewedCurrentData(after check: SNESReviewedConsoleCheck, ready: Bool,
+    func backupSNESReviewedCurrentData(after check: SNESReviewedConsoleCheck, menu: SNESFirmwareJournal.Prepared? = nil, ready: Bool,
                                        progress: @escaping RecoveryProgressSink) async throws -> SNESDataSnapshotReceipt {
         guard ready, isPreparingSync, connectionConfig.lastConsoleType == .snesUsa, !taskRunner.isRunning, !snesTrialInProgress else {
             throw RecoveryProbeError.refused("Open SNES setup and confirm the console is ready before making its backup.")
@@ -1240,36 +1240,40 @@ final class AppState: ObservableObject {
         let inputs = try await payloads.pinnedRecoveryInputs(), root = try firmwareJournalRoot(), backupRoot = snesBackupsDirectory
         let makeIO = makeSNESDataSnapshotIO
         try Self.requireSNESReviewedOperation(check.operation, root: root)
-        let (selected, parent, source, store) = try await Self.runSNESRecoveryWorker {
+        if let menu { try Self.requireSNESReviewedOperation(menu.operation, root: root) }
+        let (selected, startup, source, store) = try await Self.runSNESRecoveryWorker {
             let selected = try SNESFirstInstallReviewMaterial.load(receipt: check.review, recovery: inputs)
-            let journal = try await SNESFirmwareJournal.reopen(operation: check.operation, reviewSHA256: check.planSHA256, recovery: inputs)
-            let parent: SNESMenuStartupParent
+            let operation = menu?.operation ?? check.operation, digest = menu?.reviewSHA256 ?? check.planSHA256
+            let journal = try await SNESFirmwareJournal.reopen(operation: operation, reviewSHA256: digest, recovery: inputs)
+            let accepted: SNESFirmwareAcceptedInstall
             do {
-                let material = try await journal.verifiedMaterial()
-                guard try await journal.phase() == .menuAccepted, let binding = material.firstInstall,
-                      binding.reviewDirectory == check.review.directory.path, binding.reviewSHA256 == check.review.sha256 else { throw SNESRuntimeBinding.failure() }
-                try selected.revalidate()
-                parent = try await journal.menuStartupParent(currentData: .init(directory: selected.data.directory, manifestSHA256: selected.data.manifestSHA256))
-                try await journal.close()
+                let lineage = try await journal.acceptedLineage()
+                guard let initial = lineage.last, initial.directory == check.operation,
+                      initial.reviewSHA256 == check.planSHA256, let binding = initial.material.firstInstall,
+                      binding.reviewDirectory == check.review.directory.path,
+                      binding.reviewSHA256 == check.review.sha256 else { throw SNESRuntimeBinding.failure() }
+                accepted = try await journal.acceptedInstall()
+                try selected.revalidate(); try await journal.close()
             } catch { try? await journal.close(); throw error }
-            let source = try SNESPreparationSource.load(parent.candidate.material.support.setup)
+            let startup = try SNESDataSnapshotInstalledStartup(accepted: accepted)
+            let source = accepted.material.source
             let store = try RecoveryBootSnapshotStore(root: backupRoot)
             try await store.checkWritableDestination()
             let plan = try source.dataSnapshotPlan()
             guard let available = try SNESBackupCapacity.available(at: backupRoot), available >= Int64(plan.byteCount) + 32 * 1024 * 1024 else {
                 throw RecoveryProbeError.refused("This Mac needs more free space for the console backup. Nothing was changed on the SNES.")
             }
-            try selected.revalidate(); try parent.validate(); try source.revalidate()
-            return (selected, parent, source, store)
+            try selected.revalidate(); try startup.validate(); try source.revalidate()
+            return (selected, startup, source, store)
         }
         _ = try inputs.prepare(); try Task.checkCancellation(); try await checkRecoveryHost(); try Task.checkCancellation()
-        try await Self.runSNESRecoveryWorker { try selected.revalidate(); try parent.validate(); try source.revalidate() }
+        try await Self.runSNESRecoveryWorker { try selected.revalidate(); try startup.validate(); try source.revalidate() }
         await deviceManager.pauseForRecovery()
         defer { deviceManager.waitForNormalBootAfterRecovery() }
-        let captured = try await SNESDataSnapshotService().captureAndSave(source: source, inputs: inputs, io: makeIO(source), progress: progress,
+        let captured = try await SNESDataSnapshotService().captureAndSave(source: source, inputs: inputs, io: makeIO(source), installedStartup: startup, progress: progress,
             detail: { _ in }, save: { result in
                 try await store.saveSNESDataSnapshotWithReceipt(result, verify: { _ in
-                    try selected.revalidate(); try parent.validate(); try source.revalidate()
+                    try selected.revalidate(); try startup.validate(); try source.revalidate()
                 })
             })
         return captured.backup

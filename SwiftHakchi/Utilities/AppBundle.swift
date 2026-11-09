@@ -1,6 +1,10 @@
 import Foundation
 
 extension Bundle {
+    static func hakchiResourceBundle(in main: Bundle) -> Bundle? {
+        guard let resourceURL = main.resourceURL else { return nil }
+        return Bundle(url: resourceURL.appendingPathComponent("SwiftHakchi_SwiftHakchi.bundle"))
+    }
     /// Resource bundle accessor that works inside a .app bundle.
     ///
     /// SPM's auto-generated `Bundle.module` looks at `Bundle.main.bundleURL`
@@ -8,17 +12,14 @@ extension Bundle {
     /// This accessor checks `Bundle.main.resourceURL` (`Contents/Resources/`)
     /// first, then falls back to the SPM-generated `Bundle.module`.
     static let appBundle: Bundle = {
-        let bundleName = "SwiftHakchi_SwiftHakchi"
+        if let bundle = hakchiResourceBundle(in: .main) { return bundle }
 
-        // .app bundle: Contents/Resources/
-        if let resourceURL = Bundle.main.resourceURL {
-            let path = resourceURL.appendingPathComponent("\(bundleName).bundle").path
-            if let bundle = Bundle(path: path) {
-                return bundle
-            }
-        }
-
+        #if SWIFTHAKCHI_DISTRIBUTION
+        // A public bundle must never depend on a path from the build machine.
+        fatalError("The app's resource bundle is missing. Reinstall the app.")
+        #else
         // Fallback to SPM's auto-generated accessor (works for `swift run`)
         return Bundle.module
+        #endif
     }()
 }

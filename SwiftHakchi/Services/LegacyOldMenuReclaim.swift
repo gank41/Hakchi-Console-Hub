@@ -34,9 +34,10 @@ enum LegacyOldMenuReclaim {
             throw LegacyChangeError.refused("Test both saved menus, their artwork, an imported game, a built-in game, and controller input before reviewing former-menu removal.")
         }
         let store = LegacySyncJournalStore(directory: workspace.journals)
+        let selectionChipID = try await device.chipID()
         guard try await store.latestUnresolved() == nil,
               try LegacyGameChangeService.latest(workspace: workspace) == nil,
-              try await store.latestAcceptedMenu()?.operationID == operationID else {
+              try await store.latestAcceptedMenu(matchingChipID: selectionChipID)?.operationID == operationID else {
             throw LegacySyncJournalError.unresolvedOperation
         }
         let current = try await store.load(operationID)
@@ -65,6 +66,7 @@ enum LegacyOldMenuReclaim {
 
         try await device.requireIdentity()
         let chipID = try await device.chipID()
+        guard chipID == selectionChipID else { throw LegacyInspectionError.invalidBackup }
         let chipFingerprint = BackupManifest.digest(Data(chipID.utf8))
         guard currentBinding.chipIDFingerprint == chipFingerprint,
               previousBinding.chipIDFingerprint == chipFingerprint else {

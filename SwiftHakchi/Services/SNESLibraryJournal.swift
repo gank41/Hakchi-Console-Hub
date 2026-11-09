@@ -169,7 +169,11 @@ enum SNESLibraryJournalPolicy {
 
 /// Mac-only intent storage; native copying, selection and cleanup are implemented separately.
 actor SNESLibraryJournal {
-    enum Phase: String, Codable, Sendable { case prepared, copyIntent, copyUncertain, copied, selectionIntent, selectionUncertain, awaitingRestart, awaitingTest, accepted, cleanupIntent, cleanupUncertain, discardIntent, discardUncertain, finished, discarded, rollbackIntent, rollbackUncertain, rollbackAwaitingRestart, rolledBack }
+    enum Phase: String, Codable, Sendable {
+        case prepared, copyIntent, copyUncertain, copied, selectionIntent, selectionUncertain, awaitingRestart, awaitingTest, accepted, cleanupIntent, cleanupUncertain, discardIntent, discardUncertain, finished, finishedKeepingPrevious, discarded, rollbackIntent, rollbackUncertain, rollbackAwaitingRestart, rolledBack
+        /// Retained copies still need cleanup before another console mutation.
+        var isTerminal: Bool { [.finished, .discarded].contains(self) }
+    }
     struct Prepared: Sendable { let operation: URL, reviewSHA256: String }
     private struct Cleanup: Codable, Equatable { let scopeSHA256: String, previewSHA256: String, index: Int; var kind: String? = nil }
     private struct Record: Codable {
@@ -227,7 +231,7 @@ actor SNESLibraryJournal {
                 let folder = try RestoreDirectory(storage.root.url.appendingPathComponent(name)), raw = try folder.read("plan.json", maximum: 24 * 1024 * 1024)
                 let identity = try SNESLibrarySyncPlan.identity(data: raw), state = try load(folder, review: BackupManifest.digest(raw))
                 guard name == prefix + identity.id.uuidString else { throw failure() }
-                if ![.finished, .discarded].contains(state.phase),
+                if !state.phase.isTerminal,
                    identity.backupDirectory.path == directory.path || state.backupReference?.directory.path == directory.path {
                     throw RecoveryProbeError.refused("Finish or cancel the unfinished sync before removing this backup. It is still needed for recovery.")
                 }
@@ -279,7 +283,7 @@ actor SNESLibraryJournal {
             let identity = try SNESLibrarySyncPlan.identity(data: raw), review = BackupManifest.digest(raw)
             guard name == prefix + identity.id.uuidString else { throw failure() }
             let state = try load(directory, review: review)
-            if identity.hwid == hwid, ![.finished, .discarded].contains(state.phase) {
+            if identity.hwid == hwid, !state.phase.isTerminal {
                 guard found == nil else { throw failure() }
                 found = .init(operation: directory.url, reviewSHA256: review, phase: state.phase, menuID: identity.id, backupReference: state.backupReference)
             }
@@ -404,10 +408,18 @@ actor SNESLibraryJournal {
         _ = try append(.awaitingTest, challenge: nil, evidenceSHA256: evidence.evidenceSHA256, attachment: evidence.attachment)
         life.revoke()
     }
+    func finishKeepingPrevious(current: SNESLibraryInventory, now: Date = Date()) throws {
+        let previous = try state(); try plan.requireSources()
+        guard previous.phase == .awaitingTest, let attachment = previous.attachment,
+              (0...60).contains(now.timeIntervalSince(current.capacity.measuredAt)) else { throw Self.failure() }
+        try SNESLibraryActiveCheck.require(plan, inventory: current, preserveProfiles: false)
+        _ = try append(.finishedKeepingPrevious, challenge: nil, evidenceSHA256: BackupManifest.digest(current.rawFrame), attachment: attachment)
+        life.revoke()
+    }
     /// Called only after the user's gameplay confirmation; it grants no deletion permission.
     func accept(backup: SNESLibraryBackup, originals: SNESOriginalGamesFrame, current: SNESLibraryInventory) throws {
         let previous = try state(); try plan.requireSources(); try backup.validate()
-        guard [.awaitingTest, .accepted, .cleanupUncertain].contains(previous.phase), let attachment = previous.attachment,
+        guard [.awaitingTest, .finishedKeepingPrevious, .accepted, .cleanupUncertain].contains(previous.phase), let attachment = previous.attachment,
               backup.inventory.snapshotSHA256 == current.snapshotSHA256, backup.inventory.hwid == plan.before.hwid,
               try SNESLibraryCatalogIdentity.digest(originals) == plan.before.catalogSHA256 else { throw Self.failure() }
         let scope = try SNESLibraryCleanupPlan.prepare(plan: plan, current: current, backup: backup, originals: originals)
@@ -544,7 +556,7 @@ actor SNESLibraryJournal {
     /// Delete only this terminal operation's app-owned prepared cache. User backups are a separate store.
     @discardableResult func purgePreparedMaterial() throws -> Bool {
         let state = try state()
-        guard [.finished, .discarded].contains(state.phase) else { throw Self.failure() }
+        guard state.phase.isTerminal else { throw Self.failure() }
         try plan.backup.validate()
         if state.phase == .finished {
             guard let reference = state.backupReference else { throw Self.failure() }
@@ -567,7 +579,11 @@ actor SNESLibraryJournal {
     }
     /// Cache cleanup happens before the terminal lease is released, including when the view drops its journal afterward.
     func closeCompleted() throws -> String? {
-        guard [.finished, .discarded].contains(try state().phase) else { throw Self.failure() }
+        let phase = try state().phase
+        guard phase.isTerminal || phase == .finishedKeepingPrevious else { throw Self.failure() }
+        // The next sync needs the frozen menu and earlier backup to reclaim the
+        // retained console copy. Keep them until that cleanup is finished.
+        if phase == .finishedKeepingPrevious { life.revoke(); try storage.closeLease(); return nil }
         var issue: String?
         do { try purgePreparedMaterial() }
         catch { issue = "Your console change is complete and Mac backups are kept. Some temporary preparation files could not be cleared from the Mac." }
@@ -641,7 +657,12 @@ actor SNESLibraryJournal {
             let summary = try SNESLibrarySyncPlan.identity(data: raw)
             guard name == prefix + summary.id.uuidString else { throw failure() }
             let state = try load(directory, review: BackupManifest.digest(raw))
-            if summary.hwid == hwid && !([.discarded, .finished].contains(state.phase)) { throw failure() }
+            if summary.hwid == hwid && !state.phase.isTerminal {
+                if state.phase == .finishedKeepingPrevious {
+                    throw RecoveryProbeError.refused("Before changing the console's setup or transferring saves, open Sync Library and choose Continue Sync to safely remove the previous game-menu copy.")
+                }
+                throw failure()
+            }
         }
     }
     private static func encode(_ record: Record) throws -> Data {
@@ -656,8 +677,8 @@ actor SNESLibraryJournal {
         for index in 0..<numbered.count {
             let raw = try directory.read(name(index), maximum: 65536), value = try JSONDecoder().decode(Record.self, from: raw)
             guard raw == (try encode(value)), value.planSHA256 == review, value.previousSHA256 == last,
-                  ([.copied, .awaitingRestart, .awaitingTest, .accepted, .finished, .rollbackIntent, .rollbackAwaitingRestart, .rolledBack].contains(value.phase) || (value.phase == .discarded && value.cleanup?.kind == "discard")) ? value.evidenceSHA256.map(SNESDataSnapshotChunk.isDigest) == true : value.evidenceSHA256 == nil else { throw failure() }
-            if [.selectionIntent, .selectionUncertain, .awaitingRestart, .awaitingTest, .accepted, .cleanupIntent, .cleanupUncertain, .discardIntent, .discardUncertain, .finished, .rollbackIntent, .rollbackUncertain, .rollbackAwaitingRestart, .rolledBack].contains(value.phase) || (value.phase == .discarded && value.cleanup?.kind == "discard") {
+                  ([.copied, .awaitingRestart, .awaitingTest, .accepted, .finished, .finishedKeepingPrevious, .rollbackIntent, .rollbackAwaitingRestart, .rolledBack].contains(value.phase) || (value.phase == .discarded && value.cleanup?.kind == "discard")) ? value.evidenceSHA256.map(SNESDataSnapshotChunk.isDigest) == true : value.evidenceSHA256 == nil else { throw failure() }
+            if [.selectionIntent, .selectionUncertain, .awaitingRestart, .awaitingTest, .accepted, .cleanupIntent, .cleanupUncertain, .discardIntent, .discardUncertain, .finished, .finishedKeepingPrevious, .rollbackIntent, .rollbackUncertain, .rollbackAwaitingRestart, .rolledBack].contains(value.phase) || (value.phase == .discarded && value.cleanup?.kind == "discard") {
                 guard let attachment = value.attachment, [UInt16(0x6a06), UInt16(0x6a07), UInt16(0x6a0b)].contains(attachment.deviceVersion) else { throw failure() }
                 _ = try SNESStartupTrialUSBPolicy.nativeIdentity(attachment)
             } else { guard value.attachment == nil else { throw failure() } }
@@ -685,6 +706,8 @@ actor SNESLibraryJournal {
                     || (previous.phase == .copied && value.phase == .selectionIntent && value.challenge != nil)
                     || (previous.phase == .selectionIntent && [.selectionUncertain, .awaitingRestart].contains(value.phase) && value.challenge == nil && value.attachment == previous.attachment)
                     || ([.selectionIntent, .selectionUncertain, .awaitingRestart, .awaitingTest].contains(previous.phase) && value.phase == .awaitingTest && value.challenge == nil && value.attachment?.registryEntryID != previous.attachment?.registryEntryID)
+                    || (previous.phase == .awaitingTest && value.phase == .finishedKeepingPrevious && value.challenge == nil && value.attachment == previous.attachment)
+                    || (previous.phase == .finishedKeepingPrevious && value.phase == .accepted && value.challenge == nil && value.attachment == previous.attachment)
                     || ([.awaitingTest, .accepted, .cleanupUncertain].contains(previous.phase) && value.phase == .accepted && value.challenge == nil && value.attachment == previous.attachment)
                     || ([.accepted, .cleanupUncertain].contains(previous.phase) && value.phase == .cleanupIntent && value.challenge != nil && value.attachment == previous.attachment && value.backupReference == previous.backupReference)
                     || ([.accepted, .cleanupUncertain].contains(previous.phase) && value.phase == .finished && value.challenge == nil && value.cleanup == previous.cleanup && value.attachment == previous.attachment && value.backupReference == previous.backupReference)

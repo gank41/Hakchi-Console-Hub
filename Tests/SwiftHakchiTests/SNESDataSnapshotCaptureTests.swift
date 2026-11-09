@@ -7,9 +7,10 @@ import SwiftHakchiCore
 actor SNESDataSnapshotFakeIO: SNESDataSnapshotIO {
     let source: SNESPreparationSource, base: SNESPreparationFakeIO, fault: String, plan: SNESDataSnapshotPlan
     let digest: String
-    var chunks = 0, hashes = 0, observations = 0
-    init(source: SNESPreparationSource, fault: String, digestOverride: String? = nil) throws {
-        self.source = source; self.fault = fault
+    var chunks = 0, hashes = 0, observations = 0, bootReads = 0
+    let activeImageOverride: Data?
+    init(source: SNESPreparationSource, fault: String, digestOverride: String? = nil, activeImageOverride: Data? = nil) throws {
+        self.source = source; self.fault = fault; self.activeImageOverride = activeImageOverride
         base = SNESPreparationFakeIO(source: source, fault: fault)
         plan = try SNESDataSnapshotPlan(partitionSectors: StockRestorePartitions.dataSectors(String(decoding: source.partitions, as: UTF8.self)))
         var hash = SHA256()
@@ -27,7 +28,14 @@ actor SNESDataSnapshotFakeIO: SNESDataSnapshotIO {
     func boot(_ inputs: RecoveryBootInputs, expected: RecoveryProbeUSBDevice) async throws { try await base.boot(inputs, expected: expected) }
     func connect(expected: RecoveryProbeUSBDevice) async throws { try await base.connect(expected: expected) }
     func observe() async throws -> String { observations += 1; return await base.observe() }
-    func readBoot2(_ slot: RecoveryBootSlot) async throws -> RecoveryBoot2Read { try await (base as any RecoveryProbeIO).readBoot2(slot) }
+    func readBoot2(_ slot: RecoveryBootSlot) async throws -> RecoveryBoot2Read {
+        bootReads += 1
+        if let activeImageOverride {
+            let changed = (fault == "startup-changed-during-backup" && bootReads > 2) || (fault == "startup-changed-after-finish" && bootReads > 3)
+            return .image(changed ? source.stock : activeImageOverride)
+        }
+        return try await (base as any RecoveryProbeIO).readBoot2(slot)
+    }
     func readBoot1() async throws -> Data { try await (base as any RecoveryProbeIO).readBoot1() }
     func readPartitions() async throws -> Data {
         let data = try await (base as any RecoveryProbeIO).readPartitions()
@@ -67,6 +75,214 @@ private actor BlockingRuntimeIO: RecoveryProbeIO {
 }
 @Suite(.serialized)
 struct SNESDataSnapshotCaptureTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_MENU_PARENT"] != nil), arguments: ["current", "stock", "changed-record"])
+    func acceptedStartupCanBeCheckedWithoutPreparingAnUpgrade(_ scenario: String) async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let (journal, operation) = try await menuStartupParentFixture(root)
+        let pins = try PinnedFELInputs.load()
+        let inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        let accepted: SNESFirmwareAcceptedInstall
+        do { accepted = try await journal.acceptedInstall(); try await journal.close() }
+        catch { try? await journal.close(); throw error }
+        let source = accepted.material.source
+        let startup = try SNESDataSnapshotInstalledStartup(accepted: accepted)
+        let io = try SNESDataSnapshotFakeIO(source: source, fault: "hash", digestOverride: String(repeating: "0", count: 64), activeImageOverride: scenario == "current" ? accepted.material.targetImage : source.stock)
+        if scenario == "changed-record" {
+            let file = try FileHandle(forWritingTo: operation.appendingPathComponent("plan.json"))
+            try file.seekToEnd(); try file.write(contentsOf: Data([32])); try file.close()
+        }
+        await #expect(throws: (any Error).self) {
+            try await SNESDataSnapshotService(wait: {}).capture(source: source, inputs: inputs, io: io, installedStartup: startup)
+        }
+        #expect(await io.hashes == (scenario == "current" ? 1 : 0))
+        #expect(await io.chunks == 0)
+        if scenario == "changed-record" { #expect(await io.base.events.isEmpty) }
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_LATEST_PARENT"] != nil))
+    func latestAcceptedStartupIsCheckedWithoutAParentUpgrade() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_LATEST_PARENT"]))
+        let transactions = root.appendingPathComponent("transactions")
+        try FileManager.default.createDirectory(at: transactions, withIntermediateDirectories: false)
+        var current = original
+        while true {
+            try FileManager.default.copyItem(at: current, to: transactions.appendingPathComponent(current.lastPathComponent))
+            let plan = try JSONDecoder().decode(SNESFirmwarePlan.self, from: Data(contentsOf: current.appendingPathComponent("plan.json")))
+            guard let parent = plan.parentOperationID else { break }
+            current = original.deletingLastPathComponent().appendingPathComponent("SNESFirmware-" + parent.uuidString)
+        }
+        let copied = transactions.appendingPathComponent(original.lastPathComponent)
+        let digest = BackupManifest.digest(try Data(contentsOf: copied.appendingPathComponent("plan.json")))
+        let pins = try PinnedFELInputs.load()
+        let inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        let journal = try await SNESFirmwareJournal.reopen(operation: copied, reviewSHA256: digest, recovery: inputs)
+        let accepted: SNESFirmwareAcceptedInstall
+        do { accepted = try await journal.acceptedInstall(); try await journal.close() }
+        catch { try? await journal.close(); throw error }
+        #expect(accepted.material.trial.candidate.libraryRecipeVersion == 10)
+        let startup = try SNESDataSnapshotInstalledStartup(accepted: accepted), source = accepted.material.source
+        for (image, expectedHashes) in [(accepted.material.targetImage, 1), (source.stock, 0)] {
+            let io = try SNESDataSnapshotFakeIO(source: source, fault: "hash", digestOverride: String(repeating: "0", count: 64), activeImageOverride: image)
+            await #expect(throws: (any Error).self) {
+                try await SNESDataSnapshotService(wait: {}).capture(source: source, inputs: inputs, io: io, installedStartup: startup)
+            }
+            #expect(await io.hashes == expectedHashes)
+            #expect(await io.chunks == 0)
+        }
+        let io = try SNESDataSnapshotFakeIO(source: source, fault: "none", activeImageOverride: accepted.material.targetImage)
+        let store = try RecoveryBootSnapshotStore(root: root)
+        let result = try await SNESDataSnapshotService(wait: {}).captureAndSave(source: source, inputs: inputs, io: io, installedStartup: startup,
+            save: { snapshot in try await store.saveSNESDataSnapshotWithReceipt(snapshot) })
+        let saved = try SNESDataSnapshotPackage.load(receipt: result.backup, source: source)
+        #expect(saved.sha256 == io.digest)
+        #expect(await io.chunks == io.plan.chunkCount)
+        #expect(await io.base.events.filter { $0 == "disconnect" }.count == 1)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_SETUP"] != nil))
+    func originalStartupStillAllowsACompleteDataSnapshot() async throws {
+        let source = try #require(try snesPreparationFixture())
+        let io = try SNESDataSnapshotFakeIO(source: source, fault: "none")
+        let pins = try PinnedFELInputs.load()
+        let inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        let result = try await SNESDataSnapshotService(wait: {}).capture(source: source, inputs: inputs, io: io)
+        #expect(result.sha256 == (await io.digest))
+        #expect(await io.chunks == io.plan.chunkCount)
+        #expect(await io.bootReads == 4)
+        #expect(await io.base.events.filter { $0 == "disconnect" }.count == 1)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_MENU_PARENT"] != nil), arguments: ["accepted", "stock", "different"])
+    func reviewedSnapshotChecksTheAcceptedInstalledStartupBeforeReadingData(_ scenario: String) async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let (journal, _) = try await menuStartupParentFixture(root)
+        let parent: SNESMenuStartupParent
+        do { parent = try await journal.menuStartupParent(); try await journal.close() }
+        catch { try? await journal.close(); throw error }
+        let source = parent.installed.source
+        var active = parent.activeImage
+        if scenario == "stock" { active = source.stock }
+        if scenario == "different" { active[active.count - 1] ^= 1 }
+        let io = try SNESDataSnapshotFakeIO(source: source, fault: "hash", activeImageOverride: active)
+        let pins = try PinnedFELInputs.load()
+        let inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        await #expect(throws: (any Error).self) {
+            try await SNESDataSnapshotService(wait: {}).capture(source: source, inputs: inputs, io: io, installedParent: parent)
+        }
+        #expect(await io.hashes == (scenario == "accepted" ? 1 : 0))
+        #expect(await io.chunks == 0)
+        #expect(await io.base.events.filter { $0 == "disconnect" }.count == 1)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_MENU_STAGE_PARENT"] != nil), arguments: ["current", "earlier"])
+    func reviewedSnapshotChecksTheAcceptedMenuStage(_ scenario: String) async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let sourceOperation = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_MENU_STAGE_PARENT"]))
+        let transactions = root.appendingPathComponent("transactions")
+        try FileManager.default.createDirectory(at: transactions, withIntermediateDirectories: false)
+        var current = sourceOperation
+        while true {
+            try FileManager.default.copyItem(at: current, to: transactions.appendingPathComponent(current.lastPathComponent))
+            let saved = try JSONDecoder().decode(SNESFirmwarePlan.self, from: Data(contentsOf: current.appendingPathComponent("plan.json")))
+            guard let parentID = saved.parentOperationID else { break }
+            current = sourceOperation.deletingLastPathComponent().appendingPathComponent("SNESFirmware-" + parentID.uuidString)
+        }
+        let copied = transactions.appendingPathComponent(sourceOperation.lastPathComponent)
+        let review = BackupManifest.digest(try Data(contentsOf: copied.appendingPathComponent("plan.json")))
+        let pins = try PinnedFELInputs.load()
+        let inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        let journal = try await SNESFirmwareJournal.reopen(operation: copied, reviewSHA256: review, recovery: inputs)
+        let parent: SNESMenuStartupParent
+        do { parent = try await journal.libraryStartupParent(); try await journal.close() }
+        catch { try? await journal.close(); throw error }
+        let earlier = try #require(parent.installed.trial.evidence.parent).activeImage
+        #expect(earlier != parent.activeImage)
+        let source = parent.installed.source
+        let io = try SNESDataSnapshotFakeIO(source: source, fault: "hash", activeImageOverride: scenario == "current" ? parent.activeImage : earlier)
+        await #expect(throws: (any Error).self) {
+            try await SNESDataSnapshotService(wait: {}).capture(source: source, inputs: inputs, io: io, installedParent: parent)
+        }
+        #expect(await io.hashes == (scenario == "current" ? 1 : 0))
+        #expect(await io.chunks == 0)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_MENU_PARENT"] != nil))
+    func reviewedSnapshotCapturesWhenAcceptedStartupRemainsStable() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let (journal, _) = try await menuStartupParentFixture(root)
+        let parent: SNESMenuStartupParent
+        do { parent = try await journal.menuStartupParent(); try await journal.close() }
+        catch { try? await journal.close(); throw error }
+        let source = parent.installed.source
+        let io = try SNESDataSnapshotFakeIO(source: source, fault: "none", activeImageOverride: parent.activeImage)
+        let pins = try PinnedFELInputs.load()
+        let inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        let result = try await SNESDataSnapshotService(wait: {}).capture(source: source, inputs: inputs, io: io, installedParent: parent)
+        #expect(result.sha256 == (await io.digest))
+        #expect(await io.chunks == io.plan.chunkCount)
+        #expect(await io.bootReads == 4)
+        #expect(await io.base.events.filter { $0 == "disconnect" }.count == 1)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_MENU_PARENT"] != nil), arguments: ["none", "startup-changed-after-finish"])
+    func reviewedSnapshotSaveVerifiesAcceptedStartupAndReportsInterruptedCompletion(_ fault: String) async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let (journal, _) = try await menuStartupParentFixture(root)
+        let parent: SNESMenuStartupParent
+        do { parent = try await journal.menuStartupParent(); try await journal.close() }
+        catch { try? await journal.close(); throw error }
+        let source = parent.installed.source
+        let io = try SNESDataSnapshotFakeIO(source: source, fault: fault, activeImageOverride: parent.activeImage)
+        let pins = try PinnedFELInputs.load()
+        let inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        let store = try RecoveryBootSnapshotStore(root: root)
+        do {
+            let session = try await SNESDataSnapshotService(wait: {}).captureAndSave(source: source, inputs: inputs, io: io, installedParent: parent, save: { result in
+                try await store.saveSNESDataSnapshotWithReceipt(result)
+            })
+            #expect(fault == "none")
+            let backup = try SNESDataSnapshotPackage.load(receipt: session.backup, source: source)
+            #expect(backup.sha256 == (await io.digest))
+        } catch let error as SNESDataSnapshotPostSaveError {
+            #expect(fault == "startup-changed-after-finish" && error.backupVerified)
+            #expect(FileManager.default.fileExists(atPath: error.location.appendingPathComponent("manifest.json").path))
+        }
+        #expect(await io.bootReads == 4)
+        #expect(await io.base.events.filter { $0 == "disconnect" }.count == 1)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_MENU_PARENT"] != nil))
+    func reviewedSnapshotRefusesChangedInstallationRecordBeforeConnecting() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let (journal, operation) = try await menuStartupParentFixture(root)
+        let parent: SNESMenuStartupParent
+        do { parent = try await journal.menuStartupParent(); try await journal.close() }
+        catch { try? await journal.close(); throw error }
+        let plan = operation.appendingPathComponent("plan.json")
+        let file = try FileHandle(forWritingTo: plan); try file.seekToEnd(); try file.write(contentsOf: Data([32])); try file.close()
+        let source = parent.installed.source
+        let io = try SNESDataSnapshotFakeIO(source: source, fault: "none", activeImageOverride: parent.activeImage)
+        let pins = try PinnedFELInputs.load()
+        let inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        await #expect(throws: (any Error).self) {
+            try await SNESDataSnapshotService(wait: {}).capture(source: source, inputs: inputs, io: io, installedParent: parent)
+        }
+        #expect(await io.base.events.isEmpty)
+        #expect(await io.chunks == 0)
+        #expect(await io.hashes == 0)
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_MENU_PARENT"] != nil), arguments: ["startup-changed-during-backup", "startup-changed-after-finish"])
+    func reviewedSnapshotRejectsStartupChangedDuringCapture(_ fault: String) async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let (journal, _) = try await menuStartupParentFixture(root)
+        let parent: SNESMenuStartupParent
+        do { parent = try await journal.menuStartupParent(); try await journal.close() }
+        catch { try? await journal.close(); throw error }
+        let source = parent.installed.source
+        let io = try SNESDataSnapshotFakeIO(source: source, fault: fault, activeImageOverride: parent.activeImage)
+        let pins = try PinnedFELInputs.load()
+        let inputs = RecoveryBootInputs(fes1: pins.fes1, uboot: pins.uboot, bootImage: pins.bootImage)
+        await #expect(throws: (any Error).self) {
+            try await SNESDataSnapshotService(wait: {}).capture(source: source, inputs: inputs, io: io, installedParent: parent)
+        }
+        #expect(await io.chunks == io.plan.chunkCount)
+        #expect(await io.bootReads == (fault == "startup-changed-during-backup" ? 3 : 4))
+        #expect(await io.base.events.filter { $0 == "disconnect" }.count == 1)
+    }
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_SETUP"] != nil), arguments: ["none", "changed-after-save"])
     @MainActor func appSavesAndChecksDataBeforeClosingTheRecoverySession(_ fault: String) async throws {
         let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }

@@ -6,17 +6,29 @@ import SwiftHakchiCore
 /// user's requested NES workspace, so an unresolved write cannot disappear
 /// when a different folder is selected.
 enum RecoveryFirmwareJournalPolicy {
-    // The first physical recovery path is bound to the account that owns the
-    // privately preserved evidence. Another account must not get a new empty
-    // journal root for the same NES after an uncertain write.
-    private static let ownerUID: uid_t = 501
-    private static let ownerHomeSHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
+    // Journals use this account's home. The app does not check other accounts
+    // or Macs for unfinished operations, so recovery must stay on this same
+    // account and Mac until it is resolved.
     static func requireOwner(home: URL = FileManager.default.homeDirectoryForCurrentUser,
                              uid: uid_t = geteuid(), realUID: uid_t = getuid()) throws {
-        guard uid == ownerUID, realUID == ownerUID,
-              BackupManifest.digest(Data(home.standardizedFileURL.path.utf8)) == ownerHomeSHA256 else {
-            throw RecoveryProbeError.refused("This first NES firmware operation must run from the recovery evidence owner's Mac account. No console command was sent.")
+        guard uid != 0, uid == realUID, home.isFileURL,
+              let registeredHome = accountHome(uid),
+              home.standardizedFileURL == registeredHome.standardizedFileURL else {
+            throw RecoveryProbeError.refused("Firmware recovery must run as a non-root Mac account using its registered home folder. No console command was sent.")
         }
+    }
+    private static func accountHome(_ uid: uid_t) -> URL? {
+        var entry = passwd()
+        var result: UnsafeMutablePointer<passwd>?
+        var buffer = [CChar](repeating: 0, count: 16_384)
+        let path: String? = buffer.withUnsafeMutableBufferPointer { bytes in
+            let status = getpwuid_r(uid, &entry, bytes.baseAddress, bytes.count, &result)
+            guard status == 0, result != nil, entry.pw_uid == uid,
+                  let pathPointer = entry.pw_dir else { return nil }
+            return String(validatingUTF8: pathPointer)
+        }
+        guard let path, path.hasPrefix("/"), path != "/" else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true)
     }
     static var root: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -32,11 +44,48 @@ enum RecoveryFirmwareJournalPolicy {
     static func ensureRoot() throws -> URL {
         try requireOwner()
         let destination = root
-        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
+        try createDirectoryWithoutFollowingSymlinks(at: destination,
+            durableFrom: FileManager.default.homeDirectoryForCurrentUser)
         let checked = try RestoreDirectory(destination)
         try checked.check()
         return checked.url
+    }
+    /// Create missing path components relative to already-open directories.
+    /// Refuse links before creating anything beneath them. Sync every parent
+    /// from the existing home down, including on retry after a failed sync.
+    static func createDirectoryWithoutFollowingSymlinks(at destination: URL, durableFrom ancestor: URL,
+        synchronize: (Int32) -> Int32 = { Darwin.fsync($0) }) throws {
+        guard destination.isFileURL, ancestor.isFileURL else { throw RestoreDirectory.failure() }
+        let path = destination.standardizedFileURL
+        let components = path.pathComponents
+        let anchor = ancestor.standardizedFileURL.pathComponents
+        guard path.path.hasPrefix("/"), anchor.count > 1, components.count > anchor.count,
+              Array(components.prefix(anchor.count)) == anchor else { throw RestoreDirectory.failure() }
+        var parent = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard parent >= 0 else { throw RestoreDirectory.failure() }
+        defer { close(parent) }
+        for (index, component) in components.dropFirst().enumerated() {
+            let synchronizeParent = index + 1 >= anchor.count
+            var created = false
+            var child = openat(parent, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            if child < 0 && errno == ENOENT {
+                guard synchronizeParent else { throw RestoreDirectory.failure() }
+                let status = mkdirat(parent, component, 0o700)
+                guard status == 0 || errno == EEXIST else {
+                    throw RestoreDirectory.failure()
+                }
+                created = status == 0
+                if created && synchronize(parent) != 0 { throw RestoreDirectory.failure() }
+                child = openat(parent, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            }
+            guard child >= 0 else { throw RestoreDirectory.failure() }
+            if synchronizeParent && !created && synchronize(parent) != 0 {
+                close(child)
+                throw RestoreDirectory.failure()
+            }
+            close(parent)
+            parent = child
+        }
     }
 }
 

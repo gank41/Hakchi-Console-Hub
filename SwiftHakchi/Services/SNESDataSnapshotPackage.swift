@@ -21,6 +21,41 @@ struct SNESDataSnapshotPackage: Sendable {
         let checked=try Self.loadChecked(directory:directory,expectedHWID:hardwareID,expectedManifestSHA256:manifestSHA256,source:validatedSource)
         guard checked.receipt==receipt,checked.byteCount==byteCount,checked.sha256==sha256 else { throw SNESDataSnapshotError.refused }
     }
+    /// Read exactly one piece from this reviewed backup. This checks that piece
+    /// against the saved manifest; it does not attest other pieces or authorize
+    /// any console write. A full restore still needs live identity and recovery.
+    func readVerifiedChunk(_ index: Int) throws -> Data {
+        try Task.checkCancellation(); try validatedSource?.revalidate()
+        guard byteCount % 512 == 0 else { throw SNESDataSnapshotError.refused }
+        let plan = try SNESDataSnapshotPlan(partitionSectors: UInt64(byteCount / 512))
+        let range = try plan.range(index), name = SNESDataSnapshotPlan.name(index)
+        let manifest = try JSONDecoder().decode(SNESDataSnapshotResult.Manifest.self, from: receipt)
+        guard manifest.binding == binding, manifest.byteCount == byteCount, manifest.sha256 == sha256,
+              let digest = manifest.files[name], SNESDataSnapshotChunk.isDigest(digest) else { throw SNESDataSnapshotError.refused }
+        let dir = try RestoreDirectory(directory)
+        guard try dir.read("manifest.json", maximum: 65_536) == receipt else { throw SNESDataSnapshotError.refused }
+        let bytes = try dir.read(name, maximum: SNESDataSnapshotPlan.maximumChunkBytes)
+        guard bytes.count == range.count, BackupManifest.digest(bytes) == digest,
+              try dir.read("manifest.json", maximum: 65_536) == receipt else { throw SNESDataSnapshotError.refused }
+        try dir.check(); try validatedSource?.revalidate(); try Task.checkCancellation()
+        return bytes
+    }
+    /// Stream the reviewed snapshot in partition order with bounded memory.
+    /// Any read, verification, cancellation, or consumer error can occur
+    /// after some or all pieces were delivered. This is not an atomic restore
+    /// and does not authorize or perform a console write.
+    func streamVerifiedChunks(_ consume: (Int, Data) throws -> Void) throws {
+        try revalidate()
+        let plan = try SNESDataSnapshotPlan(partitionSectors: UInt64(byteCount / 512))
+        var full = SHA256()
+        for index in 0..<plan.chunkCount {
+            let bytes = try readVerifiedChunk(index)
+            full.update(data: bytes)
+            try consume(index, bytes)
+        }
+        guard full.finalize().map({ String(format: "%02x", $0) }).joined() == sha256 else { throw SNESDataSnapshotError.refused }
+        try revalidate()
+    }
     /// Match an independently saved data snapshot to the exact setup it will protect.
     static func load(receipt: SNESDataSnapshotReceipt, source: SNESPreparationSource) throws -> Self {
         try loadChecked(directory:receipt.directory,expectedHWID:source.source.expectedHWID,expectedManifestSHA256:receipt.manifestSHA256,source:source)

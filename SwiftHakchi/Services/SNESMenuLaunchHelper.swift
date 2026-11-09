@@ -6,7 +6,7 @@ enum SNESMenuLaunchHelper {
     static let byteCount=1680
     static let sha256="ffab13eb1a1132062872764f62e5fde0125fc00df06b0ed9eb1ecd116a8ccbcd"
     static func load() throws -> Data {
-        guard let url=Bundle.module.url(forResource:"snes-menu-launch",withExtension:nil) else {throw SNESRuntimeBinding.failure()}
+        guard let url=Bundle.appBundle.url(forResource:"snes-menu-launch",withExtension:nil) else {throw SNESRuntimeBinding.failure()}
         let bytes=try Data(contentsOf:url,options:.mappedIfSafe)
         try validate(bytes);return bytes
     }

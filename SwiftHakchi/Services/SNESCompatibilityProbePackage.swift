@@ -13,7 +13,7 @@ struct SNESCompatibilityProbePackage: Sendable {
     let inspection: ARMRuntimeELF
 
     static func loadBundled() throws -> Self {
-        guard let root = Bundle.module.url(forResource: "SNESCompatibilityProbe", withExtension: nil) else {
+        guard let root = Bundle.appBundle.url(forResource: "SNESCompatibilityProbe", withExtension: nil) else {
             throw failure()
         }
         return try Self(executable: Data(contentsOf: root.appendingPathComponent("size-probe")),

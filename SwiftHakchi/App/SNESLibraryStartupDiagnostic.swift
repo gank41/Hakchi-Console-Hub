@@ -13,11 +13,20 @@ enum SNESLibraryStartupDiagnostic {
         let library = ["--prepare-snes-library-startup", "--preflight-snes-library-startup", "--test-snes-library-startup", "--check-snes-library-startup"]
         let prior = ["--prepare-snes-menu-startup", "--preflight-snes-menu-startup", "--test-snes-menu-startup", "--check-snes-menu-startup"]
         let parallel = ["--prepare-snes-parallel-startup", "--preflight-snes-parallel-startup", "--test-snes-parallel-startup", "--check-snes-parallel-startup"]
-        guard let mode = args.first, let index = library.firstIndex(of: mode) ?? parallel.firstIndex(of: mode) else { return nil }
+        let combined = ["--prepare-snes-combined-startup", "--preflight-snes-combined-startup", "--test-snes-combined-startup", "--check-snes-combined-startup"]
+        let queued = ["--prepare-snes-queued-startup", "--preflight-snes-queued-startup", "--test-snes-queued-startup", "--check-snes-queued-startup"]
+        let concurrent = ["--prepare-snes-concurrent-startup", "--preflight-snes-concurrent-startup", "--test-snes-concurrent-startup", "--check-snes-concurrent-startup"]
+        guard let mode = args.first, let index = library.firstIndex(of: mode) ?? parallel.firstIndex(of: mode) ?? combined.firstIndex(of: mode) ?? queued.firstIndex(of: mode) ?? concurrent.firstIndex(of: mode) else { return nil }
+        let isConcurrent = concurrent.contains(mode)
+        let isQueued = queued.contains(mode)
         let isParallel = parallel.contains(mode)
+        let isCombined = combined.contains(mode)
         var translated = args; translated[0] = prior[index]
         return try await SNESMenuStartupDiagnostic.runIfPresent(translated,
             resolveParent: { journal in
+                if isConcurrent { return try await journal.concurrentLibraryStartupParent() }
+                if isQueued { return try await journal.queuedLibraryStartupParent() }
+                if isCombined { return try await journal.combinedLibraryStartupParent() }
                 if isParallel { return try await journal.parallelLibraryStartupParent() }
                 return try await journal.libraryStartupParent()
             }, loadInputs: loadInputs,

@@ -58,4 +58,30 @@ import SwiftHakchiCore
         #expect(try await reopened.currentBackup()?.manifestSHA256 == current.manifestSHA256)
         try await reopened.close()
     }
+
+    @Test func finishingWithoutAnotherBackupKeepsPreviousFilesForNextSyncCleanup() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let (plan, journal, operation) = try await saved(root)
+        let live = try SNESLibrarySelectionTransactionTests().active(plan)
+        // A saved selection without a verified restart must never be marked complete.
+        await #expect(throws: (any Error).self) { try await journal.finishKeepingPrevious(current: live) }
+        try await journal.noteRestarted(evidence(plan, suppliedInventory: live))
+        await #expect(throws: (any Error).self) { try await journal.finishKeepingPrevious(current: plan.before) }
+        await #expect(throws: (any Error).self) { try await journal.finishKeepingPrevious(current: live, now: Date().addingTimeInterval(120)) }
+        #expect(try await journal.phase() == .awaitingTest)
+        try await journal.finishKeepingPrevious(current: live)
+        #expect(try await journal.phase() == .finishedKeepingPrevious)
+        #expect(try await journal.currentBackup() == nil)
+        try plan.backup.validate()
+        try await journal.close()
+        #expect(try SNESLibraryJournal.pending(root: operation.deletingLastPathComponent(), hwid: plan.before.hwid)?.phase == .finishedKeepingPrevious)
+        let reopened = try SNESLibraryJournal(operation: operation, reviewSHA256: plan.reviewSHA256, plan: plan)
+        #expect(try await reopened.phase() == .finishedKeepingPrevious)
+        try await reopened.close()
+        #expect(throws: (any Error).self) { try SNESLibraryJournal.firmwareLease(hwid: plan.before.hwid, root: operation.deletingLastPathComponent()) }
+        let next = try await SNESLibraryJournalTests().plan(root.appendingPathComponent("next-input"))
+        #expect(next.before.hwid == plan.before.hwid)
+        #expect(throws: (any Error).self) { try SNESLibraryJournal.prepare(plan: next, root: operation.deletingLastPathComponent()) }
+        #expect(throws: (any Error).self) { try SNESLibraryJournal.backupDeletionLease(directory: plan.backup.directory, root: operation.deletingLastPathComponent()) }
+    }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Testing
 @testable import SwiftHakchi
 
@@ -7,15 +8,7 @@ struct LegacyBoot2ActivationDiagnosticTests {
         let expected = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Development/NES/Backups/StockKernelRestoreJournals", isDirectory: true)
         #expect(RecoveryFirmwareJournalPolicy.root == expected.standardizedFileURL)
-        // This legacy workflow is intentionally bound to the evidence owner's
-        // account. CI uses another account and must be refused without writing.
-        if (try? RecoveryFirmwareJournalPolicy.requireOwner()) != nil {
-            try RecoveryFirmwareJournalPolicy.require(expected)
-        } else {
-            #expect(throws: (any Error).self) {
-                try RecoveryFirmwareJournalPolicy.require(expected)
-            }
-        }
+        try RecoveryFirmwareJournalPolicy.require(expected)
         #expect(throws: (any Error).self) {
             try RecoveryFirmwareJournalPolicy.require(expected.deletingLastPathComponent())
         }
@@ -23,7 +16,22 @@ struct LegacyBoot2ActivationDiagnosticTests {
             try RecoveryFirmwareJournalPolicy.requireOwner(uid: 0)
         }
         #expect(throws: (any Error).self) {
+            try RecoveryFirmwareJournalPolicy.requireOwner(realUID: 0)
+        }
+        #expect(throws: (any Error).self) {
             try RecoveryFirmwareJournalPolicy.requireOwner(home: URL(fileURLWithPath: "/Users/another-account"))
+        }
+    }
+    @Test func accountPolicyAcceptsAnotherRegisteredNonRootAccountWithoutWriting() throws {
+        let entry = try #require(getpwuid(1))
+        let registeredHome = try #require(entry.pointee.pw_dir)
+        let home = URL(fileURLWithPath: String(cString: registeredHome), isDirectory: true)
+        try RecoveryFirmwareJournalPolicy.requireOwner(home: home, uid: 1, realUID: 1)
+        #expect(throws: (any Error).self) {
+            try RecoveryFirmwareJournalPolicy.requireOwner(home: home.appendingPathComponent("other"), uid: 1, realUID: 1)
+        }
+        #expect(throws: (any Error).self) {
+            try RecoveryFirmwareJournalPolicy.requireOwner(home: home, uid: 1, realUID: 2)
         }
     }
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_RECOVERY_TEST_BACKUPS"] != nil))

@@ -6,7 +6,7 @@ final class AppConfig: ObservableObject, Codable {
     static let shared = AppConfig.load()
     static var defaultWorkspace: URL {
         if let override = ProcessInfo.processInfo.environment["SWIFTHAKCHI_WORKSPACE"], !override.isEmpty { return URL(fileURLWithPath: override, isDirectory: true) }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Hakchi Console Hub", isDirectory: true)
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Development/NES", isDirectory: true)
     }
     @Published var appIconID: String = "pow-block"
     @Published var workspacePath: String = AppConfig.defaultWorkspace.path

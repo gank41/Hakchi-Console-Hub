@@ -897,6 +897,91 @@ enum SNESLibraryStartupScripts {
         return verifier.replacingOccurrences(of: old, with: replacement)
     }
 
+    /// Offline-only experiment. No startup recipe or install path selects it.
+    /// Read the link count and owner in one stat invocation; all graph, payload,
+    /// selector and four-worker checksum checks remain in place.
+    static func combinedStatVerifierCandidate() throws -> String {
+        let original = #"""
+    regular() {
+      test -f "$1" && test ! -L "$1" || return 1
+      test "$("$B" stat -c '%h' "$1")" = 1
+      test "$("$B" stat -c '%u' "$1")" = 0
+    }
+    """#
+        let replacement = #"""
+    regular() {
+      test -f "$1" && test ! -L "$1" || return 1
+      regular_info=$("$B" stat -c '%h:%u' "$1") || return 1
+      test "$regular_info" = '1:0'
+    }
+    """#
+        let source = try parallelChecksumVerifierCandidate()
+        guard source.components(separatedBy: original).count == 2 else { throw SNESRuntimeBinding.failure() }
+        return source.replacingOccurrences(of: original, with: replacement)
+    }
+
+    /// Experimental verifier for benchmarks and a separate RAM-only trial.
+    /// No installable startup recipe selects this function.
+    static func parallelEntryVerifierCandidate() throws -> String {
+        let source = try combinedStatVerifierCandidate()
+        let start = "exec 4< \"$manifest\"\nfiles=0; objects=0; entries=0; pages=0\nwhile IFS= read -r row <&4; do\n"
+        let end = "exec 4<&-\n"
+        guard source.components(separatedBy: start).count == 2,
+              let startRange = source.range(of: start),
+              let endRange = source.range(of: end, range: startRange.upperBound..<source.endIndex) else { throw SNESRuntimeBinding.failure() }
+        var block = String(source[startRange.lowerBound..<endRange.upperBound])
+        let before = "  set -- $row\n  case \"$1\" in\n"
+        let after = #"""
+      set -- $row
+      case "$group:$1" in
+        meta:PAGE|meta:OBJECT|meta:FILE|stock:STOCK|entry:ENTRY) ;;
+        *) continue;;
+      esac
+      case "$1" in
+    """# + "\n"
+        guard block.components(separatedBy: before).count == 2 else { throw SNESRuntimeBinding.failure() }
+        block = block.replacingOccurrences(of: before, with: after)
+        let streaming = #"""
+    files=0; objects=0; entries=0; pages=0
+    printf '%s\n' "$manifest_snapshot" | while IFS= read -r row; do
+    """# + "\n"
+        guard block.hasPrefix(start), block.hasSuffix(end) else { throw SNESRuntimeBinding.failure() }
+        block = streaming + block.dropFirst(start.count).dropLast(end.count)
+        let prefix = #"""
+    # Experimental: every original validation runs; none of the checks write to disk.
+    # All workers read one verified, bounded snapshot of the manifest.
+    # Do not let a file that grows after ascii_file's size check make the
+    # shell capture an unbounded amount of data. The digest still has to
+    # match the exact reviewed manifest below.
+    manifest_snapshot=$("$B" head -c 1048577 "$manifest")
+    value=$(printf '%s\n' "$manifest_snapshot" | "$B" sha256sum); test "${value%% *}" = "$tree"
+    counts=$(printf '%s\n' "$manifest_snapshot" | "$B" awk '$1=="PAGE"{p++} $1=="FILE"{f++} $1=="OBJECT"{o++} $1=="ENTRY"{e++} END{print f+0,o+0,e+0,p+0}')
+    set -- $counts
+    test "$#" = 4
+    files=$1; objects=$2; entries=$3; pages=$4
+    check_group() {
+      group=$1
+    """# + "\n"
+        let suffix = #"""
+
+    }
+    check_group meta & meta_pid=$!
+    check_group stock & stock_pid=$!
+    check_group entry & entry_pid=$!
+    failed=0
+    wait "$meta_pid" || failed=1
+    wait "$stock_pid" || failed=1
+    wait "$entry_pid" || failed=1
+    test "$failed" = 0
+    """# + "\n"
+        var result = source
+        result.replaceSubrange(startRange.lowerBound..<endRange.upperBound, with: prefix + block + suffix)
+        let diskTable = #"table=$("$B" awk -v base="$base" -v root="$N/objects/" '$1=="FILE" {print $4 "  " base "/" $2} $1=="OBJECT" {print $4 "  " root $2}' "$manifest")"#
+        let snapshotTable = #"table=$(printf '%s\n' "$manifest_snapshot" | "$B" awk -v base="$base" -v root="$N/objects/" '$1=="FILE" {print $4 "  " base "/" $2} $1=="OBJECT" {print $4 "  " root $2}')"#
+        guard result.components(separatedBy: diskTable).count == 2 else { throw SNESRuntimeBinding.failure() }
+        return result.replacingOccurrences(of: diskTable, with: snapshotTable)
+    }
+
     /// Recipe 7 accepts the stock manager's bounded launch options.
     static let launchCompatibleChangePage = #"""
     #!/bin/sh
@@ -1493,6 +1578,55 @@ enum SNESLibraryStartupScripts {
     checked=$("$B" sh "$R/menu-route"); test "$checked" = "$folder"
     configured "$folder"
     """# + "\n"
+    /// Offline-only overlap experiment. No startup recipe selects this handler.
+    /// Waiting requests retain their original selection, page and manager identity.
+    static func queuedChangePageCandidate() throws -> String {
+        var script = changePage
+        func replace(_ old: String, _ new: String) throws {
+            guard script.components(separatedBy: old).count == 2 else { throw SNESRuntimeBinding.failure() }
+            script = script.replacingOccurrences(of: old, with: new)
+        }
+        let oldLock = #"""
+        "$B" mkdir -m 0700 "$R/menu-change.lock"
+        """#
+        let newLock = #"""
+        # Bind this request to the page and selection visible when it was issued.
+        regular "$T"; regular "$N/active-menu"
+        size=$("$B" stat -c '%s' "$N/active-menu"); test "$size" -gt 0 && test "$size" -le 256
+        value=$("$B" sha256sum "$N/active-menu"); requested_selection=${value%% *}
+        requested_folder=$("$B" awk '/^GamesFolder = /{print substr($0,15);n++}END{if(n!=1)exit 1}' "$T")
+        no_game
+        requested_manager=$("$B" pidof clover-mcp); case "$requested_manager" in ''|*[!0-9]*) exit 1;; esac
+        test "$requested_manager" -gt 1 && test "$requested_manager" != "$$"
+        requested_manager_token=$(process_token "$requested_manager" clover-mcp)
+        test "${requested_manager_token%%:*}" = 1
+        acquired=0; attempt=0
+        while test "$attempt" -lt 100; do
+          if "$B" mkdir -m 0700 "$R/menu-change.lock" 2>/dev/null; then acquired=1; break; fi
+          test -d "$R/menu-change.lock" && test ! -L "$R/menu-change.lock"
+          test "$("$B" stat -c '%u:%a' "$R/menu-change.lock")" = '0:700'
+          "$B" sleep 0.1
+          attempt=$((attempt+1))
+        done
+        test "$acquired" = 1
+        """#
+        try replace(oldLock, newLock)
+        let oldSelection = #"value=$("$B" sha256sum "$N/active-menu"); selection_hash=${value%% *}"#
+        try replace(oldSelection, oldSelection + "\n" + #"test "$selection_hash" = "$requested_selection""#)
+        let oldPage = #"active_page=${current##*/}"#
+        try replace(oldPage, #"test "$current" = "$requested_folder""# + "\n" + oldPage)
+        let oldManager = #"mcp_token=$(process_token "$mcp" clover-mcp); test "${mcp_token%%:*}" = 1"#
+        try replace(oldManager, oldManager + "\n" + #"test "$mcp" = "$requested_manager" && test "$mcp_token" = "$requested_manager_token""#)
+        let oldManifest = #"""
+        "$B" awk -v page="$active_page" '$1=="PAGE" && "p" $2=="p" page {n++}END{if(n!=1)exit 1}' "$manifest"
+        """#
+        let edge = #"""
+        "$B" awk -v from="$active_page" -v to="$target" '$1=="ENTRY" && "p" $2=="p" from && $5=="link" && "p" $6=="p" to {n++}END{if(n!=1)exit 1}' "$manifest"
+        """#
+        try replace(oldManifest, oldManifest + "\n" + edge)
+        return script
+    }
+
     /// Experimental source only; no startup recipe selects this variant. The
     /// existing installed recipe remains byte-exact for reconstruction. The
     /// future supervisor must actually use this short executable name.

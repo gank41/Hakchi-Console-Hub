@@ -2,8 +2,10 @@ import Foundation
 import SwiftHakchiCore
 
 protocol LegacyArchiveReclaimDevice: Sendable {
+    func requireLegacyIdentity() async throws
     func inspect() async throws -> LegacyConsoleReport
     func requireIdentity() async throws
+    func chipID() async throws -> String
     func inspectOperation(operationID: UUID, treeSHA256: String) async throws -> LegacySyncInspection
     func inventoryLive(operationID: UUID) async throws -> Data
     func inspectArchive(operationID: UUID, treeSHA256: String,
@@ -61,7 +63,7 @@ enum LegacyArchiveReclaim {
               object["sha256"] as? String == record.backupSHA256 else {
             throw LegacySyncJournalError.invalidRecord
         }
-        try await device.requireIdentity()
+        try await requireBoundIdentity(record, device: device)
         let report = try await device.inspect()
         try LegacyGameChangeService.validateReport(report)
         let state: LegacySyncInspection
@@ -119,5 +121,16 @@ enum LegacyArchiveReclaim {
                        freeBytes: report.freeBytes, archiveSHA256: record.archiveSHA256,
                        treeSHA256: record.treeSHA256, stageDirectory: record.stageDirectory,
                        backupDirectory: record.backupDirectory)
+    }
+
+    static func requireBoundIdentity(_ record: LegacySyncJournal,
+                                     device: any LegacyArchiveReclaimDevice) async throws {
+        guard let fingerprint = record.effectiveChipIDFingerprint else {
+            throw LegacyChangeError.refused("This older archive has no verified NES identity. Keep it for manual review.")
+        }
+        try await device.requireIdentity()
+        guard LegacyDeviceIdentity.matches(try await device.chipID(), fingerprint: fingerprint) else {
+            throw LegacyInspectionError.invalidBackup
+        }
     }
 }

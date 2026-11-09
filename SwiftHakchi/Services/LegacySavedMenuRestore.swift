@@ -226,7 +226,8 @@ actor LegacySavedMenuRestore {
 
     private func currentMenu(report: LegacyConsoleReport,
                              device: any LegacySavedMenuRestoreDevice) async throws -> LegacySyncJournal {
-        guard let previous = try await store.latestAcceptedMenu(),
+        let chipID = try await device.chipID()
+        guard let previous = try await store.latestAcceptedMenu(matchingChipID: chipID),
               previous.selectedCodes.map(Set.init) == report.visibleCodes,
               previous.stageDirectory.deletingLastPathComponent().standardizedFileURL
                 == workspace.root.appendingPathComponent("Stages"),

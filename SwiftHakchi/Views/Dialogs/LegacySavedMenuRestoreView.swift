@@ -17,6 +17,7 @@ struct LegacySavedMenuRestoreView: View {
     @State private var showTransfer = false
     @State private var showSwitch = false
     @State private var showAccept = false
+    @State private var showConfirmAccepted = false
     @State private var showRollback = false
 
     private var sameSession: Bool {
@@ -82,8 +83,8 @@ struct LegacySavedMenuRestoreView: View {
                     case .activationIntent, .uncertain:
                         Button("Check Recovery") { Task { await checkRecovery() } }
                             .disabled(working || !sameSession)
-                        if recovery?.phase == .accepted && recovery?.outcome == .newTreePresent {
-                            Button("Confirm Accepted Menu") { Task { await reconcileAccepted() } }
+                        if recovery?.phase == .accepted && recovery?.outcome == .newTreePresent && recovery?.lock == false {
+                            Button("Confirm Accepted Menu…") { showConfirmAccepted = true }
                                 .disabled(working || !sameSession)
                         } else if recovery?.outcome == .newTreePresent {
                             Button("Continue to Testing") { Task { await resumeAcceptance() } }
@@ -96,10 +97,17 @@ struct LegacySavedMenuRestoreView: View {
                                 .disabled(working || !sameSession)
                         }
                     case .activePendingAcceptance:
-                        Button("Accept Working Menu…") { showAccept = true }
+                        Button("Check Recovery") { Task { await checkRecovery() } }
                             .disabled(working || !sameSession)
-                        Button("Restore Previous Menu…") { showRollback = true }
-                            .disabled(working || !sameSession)
+                        if recovery?.phase == .accepted && recovery?.outcome == .newTreePresent && recovery?.lock == false {
+                            Button("Confirm Accepted Menu…") { showConfirmAccepted = true }
+                                .disabled(working || !sameSession)
+                        } else {
+                            Button("Accept Working Menu…") { showAccept = true }
+                                .disabled(working || !sameSession)
+                            Button("Restore Previous Menu…") { showRollback = true }
+                                .disabled(working || !sameSession)
+                        }
                     case .accepted, .discarded, .rolledBack: EmptyView()
                     }
                 }
@@ -126,6 +134,12 @@ struct LegacySavedMenuRestoreView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Check the pages and artwork, launch an imported game and a built-in game, confirm controller input, then return to the first game page before accepting.")
+        }
+        .confirmationDialog("Have you tested the accepted menu and games?", isPresented: $showConfirmAccepted) {
+            Button("Confirm Accepted Menu") { Task { await reconcileAccepted() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Check the pages and artwork, try the games and controller, then return to the first NES game page. This updates the Mac record without changing the NES menu.")
         }
         .confirmationDialog("Return to the previous menu?", isPresented: $showRollback) {
             Button("Restore Previous Menu") { Task { await rollback() } }

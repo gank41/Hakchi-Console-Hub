@@ -17,7 +17,7 @@ enum ConsoleRestoreChoice: String, Codable, CaseIterable, Sendable {
     }
     var explanation: String {
         switch self {
-        case .returnToBuiltInGames: return "Remove added games from this console and show its original games. Keep saves, settings and your Mac library."
+        case .returnToBuiltInGames: return "Show the built-in games again. Your saves, settings and Mac library stay. You can choose whether to back up and remove the previous console copy."
         case .restoreOriginalStartup: return "Use this console’s recovery backup to restore its original startup software. Keep saves and your Mac library."
         case .eraseSavesAndSettings: return "Erase this console’s saves and settings after a separate confirmation. Keep your Mac library."
         }

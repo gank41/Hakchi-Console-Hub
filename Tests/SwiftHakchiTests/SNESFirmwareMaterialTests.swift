@@ -54,6 +54,8 @@ struct SNESFirmwareMaterialTests {
         try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: false)
         let hostCalls = OSAllocatedUnfairLock(initialState: 0)
         let menuTrials = OSAllocatedUnfairLock(initialState: 0)
+        let snapshotStartup = OSAllocatedUnfairLock<Data?>(initialState: nil)
+        let snapshotReaders = OSAllocatedUnfairLock(initialState: [SNESDataSnapshotFakeIO]())
         let upgradeShells = OSAllocatedUnfairLock(initialState: [SNESFirmwareShellFake]())
         let config = AppConfig(); config.lastConsoleType = .snesUsa; config.workspacePath = root.path; config.backupDirectoryPath = root.path
         let app = AppState(startDeviceMonitoring: false, config: config, saveConfiguration: {},
@@ -67,6 +69,13 @@ struct SNESFirmwareMaterialTests {
             },
             makeSNESInstalledStartupIO: { trial in try StartupTrialSessionFake(expected: .checked(trial), fault: "none", booted: true) },
             makeSNESMenuStartupPreflightIO: { _, parent in try MenuStartupPreflightFake(parent: parent, fault: "none") },
+            makeSNESDataSnapshotIO: { source in
+                guard let reader = try? SNESDataSnapshotFakeIO(source: source, fault: "none", activeImageOverride: snapshotStartup.withLock({ $0 })) else {
+                    preconditionFailure("The simulated snapshot source must be valid")
+                }
+                snapshotReaders.withLock { $0.append(reader) }
+                return reader
+            },
             makeSNESStartupTrialIO: { trial in
                 let count = menuTrials.withLock { value in value += 1; return value }
                 return try StartupTrialSessionFake(expected: .checked(trial), fault: "none", booted: count.isMultiple(of: 2))
@@ -102,6 +111,14 @@ struct SNESFirmwareMaterialTests {
         let reopenedAccepted = try await app.reopenSNESReviewedInstallation(operation: prepared.operation, review: saved)
         #expect(reopenedAccepted.phase == .menuAccepted)
         #expect(hostCalls.withLock { $0 } == 2)
+        let exerciseFreshBackup = ProcessInfo.processInfo.environment["HC_SNES_FRESH_BACKUP_ONLY"] == "1"
+        if exerciseFreshBackup {
+            snapshotStartup.withLock { $0 = reviewed.targetImage }
+            let captured = try await app.backupSNESReviewedCurrentData(after: selection, ready: true, progress: { _ in })
+            let saved = try SNESDataSnapshotPackage.load(receipt: captured, source: reviewed.source)
+            let reader = try #require(snapshotReaders.withLock { $0.last })
+            #expect(saved.sha256 == reader.digest)
+        }
         let menuCandidate = try await app.prepareSNESMenuStartup(after: selection, currentData: fresh)
         let preparedMenu = try SNESStartupAdapterCandidate.load(directory: menuCandidate.directory, expectedManifestSHA256: menuCandidate.manifestSHA256)
         #expect(preparedMenu.hasMenuSupport)
@@ -145,6 +162,20 @@ struct SNESFirmwareMaterialTests {
         try await menuAccepted.close()
         let reopenedMenu = try await app.reopenSNESMenuUpgrade(operation: menuUpgrade.operation, after: selection)
         #expect(reopenedMenu.phase == .menuAccepted && reopenedMenu.upgrade.reviewSHA256 == menuUpgrade.reviewSHA256)
+        if exerciseFreshBackup {
+            snapshotStartup.withLock { $0 = menuMaterial.targetImage }
+            let captured = try await app.backupSNESReviewedCurrentData(after: selection, menu: menuUpgrade, ready: true, progress: { _ in })
+            let saved = try SNESDataSnapshotPackage.load(receipt: captured, source: reviewed.source)
+            let reader = try #require(snapshotReaders.withLock { $0.last })
+            #expect(saved.sha256 == reader.digest)
+            snapshotStartup.withLock { $0 = reviewed.targetImage }
+            await #expect(throws: (any Error).self) {
+                try await app.backupSNESReviewedCurrentData(after: selection, menu: menuUpgrade, ready: true, progress: { _ in })
+            }
+            let rejected = try #require(snapshotReaders.withLock { $0.last })
+            #expect(await rejected.hashes == 0)
+            return
+        }
         let libraryCandidate = try await app.prepareSNESLibraryStartup(after: selection, menu: menuUpgrade, currentData: fresh, confirmed: true)
         let preparedLibrary = try SNESStartupAdapterCandidate.load(directory: libraryCandidate.directory, expectedManifestSHA256: libraryCandidate.manifestSHA256)
         #expect(preparedLibrary.hasNativeArtworkSupport && preparedLibrary.backup.directory.path == fresh.directory.path)

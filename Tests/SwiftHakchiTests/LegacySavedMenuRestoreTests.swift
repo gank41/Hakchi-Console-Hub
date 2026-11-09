@@ -8,7 +8,9 @@ private enum SavedMenuDeviceFailure: Error { case timedOut }
 
 private actor SavedMenuDevice: LegacyOldMenuReclaimDevice {
     var report: LegacyConsoleReport
-    let identity: String
+    var identity: String
+    var identityReads = 0
+    var changeIdentityAtRead: Int?
     let priorID: UUID
     let currentEntries: [LegacyMenuStageManifest.Entry]
     var newID: UUID?
@@ -20,6 +22,9 @@ private actor SavedMenuDevice: LegacyOldMenuReclaimDevice {
     var formerEntries: [LegacyMenuStageManifest.Entry]?
     var formerPresent = true
     var removalTimesOut = false
+    var writeCount = 0
+    var allowLegacy = true
+    var priorStateOverride: LegacySyncInspection?
 
     init(report: LegacyConsoleReport, identity: String, priorID: UUID,
          currentEntries: [LegacyMenuStageManifest.Entry]) {
@@ -33,13 +38,25 @@ private actor SavedMenuDevice: LegacyOldMenuReclaimDevice {
             stockCodes: report.stockCodes, visibleCodes: report.visibleCodes)
     }
     func setTimeoutAfterActivate() { timeoutAfterActivate = true }
+    func simulateAccepted() { accepted = true }
+    func writes() -> Int { writeCount }
     func setChangedInventory() { changedInventory = true }
     func setChangedOldInventory() { changedOldInventory = true }
+    func setPriorState(_ state: LegacySyncInspection) { priorStateOverride = state }
     func setFormerEntries(_ entries: [LegacyMenuStageManifest.Entry]) { formerEntries = entries }
     func setRemovalTimeout() { removalTimesOut = true }
     func inspect() async throws -> LegacyConsoleReport { report }
     func requireIdentity() async throws {}
-    func chipID() async throws -> String { identity }
+    func refuseLegacy() { allowLegacy = false }
+    func requireLegacyIdentity() async throws {
+        if !allowLegacy { throw LegacyInspectionError.invalidBackup }
+    }
+    func changeIdentityAfterNextRead() { changeIdentityAtRead = identityReads + 2 }
+    func chipID() async throws -> String {
+        identityReads += 1
+        if identityReads == changeIdentityAtRead { identity = String(repeating: "f", count: 32) }
+        return identity
+    }
     func inventoryLive(operationID: UUID) async throws -> Data {
         let rows = currentEntries.map { entry in
             [entry.relativePath, entry.kind.rawValue, String(entry.byteCount),
@@ -58,17 +75,19 @@ private actor SavedMenuDevice: LegacyOldMenuReclaimDevice {
                                        : rows.joined(separator: "\n")
         return Data("STAGE_INVENTORY:\(operationID.uuidString)\n\(body)\nEND_STAGE_INVENTORY\n".utf8)
     }
-    func upload(_ manifest: LegacyMenuStageManifest, operationID: UUID) async throws { newID = operationID }
+    func upload(_ manifest: LegacyMenuStageManifest, operationID: UUID) async throws { writeCount += 1; newID = operationID }
     func verify(_ manifest: LegacyMenuStageManifest, operationID: UUID,
-                stageBudgetBytes: Int64) async throws {}
+                stageBudgetBytes: Int64) async throws { writeCount += 1 }
     func inventoryStage(operationID: UUID) async throws -> Data { Data() }
     func activate(_ manifest: LegacyMenuStageManifest, operationID: UUID) async throws {
+        writeCount += 1
         activated = true
         if timeoutAfterActivate { throw SavedMenuDeviceFailure.timedOut }
     }
-    func accept(_ manifest: LegacyMenuStageManifest, operationID: UUID) async throws { accepted = true }
+    func accept(_ manifest: LegacyMenuStageManifest, operationID: UUID) async throws { writeCount += 1; accepted = true }
     func inspectOperation(operationID: UUID, treeSHA256: String) async throws -> LegacySyncInspection {
         if operationID == priorID {
+            if let priorStateOverride { return priorStateOverride }
             return LegacySyncInspection(phase: .accepted, live: true, old: formerPresent,
                 stage: false, lock: false, archive: true)
         }
@@ -76,8 +95,8 @@ private actor SavedMenuDevice: LegacyOldMenuReclaimDevice {
             live: true, old: activated, stage: !activated,
             lock: activated && !accepted, archive: true)
     }
-    func discard(operationID: UUID, treeSHA256: String) async throws {}
-    func rollback(operationID: UUID, treeSHA256: String) async throws {}
+    func discard(operationID: UUID, treeSHA256: String) async throws { writeCount += 1 }
+    func rollback(operationID: UUID, treeSHA256: String) async throws { writeCount += 1 }
     func removeOldMenu(operationID: UUID, liveTreeSHA256: String,
                        oldTreeSHA256: String) async throws {
         formerPresent = false
@@ -91,7 +110,195 @@ private actor SavedMenuDevice: LegacyOldMenuReclaimDevice {
 }
 
 struct LegacySavedMenuRestoreTests {
+    @Test func acceptedUnboundHistoryRequiresConfirmedFullProofAndDoesNotCreateIndex() async throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("accepted-migration-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let context = try await fixture(bindRecord: false, root: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let index = context.backup.appendingPathComponent(LegacyMenuSnapshot.filename)
+        try FileManager.default.removeItem(at: index)
+        let binder = LegacyOldMenuBinding(workspace: context.workspace)
+        let review = try await binder.preview(operationID: context.previous.operationID, device: context.device)
+        await #expect(throws: (any Error).self) { _ = try await binder.bind(preview: review, device: context.device) }
+        await #expect(throws: (any Error).self) {
+            try await binder.bindReviewedAcceptedIdentity(preview: review, originalConsoleConfirmed: false,
+                                                           device: context.device, isSessionCurrent: { true })
+        }
+        await #expect(throws: (any Error).self) {
+            try await binder.bindReviewedAcceptedIdentity(preview: review, originalConsoleConfirmed: true,
+                                                           device: context.device, isSessionCurrent: { false })
+        }
+        let store = LegacySyncJournalStore(directory: context.workspace.journals)
+        #expect(try await store.load(context.previous.operationID).effectiveChipIDFingerprint == nil)
+        #expect(!FileManager.default.fileExists(atPath: index.path))
+        try await binder.bindReviewedAcceptedIdentity(preview: review, originalConsoleConfirmed: true,
+                                                       device: context.device, isSessionCurrent: { true })
+        #expect(try await store.load(context.previous.operationID).effectiveChipIDFingerprint == BackupManifest.digest(Data(chipID.utf8)))
+        #expect(!FileManager.default.fileExists(atPath: index.path))
+        #expect(await context.device.writes() == 0)
+        await #expect(throws: (any Error).self) {
+            try await binder.bindReviewedAcceptedIdentity(preview: review, originalConsoleConfirmed: true,
+                                                           device: context.device, isSessionCurrent: { true })
+        }
+    }
+
+    @Test func acceptedUnboundHistoryRefusesChangedFormerMenu() async throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("accepted-migration-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let context = try await fixture(bindRecord: false, root: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let binder = LegacyOldMenuBinding(workspace: context.workspace)
+        let review = try await binder.preview(operationID: context.previous.operationID, device: context.device)
+        await context.device.setChangedOldInventory()
+        await #expect(throws: (any Error).self) {
+            try await binder.bindReviewedAcceptedIdentity(preview: review, originalConsoleConfirmed: true,
+                                                           device: context.device, isSessionCurrent: { true })
+        }
+        #expect(try await LegacySyncJournalStore(directory: context.workspace.journals)
+            .load(context.previous.operationID).effectiveChipIDFingerprint == nil)
+        #expect(await context.device.writes() == 0)
+    }
+
+    @Test(arguments: ["live", "record", "marker", "identity", "stageArchive"])
+    func acceptedUnboundHistoryRejectsChangedEvidence(_ change: String) async throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("accepted-migration-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let context = try await fixture(bindRecord: false, root: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let index = context.backup.appendingPathComponent(LegacyMenuSnapshot.filename)
+        try FileManager.default.removeItem(at: index)
+        let binder = LegacyOldMenuBinding(workspace: context.workspace)
+        let review = try await binder.preview(operationID: context.previous.operationID, device: context.device)
+        switch change {
+        case "live": await context.device.setChangedInventory()
+        case "marker":
+            await context.device.setPriorState(.init(phase: .accepted, transaction: false, live: true,
+                                                      old: true, stage: false, lock: false))
+        case "identity": await context.device.changeIdentityAfterNextRead()
+        case "stageArchive": try Data("changed".utf8).write(to: context.stage.archiveURL)
+        case "record":
+            var changed = context.previous
+            changed.chipIDFingerprint = String(repeating: "f", count: 64)
+            let path = context.workspace.journals.appendingPathComponent("nes-sync-" + changed.operationID.uuidString + ".json")
+            try JSONEncoder().encode(changed).write(to: path, options: .atomic)
+        default: throw LegacyInspectionError.invalidResponse
+        }
+        await #expect(throws: (any Error).self) {
+            try await binder.bindReviewedAcceptedIdentity(preview: review, originalConsoleConfirmed: true,
+                                                           device: context.device, isSessionCurrent: { true })
+        }
+        let saved = try await LegacySyncJournalStore(directory: context.workspace.journals).load(context.previous.operationID)
+        #expect(saved.effectiveChipIDFingerprint == (change == "record" ? String(repeating: "f", count: 64) : nil))
+        #expect(!FileManager.default.fileExists(atPath: index.path))
+        #expect(await context.device.writes() == 0)
+    }
+
+    @Test(arguments: [true, false])
+    func acceptedUnboundTrialRequiresTrialGameInTheVerifiedLiveTree(_ matching: Bool) async throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("accepted-trial-migration-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let context = try await fixture(bindRecord: false, root: root,
+                                        trialCode: matching ? "CLV-H-AAAAA" : "CLV-H-BBBBB")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let binder = LegacyOldMenuBinding(workspace: context.workspace)
+        if matching {
+            let review = try await binder.preview(operationID: context.previous.operationID, device: context.device)
+            try await binder.bindReviewedAcceptedIdentity(preview: review, originalConsoleConfirmed: true,
+                                                           device: context.device, isSessionCurrent: { true })
+        } else {
+            await #expect(throws: (any Error).self) {
+                _ = try await binder.preview(operationID: context.previous.operationID, device: context.device)
+            }
+        }
+        let saved = try await LegacySyncJournalStore(directory: context.workspace.journals).load(context.previous.operationID)
+        #expect((saved.effectiveChipIDFingerprint != nil) == matching)
+        #expect(await context.device.writes() == 0)
+    }
     private let chipID = "0123456789abcdef0123456789abcdef"
+
+    @Test func oldSavedMenuRecordUsesItsExistingDeviceBinding() async throws {
+        let context = try await fixture()
+        defer { try? FileManager.default.removeItem(at: context.workspace.root) }
+        let snapshot = try LegacyMenuSnapshot.verify(directory: context.backup, expectedChipID: chipID)
+        let journal = try LegacySyncJournal(operationID: UUID(), snapshot: snapshot,
+            backupDirectory: context.backup, stage: context.stage, previous: context.previous)
+        var fields = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(journal)) as? [String: Any])
+        fields.removeValue(forKey: "chipIDFingerprint")
+        let old = try JSONDecoder().decode(LegacySyncJournal.self, from: JSONSerialization.data(withJSONObject: fields))
+        try old.validate()
+        #expect(old.effectiveChipIDFingerprint == snapshot.manifest.chipIDFingerprint)
+        fields["chipIDFingerprint"] = String(repeating: "f", count: 64)
+        let conflicting = try JSONDecoder().decode(LegacySyncJournal.self, from: JSONSerialization.data(withJSONObject: fields))
+        #expect(throws: (any Error).self) { try conflicting.validate() }
+    }
+
+    @Test func oldSavedMenuRecoveryUsesBindingWithoutFirstConsolePin() async throws {
+        let context = try await fixture()
+        defer { try? FileManager.default.removeItem(at: context.workspace.root) }
+        let service = LegacySavedMenuRestore(workspace: context.workspace)
+        let preview = try await service.prepare(snapshotDirectory: context.backup, device: context.device)
+        try await service.transfer(preview, device: context.device)
+        let path = context.workspace.journals.appendingPathComponent("nes-sync-" + preview.operationID.uuidString + ".json")
+        var fields = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any])
+        fields.removeValue(forKey: "chipIDFingerprint")
+        try JSONSerialization.data(withJSONObject: fields).write(to: path, options: .atomic)
+        await context.device.refuseLegacy()
+        _ = try await service.inspectRecovery(operationID: preview.operationID, device: context.device)
+    }
+
+    @Test func restoreUsesConnectedConsoleHistoryWhenAnotherConsoleWasSyncedLater() async throws {
+        let context = try await fixture()
+        defer { try? FileManager.default.removeItem(at: context.workspace.root) }
+        let previous = context.previous
+        let other = try LegacySyncJournal(operationID: UUID(), reviewSHA256: previous.reviewSHA256,
+            archiveSHA256: previous.archiveSHA256, treeSHA256: previous.treeSHA256,
+            backupSHA256: previous.backupSHA256, backupDirectory: previous.backupDirectory,
+            stageDirectory: previous.stageDirectory, scope: .full,
+            selectedCodes: try #require(previous.selectedCodes), consoleOrder: .title,
+            maximumGamesPerPage: previous.maximumGamesPerPage, archiveBytes: previous.archiveBytes,
+            chipIDFingerprint: BackupManifest.digest(Data(String(repeating: "f", count: 32).utf8)))
+        let store = LegacySyncJournalStore(directory: context.workspace.journals)
+        try await store.begin(other)
+        try await store.advance(other.operationID, from: .prepared, to: .uploaded)
+        try await store.advance(other.operationID, from: .uploaded, to: .verified)
+        try await store.advance(other.operationID, from: .verified, to: .activationIntent)
+        try await store.advance(other.operationID, from: .activationIntent, to: .activePendingAcceptance)
+        try await store.advance(other.operationID, from: .activePendingAcceptance, to: .accepted)
+        let preview = try await LegacySavedMenuRestore(workspace: context.workspace)
+            .prepare(snapshotDirectory: context.backup, device: context.device)
+        #expect(preview.previousOperationID == previous.operationID)
+    }
+
+    @Test func oldMenuBindingHonorsConsoleRecordedForTheOperation() async throws {
+        let context = try await fixture(recordChipID: String(repeating: "f", count: 32))
+        defer { try? FileManager.default.removeItem(at: context.workspace.root) }
+        let index = context.backup.appendingPathComponent(LegacyMenuSnapshot.filename)
+        try FileManager.default.removeItem(at: index)
+        let binder = LegacyOldMenuBinding(workspace: context.workspace)
+        await #expect(throws: (any Error).self) {
+            _ = try await binder.preview(operationID: context.previous.operationID, device: context.device)
+        }
+        #expect(!FileManager.default.fileExists(atPath: index.path))
+    }
+
+    @Test func oldMenuBindingRejectsConsoleChangeAfterInspection() async throws {
+        let context = try await fixture()
+        defer { try? FileManager.default.removeItem(at: context.workspace.root) }
+        let index = context.backup.appendingPathComponent(LegacyMenuSnapshot.filename)
+        try FileManager.default.removeItem(at: index)
+        let binder = LegacyOldMenuBinding(workspace: context.workspace)
+        let preview = try await binder.preview(operationID: context.previous.operationID,
+                                               device: context.device)
+        await context.device.changeIdentityAfterNextRead()
+        await #expect(throws: (any Error).self) {
+            _ = try await binder.bind(preview: preview, device: context.device)
+        }
+        #expect(!FileManager.default.fileExists(atPath: index.path))
+    }
 
     @Test func choosesEitherVerifiedSnapshotAndRejectsWrongConsole() async throws {
         let context = try await fixture()
@@ -239,6 +446,26 @@ struct LegacySavedMenuRestoreTests {
             try await service.prepare(snapshotDirectory: context.backup, device: context.device)
         }
         #expect(try await LegacySyncJournalStore(directory: context.workspace.journals).latestUnresolved() == nil)
+    }
+
+    @Test func lostAcceptanceCanBeReconciledForSavedMenu() async throws {
+        let context = try await fixture()
+        defer { try? FileManager.default.removeItem(at: context.workspace.root) }
+        let service = LegacySavedMenuRestore(workspace: context.workspace)
+        let preview = try await service.prepare(snapshotDirectory: context.backup, device: context.device)
+        try await service.transfer(preview, device: context.device)
+        try await service.activate(operationID: preview.operationID, device: context.device)
+        await context.device.simulateAccepted()
+        let writesBefore = await context.device.writes()
+        await #expect(throws: (any Error).self) {
+            try await service.reconcileAccepted(operationID: preview.operationID, mainMenuConfirmed: false, device: context.device)
+        }
+        try await service.reconcileAccepted(operationID: preview.operationID, mainMenuConfirmed: true, device: context.device)
+        #expect(try await LegacySyncJournalStore(directory: context.workspace.journals).load(preview.operationID).phase == .accepted)
+        await #expect(throws: (any Error).self) {
+            try await service.reconcileAccepted(operationID: preview.operationID, mainMenuConfirmed: true, device: context.device)
+        }
+        #expect(await context.device.writes() == writesBefore)
     }
 
     @Test func interruptedMenuSwitchRetainsARecoverableJournal() async throws {
@@ -390,22 +617,34 @@ struct LegacySavedMenuRestoreTests {
         try await store.advance(record.operationID, from: .activePendingAcceptance, to: .accepted)
     }
 
-    private func fixture() async throws -> (workspace: WorkspacePaths, backup: URL,
+    private func fixture(recordChipID: String? = nil, bindRecord: Bool = true, root suppliedRoot: URL? = nil,
+                         trialCode: String? = nil) async throws -> (workspace: WorkspacePaths, backup: URL,
         stage: LegacyMenuStageManifest, previous: LegacySyncJournal,
         report: LegacyConsoleReport, device: SavedMenuDevice) {
-        let root = try testDirectory()
+        let root = try suppliedRoot ?? testDirectory()
         let workspace = WorkspacePaths(root: root)
         try FileManager.default.createDirectory(at: workspace.backups, withIntermediateDirectories: true)
         let backup = try makeBackup(in: workspace.backups, custom: "CLV-H-AAAAA")
         let snapshot = try LegacyMenuSnapshot.verify(directory: backup, expectedChipID: chipID)
         let stage = try LegacySavedMenuStage.build(snapshotDirectory: backup,
             expectedChipID: chipID, in: root.appendingPathComponent("Stages"))
-        let previous = try LegacySyncJournal(operationID: UUID(),
+        let previous: LegacySyncJournal
+        if let trialCode {
+            previous = try LegacySyncJournal(operationID: UUID(),
+                reviewSHA256: stage.reviewSHA256, archiveSHA256: stage.archiveSHA256,
+                treeSHA256: stage.treeSHA256, backupSHA256: snapshot.manifest.archiveSHA256,
+                backupDirectory: backup, stageDirectory: stage.menuDirectory.deletingLastPathComponent(),
+                trialCode: trialCode, maximumGamesPerPage: 30, archiveBytes: stage.archiveBytes,
+                chipIDFingerprint: bindRecord ? BackupManifest.digest(Data((recordChipID ?? chipID).utf8)) : nil)
+        } else {
+        previous = try LegacySyncJournal(operationID: UUID(),
             reviewSHA256: stage.reviewSHA256, archiveSHA256: stage.archiveSHA256,
             treeSHA256: stage.treeSHA256, backupSHA256: snapshot.manifest.archiveSHA256,
             backupDirectory: backup, stageDirectory: stage.menuDirectory.deletingLastPathComponent(),
             scope: .full, selectedCodes: LegacyMenuSnapshot.gameCodes(snapshot.entries).sorted(),
-            consoleOrder: .title, maximumGamesPerPage: 30, archiveBytes: stage.archiveBytes)
+            consoleOrder: .title, maximumGamesPerPage: 30, archiveBytes: stage.archiveBytes,
+            chipIDFingerprint: bindRecord ? BackupManifest.digest(Data((recordChipID ?? chipID).utf8)) : nil)
+        }
         let store = LegacySyncJournalStore(directory: workspace.journals)
         try await store.begin(previous)
         try await store.advance(previous.operationID, from: .prepared, to: .uploaded)

@@ -147,7 +147,7 @@ import SwiftHakchiCore
         do {
             let lease = try await client.reserveForChange()
             do {
-                try LegacyDeviceIdentity.requireFirstNES(try await LegacyDeviceIdentity.read(client: lease))
+                _ = try await LegacyDeviceIdentity.read(client: lease)
                 let value = try await body(LegacySyncLeaseDevice(lease: lease))
                 await lease.release()
                 await client.disconnect()

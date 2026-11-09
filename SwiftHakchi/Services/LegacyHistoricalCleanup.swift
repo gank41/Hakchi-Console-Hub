@@ -172,12 +172,12 @@ actor LegacyHistoricalCleanupService {
     func prepare(lease: LegacySessionLease, progress: @Sendable (String) -> Void) async throws -> LegacyHistoricalCleanup.Record {
         try await LegacyCleanupWriteGate.requireClear(workspace: workspace)
         let store = LegacySyncJournalStore(directory: workspace.journals)
-        guard try await store.latestUnresolved() == nil, let accepted = try await store.latestAcceptedMenu(),
+        let chip = try await LegacyDeviceIdentity.read(client: lease)
+        guard try await store.latestUnresolved() == nil, let accepted = try await store.latestAcceptedMenu(matchingChipID: chip),
               try LegacyGameChangeService.latest(workspace: workspace) == nil else {
             throw LegacySyncJournalError.unresolvedOperation
         }
-        let chip = try await LegacyDeviceIdentity.read(client: lease)
-        try LegacyDeviceIdentity.requireFirstNES(chip)
+        try LegacyDeviceIdentity.requireOperationIdentity(chip, fingerprint: accepted.effectiveChipIDFingerprint)
         let report = try await LegacyConsoleService.inspect(client: lease)
         try LegacyGameChangeService.validateReport(report)
         try await requireAcceptedOperation(accepted, report: report, lease: lease)
@@ -191,7 +191,8 @@ actor LegacyHistoricalCleanupService {
         for entry in storage.entries {
             guard let target = try? LegacyHistoricalCleanup.Target(path: entry.path),
                   let owner = try? await store.load(target.operationID),
-                  [.accepted, .rolledBack, .discarded].contains(owner.phase) else { continue }
+                  [.accepted, .rolledBack, .discarded].contains(owner.phase),
+                  (try? LegacyDeviceIdentity.requireOperationIdentity(chip, fingerprint: owner.effectiveChipIDFingerprint)) != nil else { continue }
             // The latest operation's small metadata folder is still needed for recovery/history.
             if target.path == LegacyStageTransfer.directory(for: accepted.operationID) { continue }
             candidates.append((target, entry.bytes))
@@ -308,11 +309,11 @@ actor LegacyHistoricalCleanupService {
 
     private func requireCurrent(_ record: LegacyHistoricalCleanup.Record, lease: LegacySessionLease) async throws {
         let store = LegacySyncJournalStore(directory: workspace.journals)
+        let chip = try await LegacyDeviceIdentity.read(client: lease)
         guard try await store.latestUnresolved() == nil,
-              let accepted = try await store.latestAcceptedMenu(), accepted.operationID == record.operationID else {
+              let accepted = try await store.latestAcceptedMenu(matchingChipID: chip), accepted.operationID == record.operationID else {
             throw LegacySyncJournalError.unresolvedOperation
         }
-        let chip = try await LegacyDeviceIdentity.read(client: lease)
         guard LegacyDeviceIdentity.matches(chip, fingerprint: record.chipIDFingerprint) else {
             throw LegacyInspectionError.invalidBackup
         }

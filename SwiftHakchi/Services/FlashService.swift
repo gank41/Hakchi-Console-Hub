@@ -182,6 +182,10 @@ actor FlashService {
         kernelImage: Data?,
         progress: @Sendable (String, Double) -> Void
     ) async throws {
+        // Reset is a separate destructive workflow: the retained upstream body
+        // does not verify a data-partition reset and cannot be made safe merely
+        // by enabling another firmware operation.
+        try Self.requireValidatedFactoryResetWorkflow()
         try Self.requireValidatedFirmwareWorkflow()
         progress("Booting recovery...", 0.05)
         try await felService.memboot(fes1Data: fes1, ubootData: uboot, bootImgData: bootImg)
@@ -264,6 +268,12 @@ actor FlashService {
     }
 
     // MARK: - Helpers
+
+    /// This gate must be replaced by the complete reviewed reset workflow, not
+    /// relaxed as a side effect of validating install or startup restoration.
+    private static func requireValidatedFactoryResetWorkflow() throws {
+        throw FlashError.factoryResetNotAvailable
+    }
 
     /// UI eligibility and recognized local files cannot bypass this backend boundary.
     private static func requireValidatedFirmwareWorkflow() throws {
@@ -396,6 +406,7 @@ actor FlashService {
 }
 
 enum FlashError: Error, LocalizedError {
+    case factoryResetNotAvailable
     case recoveryNotValidated
     case notConnected
     case timeout
@@ -406,6 +417,8 @@ enum FlashError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .factoryResetNotAvailable:
+            return "Factory reset is not available yet. Your console has not been changed. Restoring the original startup is a separate option."
         case .recoveryNotValidated:
             return "Firmware reset, uninstall and installation remain unavailable until the audited recovery workflow passes its own device validation. Review Reset Readiness for the remaining steps."
         case .notConnected:

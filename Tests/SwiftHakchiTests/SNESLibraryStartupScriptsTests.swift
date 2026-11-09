@@ -134,11 +134,24 @@ struct SNESLibraryStartupScriptsTests {
     func parallelVerifierCandidateRetainsNativeMenuSafety(_ fault: String) async throws {
         try await checkNativeMenu(fault, experimental: false, parallel: true)
     }
-    private func checkNativeMenu(_ fault: String, experimental: Bool, parallel: Bool = false) async throws {
+    @Test(arguments: ["valid", "large", "inactive", "builtin", "missing", "changed", "linked", "hardlink", "extra", "object", "selector", "path", "duplicate", "target", "worker-producer-failure", "worker-checksum-failure", "worker-manifest-change", "stat-owner", "stat-failure", "stat-malformed"])
+    func combinedStatCandidateRetainsNativeMenuSafety(_ fault: String) async throws {
+        try await checkNativeMenu(fault, experimental: false, combinedStat: true)
+    }
+    @Test func concurrentEntryCandidateHasExpectedDigest() throws {
+        let source = try SNESLibraryStartupScripts.parallelEntryVerifierCandidate()
+        #expect(BackupManifest.digest(Data(source.utf8)) == "5b1095c19a1798c91cef35049eb352336aed644a893f5d346e99ebf7bffd8ef3")
+    }
+    @Test(arguments: ["valid", "bounded-manifest-read", "large", "decimal-pages", "inactive", "page-001", "page-010", "page-missing", "builtin", "missing", "changed", "linked", "hardlink", "extra", "object", "selector", "path", "duplicate", "target", "worker-producer-failure", "worker-checksum-failure", "worker-manifest-change", "stat-owner", "stat-failure", "stat-malformed", "group-meta", "group-stock", "group-entry", "group-snapshot-tamper"])
+    func concurrentEntryCandidateRejectsDamageAndWorkerFailures(_ fault: String) async throws {
+        try await checkNativeMenu(fault, experimental: false, concurrentEntries: true)
+    }
+    private func checkNativeMenu(_ fault: String, experimental: Bool, parallel: Bool = false, combinedStat: Bool = false, concurrentEntries: Bool = false) async throws {
         let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
         let (menu, originals) = try await MainActor.run {
-            let helper = SNESLibraryMaterialTests(), (review, originals) = try helper.fixture(root, count: fault == "decimal-pages" ? 220 : fault == "large" ? 70 : 2)
-            let menu = try fault == "decimal-pages" ? SNESLibraryMenu.prepare(review:review, originals:originals, selected:Set(review.rows.map { $0.game.code }), decisions:[:], order:.title, structure:.init(mode:.stockRootPagesEqual,maximumGamesPerPage:.twenty), artwork:.init(more:oneGameSyntheticArt(),back:oneGameSyntheticArt(),custom:[:])):helper.menu(review, originals)
+            let multiPage = fault == "decimal-pages" || fault == "page-010"
+            let helper = SNESLibraryMaterialTests(), (review, originals) = try helper.fixture(root, count: multiPage ? 220 : fault == "large" ? 70 : 2)
+            let menu = try multiPage ? SNESLibraryMenu.prepare(review:review, originals:originals, selected:Set(review.rows.map { $0.game.code }), decisions:[:], order:.title, structure:.init(mode:.stockRootPagesEqual,maximumGamesPerPage:.twenty), artwork:.init(more:oneGameSyntheticArt(),back:oneGameSyntheticArt(),custom:[:])):helper.menu(review, originals)
             return (menu, originals)
         }
         let namespace = root.appendingPathComponent("console"), base = namespace.appendingPathComponent("menus/" + menu.id.uuidString)
@@ -168,7 +181,16 @@ struct SNESLibraryStartupScriptsTests {
         default: break
         }
         try put(base.appendingPathComponent("menu.manifest"), manifest)
-        if let path = ProcessInfo.processInfo.environment[fault == "decimal-pages" ? "SWIFTHAKCHI_SNES_LIBRARY_DECIMAL_EXPORT":"SWIFTHAKCHI_SNES_LIBRARY_EXPORT"], ["valid", "decimal-pages"].contains(fault) {
+        var source = try concurrentEntries ? SNESLibraryStartupScripts.parallelEntryVerifierCandidate() : (combinedStat ? SNESLibraryStartupScripts.combinedStatVerifierCandidate() : (parallel ? SNESLibraryStartupScripts.parallelChecksumVerifierCandidate() : (experimental ? SNESLibraryStartupScripts.experimentalCompatibilityVerifier() : SNESLibraryStartupScripts.verifier)))
+        if fault == "group-snapshot-tamper" {
+            source = source.replacingOccurrences(of: "manifest_snapshot=$(\"$B\" head -c 1048577 \"$manifest\")", with: "manifest_snapshot=tampered")
+        } else if fault.hasPrefix("group-") {
+            let group = String(fault.dropFirst(6))
+            source = source.replacingOccurrences(of: "check_group() {\n  group=$1\n", with: "check_group() {\n  group=$1\n  test \"$group\" != \"\(group)\" || exit 71\n")
+        }
+        if combinedStat { #expect(source.contains("stat -c '%h:%u'")) }
+        let exportKey = combinedStat ? "SWIFTHAKCHI_SNES_COMBINED_EXPORT" : (fault == "decimal-pages" ? "SWIFTHAKCHI_SNES_LIBRARY_DECIMAL_EXPORT" : "SWIFTHAKCHI_SNES_LIBRARY_EXPORT")
+        if let path = ProcessInfo.processInfo.environment[exportKey], ["valid", "decimal-pages"].contains(fault) {
             let destination = URL(fileURLWithPath: path)
             let stocks = Dictionary(uniqueKeysWithValues: originals.entries.flatMap { entry in
                 entry.files.filter { $0.name.hasSuffix(".desktop") }.map { (entry.code + "/" + $0.name, $0.data.base64EncodedString()) }
@@ -176,7 +198,7 @@ struct SNESLibraryStartupScriptsTests {
             let fixture: [String: Any] = ["id": menu.id.uuidString, "manifest": manifest.base64EncodedString(),
                 "files": menu.files.mapValues { $0.base64EncodedString() }, "objects": menu.objects.mapValues { $0.base64EncodedString() }, "stock": stocks]
             try JSONSerialization.data(withJSONObject: fixture, options: [.sortedKeys]).write(to: destination.appendingPathComponent("fixture.json"))
-            try Data(SNESLibraryStartupScripts.verifier.utf8).write(to: destination.appendingPathComponent("verify.sh"))
+            try Data(((combinedStat || concurrentEntries) ? source : SNESLibraryStartupScripts.verifier).utf8).write(to: destination.appendingPathComponent("verify.sh"))
         }
         let hash = BackupManifest.digest(manifest), selector = namespace.appendingPathComponent("active-menu")
         var selection = "SWIFTHAKCHI_SNES_LIBRARY_SELECTOR_V1\nMENU\n\(menu.id.uuidString)\n\(hash)\n"
@@ -186,18 +208,20 @@ struct SNESLibraryStartupScriptsTests {
         let bb = root.appendingPathComponent("busybox")
         let shim = """
         #!/bin/sh
+        if test "${HC_DENY_UNBOUNDED:-}" = 1 && test "$1" = cat && test "${2:-}" = "$HC_TEST_MANIFEST"; then exit 96; fi
         if test "${HC_FAIL_WORKER:-}" = producer && test "$1" = awk; then
           for arg in "$@"; do test "$arg" != part=2 || exit 88; done
         fi
         if test "${HC_FAIL_WORKER:-}" = checksum && test "$1" = sha256sum && test "${2:-}" = -c; then exit 89; fi
         if test "${HC_FAIL_WORKER:-}" = manifest-change && test "$1" = sha256sum && test "${2:-}" = -c; then printf x >> "$HC_TEST_MANIFEST"; fi
         case "$1" in
-          stat) case "$3" in '%h') /usr/bin/stat -f '%l' "$4";; '%u') echo 0;; '%s') /usr/bin/stat -f '%z' "$4";; *) exit 97;; esac;;
+          stat) case "$3" in '%h') /usr/bin/stat -f '%l' "$4";; '%u') echo 0;; '%s') /usr/bin/stat -f '%z' "$4";; '%h:%u')
+            case "${HC_STAT_FAULT:-}" in owner) echo '1:1';; failure) exit 98;; malformed) echo '1:0:extra';; *) /usr/bin/stat -f '%l:0' "$4";; esac;;
+            *) exit 97;; esac;;
           *) exec "$@";;
         esac
         """
         try put(bb, Data(shim.utf8)); try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: bb.path)
-        let source = try parallel ? SNESLibraryStartupScripts.parallelChecksumVerifierCandidate() : (experimental ? SNESLibraryStartupScripts.experimentalCompatibilityVerifier() : SNESLibraryStartupScripts.verifier)
         let script = source.replacingOccurrences(of: "/mnt/swifthakchi/busybox", with: bb.path)
             .replacingOccurrences(of: SNESLibraryMenu.namespace, with: namespace.path).replacingOccurrences(of: "/usr/share/games", with: stockRoot.path)
             .replacingOccurrences(of: #"icon="$N/objects/$art""#, with: #"icon=""# + SNESLibraryMenu.namespace + #"/objects/$art""#)
@@ -208,17 +232,31 @@ struct SNESLibraryStartupScriptsTests {
         let file = root.appendingPathComponent("verify.sh"); try put(file, Data(script.utf8))
         let process = Process(), output = Pipe(), error = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = [file.path] + (fault == "inactive" ? [menu.id.uuidString, hash] : [])
-        if fault.hasPrefix("worker-") {
+        let explicitPage: [String]
+        switch fault {
+        case "inactive": explicitPage = [menu.id.uuidString, hash]
+        case "page-001": explicitPage = [menu.id.uuidString, hash, "001"]
+        case "page-010": explicitPage = [menu.id.uuidString, hash, "010"]
+        case "page-missing": explicitPage = [menu.id.uuidString, hash, "031"]
+        default: explicitPage = []
+        }
+        process.arguments = [file.path] + explicitPage
+        if fault == "bounded-manifest-read" {
+            process.environment = ProcessInfo.processInfo.environment.merging(["HC_DENY_UNBOUNDED": "1", "HC_TEST_MANIFEST": base.appendingPathComponent("menu.manifest").path]) { _, new in new }
+        } else if fault.hasPrefix("worker-") {
             let failure = fault == "worker-producer-failure" ? "producer" : (fault == "worker-manifest-change" ? "manifest-change" : "checksum")
             process.environment = ProcessInfo.processInfo.environment.merging(["HC_FAIL_WORKER": failure, "HC_TEST_MANIFEST": base.appendingPathComponent("menu.manifest").path]) { _, new in new }
+        } else if fault.hasPrefix("stat-") {
+            process.environment = ProcessInfo.processInfo.environment.merging(["HC_STAT_FAULT": String(fault.dropFirst(5))]) { _, new in new }
         }
         process.standardOutput = output; process.standardError = error
         try process.run(); let stdout = output.fileHandleForReading.readDataToEndOfFile(), stderr = error.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
         #expect(try Data(contentsOf: selector) == Data(selection.utf8))
-        if ["valid", "large", "decimal-pages", "inactive", "builtin"].contains(fault) {
+        if ["valid", "bounded-manifest-read", "large", "decimal-pages", "inactive", "page-001", "page-010", "builtin"].contains(fault) {
             #expect(process.terminationStatus == 0, "\(String(decoding: stderr, as: UTF8.self))")
-            #expect(String(decoding: stdout, as: UTF8.self) == (fault == "builtin" ? stockRoot.path : base.path + "/pages/000") + "\n")
+            let page = fault == "page-010" ? "010" : (fault == "page-001" ? "001" : "000")
+            let expectedPath = fault == "builtin" ? stockRoot.path : base.path + "/pages/" + page
+            #expect(String(decoding: stdout, as: UTF8.self) == expectedPath + "\n")
         } else { #expect(process.terminationStatus != 0) }
     }
 }

@@ -32,7 +32,7 @@ struct SNESReplacementSaveReview: Sendable {
         guard inventory.hwid == saved.hwid, inventory.catalogSHA256 == saved.catalogSHA256,
               inventory.selection == saved.selection, inventory.snapshotSHA256 == saved.snapshotSHA256,
               inventory.stateSHA256 == saved.stateSHA256, inventory.excludedMenuID == nil, !inventory.incompleteNamespace else {
-            throw RecoveryProbeError.refused("The replacement console changed since its backup. Make a new backup and review it again. Nothing was copied.")
+            throw RecoveryProbeError.refused("The connected SNES changed since its backup. Make a new backup and review it again. Nothing was copied.")
         }
         try validate()
     }
@@ -61,7 +61,7 @@ struct SNESReplacementSavePlan: Sendable {
             found.insert(code)
             guard entry.gameMatch == .includedGame || entry.gameMatch == .matchingAddedGame,
                   entry.disposition != .conflict else {
-                throw RecoveryProbeError.refused("A selected game's saved files conflict or the matching game is not on the replacement. Nothing was copied.")
+                throw RecoveryProbeError.refused("A selected game's saved files conflict or the matching game is not on this SNES. Nothing was copied.")
             }
             selected.append(entry)
             if entry.disposition == .new { files.append(entry) }
@@ -115,7 +115,7 @@ struct SNESReplacementSavePlan: Sendable {
             }
             if dispositions.allSatisfy({ $0 == .new }) { groups.append(group) }
             else if !dispositions.allSatisfy({ $0 == .unchanged }) {
-                throw RecoveryProbeError.refused("A saved-game set is partly present on the replacement. Review it before copying; nothing was changed.")
+                throw RecoveryProbeError.refused("A saved-game set is partly present on this SNES. Review it before copying; nothing was changed.")
             }
         }
         try validate(); return groups
@@ -151,7 +151,9 @@ struct SNESReplacementSaveEnvelope: Sendable {
         guard data.count <= 4 * 1024 * 1024, SNESDataSnapshotChunk.isDigest(expectedSHA256),
               BackupManifest.digest(data) == expectedSHA256 else { throw SNESLibraryInventory.failure() }
         let record = try JSONDecoder().decode(Record.self, from: data)
-        guard record.version == 2, record.scope == "snes-replacement-saves-offline-review",
+        guard (record.version == 2 && record.scope == "snes-replacement-saves-offline-review") ||
+              (record.version == 3 && record.scope == "snes-same-console-saves-offline-review") else { throw SNESLibraryInventory.failure() }
+        guard
               !record.gameCodes.isEmpty, record.gameCodes == Array(Set(record.gameCodes)).sorted(),
               !record.files.isEmpty, record.files.count <= 4096,
               record.files.allSatisfy({ SNESLibraryInventory.safePath($0.path) && $0.bytes >= 0 && $0.bytes <= 16 * 1024 * 1024 && SNESDataSnapshotChunk.isDigest($0.sha256) && (0...511).contains($0.mode) }),
@@ -163,7 +165,8 @@ struct SNESReplacementSaveEnvelope: Sendable {
     static func prepare(plan: SNESReplacementSavePlan) throws -> Self {
         try plan.validate(); _ = try plan.protectedGroups()
         guard !plan.files.isEmpty, plan.files.count <= 4096 else { throw SNESLibraryInventory.failure() }
-        let record = Record(version: 2, scope: "snes-replacement-saves-offline-review",
+        let sameConsole = plan.comparison.source.inventory.hwid == plan.comparison.destination.inventory.hwid
+        let record = Record(version: sameConsole ? 3 : 2, scope: sameConsole ? "snes-same-console-saves-offline-review" : "snes-replacement-saves-offline-review",
             source: try SNESLibrarySnapshotReference(plan.comparison.source), destination: try SNESLibrarySnapshotReference(plan.comparison.destination),
             gameCodes: plan.gameCodes.sorted(), files: plan.files.map { .init(path: $0.path, bytes: $0.byteCount, sha256: $0.sourceSHA256, mode: $0.sourceMode, modified: $0.sourceModified) })
         let data = try encode(record)
@@ -174,11 +177,14 @@ struct SNESReplacementSaveEnvelope: Sendable {
     static func load(data: Data, expectedSHA256: String, originals: SNESOriginalGamesFrame) throws -> Self {
         _ = try identity(data: data, expectedSHA256: expectedSHA256)
         let record = try JSONDecoder().decode(Record.self, from: data)
-        guard record.version == 2, record.scope == "snes-replacement-saves-offline-review",
+        guard ((record.version == 2 && record.scope == "snes-replacement-saves-offline-review") ||
+               (record.version == 3 && record.scope == "snes-same-console-saves-offline-review")),
               !record.gameCodes.isEmpty, record.gameCodes == Array(Set(record.gameCodes)).sorted(),
               try encode(record) == data else { throw SNESLibraryInventory.failure() }
         let source = try record.source.reopen(), destination = try record.destination.reopen()
-        let replacement = try SNESLibraryRestore.prepareReplacement(backup: source, originals: originals, destinationHWID: destination.inventory.hwid)
+        let replacement = try record.version == 2
+            ? SNESLibraryRestore.prepareReplacement(backup: source, originals: originals, destinationHWID: destination.inventory.hwid)
+            : SNESLibraryRestore.prepareSameConsoleSavedData(backup: source, originals: originals, destinationHWID: destination.inventory.hwid)
         let plan = try SNESReplacementSavePlan.prepare(replacement: replacement, destination: destination, gameCodes: Set(record.gameCodes))
         let rebuilt = try prepare(plan: plan)
         guard rebuilt.data == data, rebuilt.sha256 == expectedSHA256 else { throw SNESLibraryInventory.failure() }
@@ -191,7 +197,7 @@ struct SNESReplacementSaveEnvelope: Sendable {
     }
 }
 
-/// A Mac-only review of content for another console. It grants no write authority.
+/// A Mac-only review of saved content for this SNES or a replacement. It grants no write authority.
 struct SNESLibraryReplacement: Sendable {
     let sourceHWID: String, destinationHWID: String
     let menu: SNESLibraryMenu?
@@ -213,8 +219,8 @@ struct SNESLibraryReplacement: Sendable {
         let options = grouped.keys.sorted().map { code -> SNESReplacementSaveReview.GameOption in
             let entries = grouped[code] ?? [], title = gameTitle(code)
             let reason: String?
-            if entries.contains(where: { $0.gameMatch == .addedGameMissing }) { reason = "Add this game to the replacement first." }
-            else if entries.contains(where: { $0.gameMatch == .addedGameDifferent }) { reason = "The game on the replacement is different." }
+            if entries.contains(where: { $0.gameMatch == .addedGameMissing }) { reason = "Add this game to the SNES first." }
+            else if entries.contains(where: { $0.gameMatch == .addedGameDifferent }) { reason = "The game on this SNES is different." }
             else if entries.contains(where: { $0.disposition == .conflict }) { reason = "Existing saved data needs a separate review." }
             else if let layout = try? SNESNativeSaveLayout(paths: entries.map(\.path)) {
                 let values = Dictionary(uniqueKeysWithValues: entries.map { ($0.path, $0.disposition) })
@@ -256,7 +262,7 @@ struct SNESLibraryReplacement: Sendable {
               checked.inventory.hwid == destinationHWID,
               checked.inventory.catalogSHA256 == backup.inventory.catalogSHA256,
               checked.inventory.excludedMenuID == nil, !checked.inventory.incompleteNamespace else {
-            throw RecoveryProbeError.refused("A backup of the replacement SNES could not be verified. Nothing was copied.")
+            throw RecoveryProbeError.refused("A backup of the connected SNES could not be verified. Nothing was copied.")
         }
         let files = Dictionary(uniqueKeysWithValues: checked.inventory.files.map { ($0.path, $0) })
         let directories = Set(checked.inventory.directories.map(\.path))
@@ -311,6 +317,10 @@ struct SNESLibraryReplacement: Sendable {
 /// Reconstructs inert Mac material from a verified snapshot. No console access or writes.
 struct SNESLibraryRestore: Sendable {
     let backup: SNESLibraryBackup, menu: SNESLibraryMenu?
+    static func prepareSameConsoleSavedData(backup: SNESLibraryBackup, originals: SNESOriginalGamesFrame,
+                                            destinationHWID: String) throws -> SNESLibraryReplacement {
+        try prepareSavedData(backup: backup, originals: originals, destinationHWID: destinationHWID, sameConsole: true, id: UUID())
+    }
     static func prepareForSync(backup: SNESLibraryBackup, originals: SNESOriginalGamesFrame,
                                destinationHWID: String, scope: SNESLibraryRestoreScope) throws -> Self {
         switch scope {
@@ -333,13 +343,18 @@ struct SNESLibraryRestore: Sendable {
     /// the connected replacement and protect its existing saves.
     static func prepareReplacement(backup: SNESLibraryBackup, originals: SNESOriginalGamesFrame,
                                    destinationHWID: String, id: UUID = UUID()) throws -> SNESLibraryReplacement {
+        try prepareSavedData(backup: backup, originals: originals, destinationHWID: destinationHWID, sameConsole: false, id: id)
+    }
+
+    private static func prepareSavedData(backup: SNESLibraryBackup, originals: SNESOriginalGamesFrame,
+                                         destinationHWID: String, sameConsole: Bool, id: UUID) throws -> SNESLibraryReplacement {
         let saved = try SNESLibraryBackup.open(directory: backup.directory), inventory = saved.inventory
         guard saved.manifestSHA256 == backup.manifestSHA256 else { throw SNESLibraryInventory.failure() }
-        guard originals.hwid == destinationHWID, inventory.hwid != destinationHWID else {
-            throw RecoveryProbeError.refused("Choose a backup from another SNES and connect the replacement. Nothing was copied.")
+        guard originals.hwid == destinationHWID, (inventory.hwid == destinationHWID) == sameConsole else {
+            throw RecoveryProbeError.refused(sameConsole ? "Choose a backup from this SNES and connect it again. Nothing was copied." : "Choose a backup from another SNES and connect the replacement. Nothing was copied.")
         }
         guard inventory.catalogSHA256 == (try SNESLibraryCatalogIdentity.digest(originals)) else {
-            throw RecoveryProbeError.refused("The replacement SNES's included games do not match this backup. Nothing was copied.")
+            throw RecoveryProbeError.refused("The connected SNES's included games do not match this backup. Nothing was copied.")
         }
         let restored = try rebuild(saved, originals: originals, id: id)
         var codes = Set(originals.entries.map(\.code))

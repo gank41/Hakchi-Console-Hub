@@ -16,7 +16,11 @@ struct LegacySyncLeaseDevice: LegacySyncDevice {
     }
 
     func requireIdentity() async throws {
-        try LegacyDeviceIdentity.requireFirstNES(try await LegacyDeviceIdentity.read(client: lease))
+        _ = try await LegacyDeviceIdentity.read(client: lease)
+    }
+
+    func requireLegacyIdentity() async throws {
+        throw LegacyChangeError.refused("This older operation has no verified NES identity. Review the original NES before continuing.")
     }
 
     func upload(_ manifest: LegacyMenuStageManifest, operationID: UUID) async throws {

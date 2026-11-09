@@ -13,7 +13,7 @@ struct SNESCompatibilityFrontendPackage: Sendable {
     let inspection: ARMRuntimeELF
 
     static func loadBundled() throws -> Self {
-        guard let root = Bundle.module.url(forResource: "SNESCompatibilityFrontend", withExtension: nil) else {
+        guard let root = Bundle.appBundle.url(forResource: "SNESCompatibilityFrontend", withExtension: nil) else {
             throw failure()
         }
         return try Self(frontend: Data(contentsOf: root.appendingPathComponent("retroarch")),

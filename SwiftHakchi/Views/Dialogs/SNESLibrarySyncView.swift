@@ -9,7 +9,6 @@ struct SNESLibrarySyncView: View {
     @EnvironmentObject private var app: AppState
     @Environment(\.dismiss) private var dismiss
     @State private var model: SNESLibrarySyncModel?
-    @State private var tested = false
     @State private var atMenu = false
     var body: some View {
         Group {
@@ -28,13 +27,12 @@ struct SNESLibrarySyncView: View {
         }
     }
     private func content(_ model: SNESLibrarySyncModel) -> some View {
-        SNESLibrarySyncBody(model: model, tested: $tested, atMenu: $atMenu, close: { dismiss() })
+        SNESLibrarySyncBody(model: model, atMenu: $atMenu, close: { dismiss() })
     }
 }
 
 private struct SNESLibrarySyncBody: View {
     @ObservedObject var model: SNESLibrarySyncModel
-    @Binding var tested: Bool
     @Binding var atMenu: Bool
     let close: () -> Void
     @State private var showStructure = false
@@ -63,7 +61,7 @@ private struct SNESLibrarySyncBody: View {
                 VStack(spacing: 10) {
                     HStack(spacing: 12) {
                         ProgressView().controlSize(.large)
-                        Text("Working…").font(.title2.bold())
+                        Text("Working…").font(.title2.bold()).foregroundStyle(.green)
                     }
                     Text(model.phase.progressTitle).font(.headline).multilineTextAlignment(.center)
                     if !model.phase.progressDetail.isEmpty {
@@ -75,9 +73,13 @@ private struct SNESLibrarySyncBody: View {
                 .frame(maxWidth: .infinity).padding(20)
                 .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
             } else {
-                if [.restart, .rollbackRestart, .testing, .readyToFinish, .readyToDiscard, .readyToRollback].contains(model.phase) {
+                if model.phase == .testing {
+                    Label("Ready to finish", systemImage: "checkmark.circle.fill").font(.headline).foregroundStyle(.green)
+                } else if [.restart, .rollbackRestart, .deferredReady, .readyToFinish, .readyToDiscard, .readyToRollback].contains(model.phase) {
                     Label("Your turn", systemImage: "hand.raised.fill").font(.headline).foregroundStyle(.orange)
-                } else if model.phase == .interrupted || model.phase == .needsSetup {
+                } else if model.phase == .interrupted {
+                    Label("Needs attention", systemImage: "exclamationmark.triangle.fill").font(.headline).foregroundStyle(.red)
+                } else if model.phase == .needsSetup {
                     Label("Needs attention", systemImage: "exclamationmark.triangle.fill").font(.headline).foregroundStyle(.orange)
                 }
                 Text(model.message).fixedSize(horizontal: false, vertical: true)
@@ -86,6 +88,14 @@ private struct SNESLibrarySyncBody: View {
             Divider()
             if model.phase.isBusy {
                 Spacer(minLength: 20)
+            } else if model.phase == .deferredReady {
+                Text("Get ready to sync").font(.headline)
+                Text("Leave the SNES turned on and connected to the Mac. On your TV, return to the first game screen and close any game or demo. Then select the checkbox and choose Continue Sync.")
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("The first game screen is visible and no game is running", isOn: $atMenu)
+                Text("The app will make or reuse a recovery backup, then safely remove the previous sync’s old copy. This may take several minutes.")
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Spacer()
             } else if model.phase == .readyToRollback {
                 Text("Return to your previous game menu").font(.headline)
                 Text("Games and saves stay on the console. After restarting normally, you can review removal of the unfinished copy. The previous library is saved in your Mac backup.").fixedSize(horizontal:false,vertical:true)
@@ -95,16 +105,18 @@ private struct SNESLibrarySyncBody: View {
             } else if model.phase == .restart || model.phase == .rollbackRestart {
                 restartInstructions
             } else if model.phase == .testing {
-                Text(model.selectedGameCount == 0 ? "Check the original games and artwork. Start two built-in games and test picture, sound and controls, then return to the first game-selection screen." : "1. Check the folder links and box art.\n2. Start an added game as a new game and test picture, sound and controls.\n3. Test a built-in game too.\n4. Return to the first game-selection screen.")
+                Text("Leave the console on its game menu, then choose Finish Sync.")
                     .fixedSize(horizontal: false, vertical: true)
-                Toggle("Both games and the menu work, and I am back at the first screen", isOn: $tested)
-                Text("After you confirm, the app will back up your tested games and saves on this Mac, then ask you to finish. Keep this window open until it says Sync complete.")
+                Toggle("Also keep a current backup of my console games and saves", isOn: $model.createFinalBackup)
+                Text(model.createFinalBackup
+                     ? "The app will save a backup or use an existing matching backup. This can take several minutes. Once it is checked, the app will remove the previous console copy to free space. Your current games and saves stay."
+                     : "No additional backup will be made now. The previous console copy stays until your next sync; the app will use the recovery backup made then to safely remove it. Your earlier Mac backup is kept.")
                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Spacer()
             } else if model.phase == .readyToFinish {
-                Label("Your tested library is saved on the Mac", systemImage: "checkmark.shield")
+                Label("Your current library is saved on the Mac", systemImage: "checkmark.shield")
                 Text("Old console copy to remove: " + bytes(model.reclaimBytes)).font(.headline)
-                Text("The app kept the previous game menu temporarily so you could return to it if the test failed. Finishing removes that older copy to free space. Your tested games and saves remain, and a backup stays on this Mac. Returning immediately to the old menu will no longer be available.")
+                Text("The app kept the previous game menu temporarily. Finishing removes that older copy to free space. Your current games and saves remain, and a backup stays on this Mac. Returning immediately to the old menu will no longer be available.")
                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Toggle("The first game-selection screen is visible, with no game running", isOn: $atMenu)
                 backupLink
@@ -164,8 +176,7 @@ private struct SNESLibrarySyncBody: View {
             }
         }.padding(22)
         .onChange(of: model.phase) { _, phase in
-            if phase == .testing { tested = false }
-            if phase == .readyToFinish || phase == .readyToDiscard || phase == .readyToRollback { atMenu = false }
+            if phase == .deferredReady || phase == .readyToFinish || phase == .readyToDiscard || phase == .readyToRollback { atMenu = false }
         }
         .confirmationDialog("Return to your previous games?",isPresented:$confirmReturn,titleVisibility:.visible) {
             Button("Return to Previous Games") {Task {await model.perform()}}
@@ -185,8 +196,7 @@ private struct SNESLibrarySyncBody: View {
     }
     private var primaryDisabled: Bool {
         if model.phase.isBusy { return true }
-        if model.phase == .testing { return !tested }
-        if model.phase == .readyToFinish || model.phase == .readyToDiscard || model.phase == .readyToRollback { return !atMenu }
+        if model.phase == .deferredReady || model.phase == .readyToFinish || model.phase == .readyToDiscard || model.phase == .readyToRollback { return !atMenu }
         if model.phase == .review { return model.projection?.canFit != true || model.draft?.unresolvedDuplicateCodes.isEmpty != true }
         return false
     }
@@ -201,7 +211,7 @@ private struct SNESLibrarySyncBody: View {
                 HStack(spacing: 18) {
                     Text("Needed to copy: " + bytes(projection.neededToCopy))
                         .foregroundStyle(projection.canFit ? Color.secondary : Color.orange)
-                    Text("After finishing: about " + bytes(max(0, projection.freeAfterFinishing)))
+                    Text("After old copies are removed: about " + bytes(max(0, projection.freeAfterFinishing)))
                 }
                 Text("The final estimate does not yet count space cleared from the previous menu.").font(.caption).foregroundStyle(.secondary)
             }
@@ -229,12 +239,14 @@ private struct SNESLibrarySyncBody: View {
             Spacer()
         } else if model.originalsOnly {
             if let graph = model.graph { ConsoleLayoutPreview(graph: graph).frame(maxHeight: 200) }
-            Text("All \(model.originalGameCount) built-in games will appear on the first screen. The setup software stays installed. Added games are removed only after you test and finish this change.")
+            Text("All \(model.originalGameCount) built-in games will appear on the first screen. Your saves and setup software stay. You can choose whether to back up and remove the previous console copy when finishing.")
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
         } else if let draft = model.draft {
             if model.phase == .review {
                 Text("Before you begin, leave the SNES on the list of games shown on your TV. If it starts games by itself, turn off My Game Play Demo and Classic Demo in the SNES Options menu.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text("The app checks for a recovery backup before making changes and may create one if needed. A second backup after syncing is optional.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if model.compatibilityLayoutOnly {

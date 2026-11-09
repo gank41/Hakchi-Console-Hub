@@ -13,6 +13,9 @@ import SwiftHakchiCore
                 == workspace.root.appendingPathComponent("Stages").standardizedFileURL else {
             throw LegacySyncJournalError.unresolvedOperation
         }
+        if reconcile && journal.effectiveChipIDFingerprint == nil {
+            throw LegacyChangeError.refused("This older update must be linked to its reviewed original NES before its saved phase can change.")
+        }
         let manifest = try JSONDecoder().decode(LegacyMenuStageManifest.self,
             from: Data(contentsOf: journal.stageDirectory.appendingPathComponent("manifest.json")))
         guard manifest.menuDirectory.deletingLastPathComponent().standardizedFileURL == journal.stageDirectory,
@@ -28,7 +31,8 @@ import SwiftHakchiCore
         do {
             let lease = try await client.reserveForChange()
             do {
-                try LegacyDeviceIdentity.requireFirstNES(try await LegacyDeviceIdentity.read(client: lease))
+                let identityVerified = try LegacyDeviceIdentity.requireReadOnlyInspection(
+                    try await LegacyDeviceIdentity.read(client: lease), fingerprint: journal.effectiveChipIDFingerprint)
                 let result = try await lease.perform(.inventoryStage(operationID))
                 guard result.succeeded, result.stderr.isEmpty else {
                     throw LegacyChangeError.refused("Read-only stage inventory failed at step \(result.exitCode). The menu was not changed.")
@@ -40,6 +44,7 @@ import SwiftHakchiCore
                 let description = lines.dropFirst().dropLast(2).joined(separator: "\n") + "\n"
                 let actualSHA = BackupManifest.digest(Data(description.utf8))
                 if reconcile {
+                    guard identityVerified else { throw LegacyInspectionError.invalidBackup }
                     guard differences.isEmpty, actualSHA == manifest.treeSHA256 else {
                         throw LegacyChangeError.refused("The inactive NES tree does not match the Mac manifest. The saved operation was not advanced.")
                     }
@@ -61,6 +66,7 @@ import SwiftHakchiCore
                 await client.disconnect()
                 let fields: [String: Any] = [
                     "mode": "inspect-legacy-stage", "USBOpened": true, "gamesChanged": false,
+                    "recordedIdentityMatched": identityVerified,
                     "operationID": operationID.uuidString, "expectedTreeSHA256": manifest.treeSHA256,
                     "actualTreeSHA256": actualSHA, "expectedEntries": manifest.entries.count,
                     "actualEntries": lines.count - 3, "differenceCount": differences.count,

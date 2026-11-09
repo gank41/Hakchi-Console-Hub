@@ -28,7 +28,7 @@ public enum SNESRAMMenuDKC3TrialBuilder {
         }
         for (old,new) in [
             ("S=/tmp/hc-simcity-trial", "S=/tmp/hc-dkc3-trial"),
-            ("check \"$R/simcity.smc\" 0000000000000000000000000000000000000000000000000000000000000000", "check \"$R/dkc3.smc\" " + romSHA256),
+            ("check \"$R/simcity.smc\" bf74c58e4190faca2f3a967dc190fe529d13887d1262b72e057b5353e43cf67f", "check \"$R/dkc3.smc\" " + romSHA256),
             ("68a1951f54441c93f3dfa653f88bae32afe72ebb68b66422be212e1c54a1904f", configSHA256),
             (SNESRAMMenuSRAMTrialBuilder.ownerSHA256, ownerSHA256)
         ] { try once(&start, old, new) }

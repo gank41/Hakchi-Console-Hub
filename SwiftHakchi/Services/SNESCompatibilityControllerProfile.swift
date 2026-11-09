@@ -19,7 +19,7 @@ enum SNESCompatibilityControllerProfile {
     }
 
     static func load() throws -> Data {
-        guard let url = Bundle.module.url(forResource: "SNESCompatibilityController", withExtension: "cfg") else {
+        guard let url = Bundle.appBundle.url(forResource: "SNESCompatibilityController", withExtension: "cfg") else {
             throw SNESRuntimeBinding.failure()
         }
         let data = try Data(contentsOf: url)

@@ -12,6 +12,15 @@ struct SNESLibraryStartupDiagnosticTests {
         let invalid = [
             ["--prepare-snes-library-startup"],
             ["--prepare-snes-parallel-startup"],
+            ["--prepare-snes-combined-startup"],
+            ["--prepare-snes-queued-startup"],
+            ["--prepare-snes-concurrent-startup"],
+            ["--prepare-snes-concurrent-startup", "relative", digest, "/out"],
+            ["--test-snes-concurrent-startup", "/operation", digest, "/candidate", "/out"],
+            ["--prepare-snes-queued-startup", "relative", digest, "/out"],
+            ["--test-snes-queued-startup", "/operation", digest, "/candidate", "/out"],
+            ["--prepare-snes-combined-startup", "relative", digest, "/out"],
+            ["--test-snes-combined-startup", "/operation", digest, "/candidate", "/out"],
             ["--prepare-snes-parallel-startup", "relative", digest, "/out"],
             ["--test-snes-parallel-startup", "/operation", digest, "/candidate", "/out"],
             ["--prepare-snes-library-startup", "relative", digest, "/out"],
@@ -26,7 +35,7 @@ struct SNESLibraryStartupDiagnosticTests {
                 }, checkHost: { await access.used() })
             }
         }
-        for mode in ["--inspect", "--write-snes-parallel-startup", "--install-snes-parallel-startup"] {
+        for mode in ["--inspect", "--write-snes-parallel-startup", "--install-snes-parallel-startup", "--write-snes-combined-startup", "--install-snes-combined-startup", "--write-snes-queued-startup", "--install-snes-queued-startup", "--write-snes-concurrent-startup", "--install-snes-concurrent-startup"] {
             let other = try await SNESLibraryStartupDiagnostic.runIfPresent([mode], loadInputs: {
                 await access.used(); throw SNESRuntimeBinding.failure()
             }, checkHost: { await access.used() })

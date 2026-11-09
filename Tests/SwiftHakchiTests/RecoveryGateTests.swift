@@ -31,7 +31,9 @@ struct RecoveryGateTests {
             }
             Issue.record("Unvalidated firmware method returned success")
         } catch FlashError.recoveryNotValidated {
-            // Expected before any console transport is touched.
+            if operation == "reset" { Issue.record("Factory reset must have its own independent availability gate") }
+        } catch FlashError.factoryResetNotAvailable {
+            if operation != "reset" { Issue.record("Only factory reset should use the separate reset gate") }
         } catch { Issue.record("Wrong refusal: \(error)") }
         #expect(await boot.calls == 0)
     }

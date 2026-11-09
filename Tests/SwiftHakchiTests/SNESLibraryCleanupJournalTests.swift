@@ -44,6 +44,38 @@ import SwiftHakchiCore
         #expect(try await reopened.phase() == .finished); try await reopened.close()
         let lease = try SNESLibraryJournal.firmwareLease(hwid: plan.before.hwid, root: operation.deletingLastPathComponent()); try lease.closeLease()
     }
+    @Test func deferredCleanupUsesNextRecoveryBackupBeforeAnotherSync() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let (plan, live, backup, originals) = try await SNESLibraryCleanupPlanTests().fixture(root.appendingPathComponent("input"), changedROM: true)
+        let transactions = root.appendingPathComponent("transactions"); try FileManager.default.createDirectory(at: transactions, withIntermediateDirectories: false)
+        let prepared = try SNESLibraryJournal.prepare(plan: plan, root: transactions)
+        let journal = try SNESLibraryJournal(operation: prepared.operation, reviewSHA256: prepared.reviewSHA256, plan: plan)
+        _ = try await SNESLibraryCopyTransaction.run(plan: plan, journal: journal, device: SyntheticSNESCopyDevice(plan: plan, after: SNESLibraryCopyTransactionTests().after(plan), fault: "success"))
+        _ = try await SNESLibrarySelectionTransaction.run(plan: plan, journal: journal, device: SyntheticSNESSelectionDevice(plan: plan, before: SNESLibraryCopyTransactionTests().after(plan), after: live, fault: "success"))
+        try await journal.noteRestarted(SNESLibraryColdCheckTests().evidence(plan, suppliedInventory: live))
+        try await journal.finishKeepingPrevious(current: live)
+        _ = try await journal.closeCompleted()
+        #expect(try SNESLibraryJournal.pending(root: transactions, hwid: plan.before.hwid)?.phase == .finishedKeepingPrevious)
+        // The previous backup and frozen material are still needed to validate cleanup.
+        #expect(throws: (any Error).self) { try SNESLibraryJournal.backupDeletionLease(directory: plan.backup.directory, root: transactions) }
+        try plan.material.validate(sourcePolicy: .frozenRecovery)
+        let recoveredPlan = try SNESLibrarySyncPlan.load(data: plan.data, expectedReviewSHA256: plan.reviewSHA256, originals: originals, purpose: .recovery)
+        let resumed = try SNESLibraryJournal(operation: prepared.operation, reviewSHA256: prepared.reviewSHA256, plan: recoveredPlan)
+        try await resumed.accept(backup: backup, originals: originals, current: live)
+        let scope = try SNESLibraryCleanupPlan.prepare(plan: recoveredPlan, current: live, backup: backup, originals: originals)
+        let seen = try preview(scope, context: live.contextSHA256)
+        let permit = try await resumed.beginCleanup(scope: scope, preview: seen)
+        let request = try SNESLibraryCleanupCommands.remove(scope: scope, preview: seen, runtimeSHA256: String(repeating: "b", count: 64), challenge: permit.challenge)
+        let receipt = try SNESLibraryCleanupReceipt(request.receipt, request: request, scope: scope)
+        try await resumed.finishCleanup(scope: scope, preview: seen, receipt: receipt, after: preview(scope, context: live.contextSHA256, allGone: true), inventory: live)
+        try await resumed.close()
+        #expect(try SNESLibraryJournal.pending(root: transactions, hwid: plan.before.hwid) == nil)
+        let next = try await SNESLibraryJournalTests().plan(root.appendingPathComponent("next-input"))
+        #expect(next.before.hwid == plan.before.hwid)
+        let nextPrepared = try SNESLibraryJournal.prepare(plan: next, root: transactions)
+        let nextJournal = try SNESLibraryJournal(operation: nextPrepared.operation, reviewSHA256: nextPrepared.reviewSHA256, plan: next)
+        try await nextJournal.cancelUnstarted(); try await nextJournal.close()
+    }
     @Test(arguments: ["lost-response", "missing-scope", "changed-preview", "unknown-file"])
     func interruptedCleanupStaysPendingAndOnlyExcludesTheOldInactiveMenu(_ fault: String) async throws {
         let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }

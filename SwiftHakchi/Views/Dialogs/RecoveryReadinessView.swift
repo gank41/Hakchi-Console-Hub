@@ -18,6 +18,8 @@ struct RecoveryReadinessView: View {
     @State private var checked: CheckedReport?
     @State private var checkID = UUID()
     @State private var showSNESBackupHistory = false
+    @State private var showSNESOriginalStartup = false
+    @State private var ownsSNESStartupRestore = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -28,6 +30,10 @@ struct RecoveryReadinessView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if context.console == .snesUsa {
+                        Text("A factory reset is not available yet. You can show the included games or review the original startup below. Neither option erases your saves and settings. The app cannot yet restore a complete console-data snapshot.")
+                            .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Text("If you skipped the backup at the end of your last sync, open Sync Library and choose Continue Sync before restoring startup or transferring saves. This lets the app safely remove the previous game-menu copy.")
+                            .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         GroupBox("Restore Games and Folders") {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Choose a saved SNES library backup to review the games and folders it contains. Your current console saves and settings are kept.")
@@ -48,6 +54,15 @@ struct RecoveryReadinessView: View {
                                     if choice == .returnToBuiltInGames, let onOriginalGamesReview {
                                         Button("Review Original Games…") { onOriginalGamesReview(); dismiss() }
                                             .padding(.top, 4)
+                                    } else if choice == .restoreOriginalStartup && context.console == .snesUsa {
+                                        Button("Review Original SNES Startup…") {
+                                            guard !appState.taskRunner.isRunning, !appState.isPreparingSync, !appState.gameManager.isLoading else { return }
+                                            appState.isPreparingSync = true
+                                            ownsSNESStartupRestore = true
+                                            showSNESOriginalStartup = true
+                                        }
+                                            .padding(.top, 4)
+                                            .disabled(appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
                                     } else {
                                         Text("Not available in this screen yet").font(.caption).foregroundStyle(.secondary)
                                     }
@@ -67,7 +82,7 @@ struct RecoveryReadinessView: View {
                     if let checked, checked.context == context {
                         let report = checked.report
                         evidence("Original startup backup", check: report.kernel)
-                        evidence("Recovery tools", check: report.payload)
+                        evidence(context.console == .snesUsa ? "Factory reset tools" : "Recovery tools", check: report.payload)
                         if !report.warnings.isEmpty {
                             DisclosureGroup("Other recovery material warnings (\(report.warnings.count))") {
                                 ForEach(Array(report.warnings.enumerated()), id: \.offset) { _, warning in
@@ -91,6 +106,11 @@ struct RecoveryReadinessView: View {
         .sheet(isPresented: $showSNESBackupHistory) {
             SNESLibraryBackupHistoryView(workspace: AppConfig.shared.workspace)
                 .environmentObject(appState)
+        }
+        .sheet(isPresented: $showSNESOriginalStartup, onDismiss: {
+            if ownsSNESStartupRestore { ownsSNESStartupRestore = false; appState.isPreparingSync = false }
+        }) {
+            SNESStartupRestorePreparationView().environmentObject(appState)
         }
         .task(id: CheckKey(context: context, refresh: checkID)) {
             checked = nil

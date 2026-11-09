@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import SwiftHakchiCore
 
 protocol LegacyOldMenuBindingDevice: LegacySavedMenuRestoreDevice {
@@ -25,6 +26,8 @@ actor LegacyOldMenuBinding {
         let activeTreeSHA256: String
         let chipIDFingerprint: String
         let oldGameCount: Int
+        let recordDigest: String
+        let recordWasUnbound: Bool
     }
 
     private let workspace: WorkspacePaths
@@ -56,21 +59,33 @@ actor LegacyOldMenuBinding {
             try await device.requireIdentity()
             return try await device.chipID()
         }
-        if FileManager.default.fileExists(atPath:
-            record.backupDirectory.appendingPathComponent(LegacyMenuSnapshot.filename).path) {
+        _ = try LegacyDeviceIdentity.requireReadOnlyInspection(chipID, fingerprint: record.effectiveChipIDFingerprint)
+        let sidecar = record.backupDirectory.appendingPathComponent(LegacyMenuSnapshot.filename)
+        var info = stat()
+        if lstat(sidecar.path, &info) == 0 {
             let bound = try LegacyMenuSnapshot.verify(directory: record.backupDirectory,
                                                       expectedChipID: chipID)
             guard bound.menuTreeSHA256 == saved.treeSHA256 else {
                 throw LegacyInspectionError.invalidBackup
             }
+        } else if errno != ENOENT {
+            throw LegacyInspectionError.invalidBackup
         }
         let report = try await checked("reading the active-menu report") {
             let report = try await device.inspect()
             try LegacyGameChangeService.validateReport(report)
             return report
         }
-        guard record.selectedCodes.map(Set.init) == report.visibleCodes else {
-            throw LegacyInspectionError.invalidReport
+        switch record.resolvedScope {
+        case .trial(let trialCode):
+            let stagedCodes = LegacyMenuSnapshot.gameCodes(stage.entries)
+            guard stagedCodes == report.stockCodes.union([trialCode]), stagedCodes == report.visibleCodes else {
+                throw LegacyInspectionError.invalidReport
+            }
+        case .full, .savedMenu:
+            guard record.selectedCodes.map(Set.init) == report.visibleCodes else {
+                throw LegacyInspectionError.invalidReport
+            }
         }
         let state = try await checked("checking the accepted menu transaction") {
             try await device.inspectOperation(operationID: operationID,
@@ -104,17 +119,21 @@ actor LegacyOldMenuBinding {
                     + differences.prefix(3).joined(separator: "; "))
             }
         }
+        guard try await device.chipID() == chipID else { throw LegacyInspectionError.invalidBackup }
         return Preview(operationID: operationID, backupDirectory: record.backupDirectory,
             archiveSHA256: saved.archiveSHA256, oldTreeSHA256: saved.treeSHA256,
             activeTreeSHA256: record.treeSHA256,
             chipIDFingerprint: BackupManifest.digest(Data(chipID.utf8)),
-            oldGameCount: LegacyMenuSnapshot.gameCodes(saved.entries).count)
+            oldGameCount: LegacyMenuSnapshot.gameCodes(saved.entries).count,
+            recordDigest: try record.identityReviewDigest(), recordWasUnbound: record.effectiveChipIDFingerprint == nil)
     }
 
     func bind(preview reviewed: Preview,
               device: any LegacyOldMenuBindingDevice) async throws -> LegacyMenuSnapshot.Verified {
         let fresh = try await preview(operationID: reviewed.operationID, device: device)
-        guard fresh.backupDirectory.path == reviewed.backupDirectory.path,
+        guard !reviewed.recordWasUnbound, !fresh.recordWasUnbound,
+              fresh.recordDigest == reviewed.recordDigest,
+              fresh.backupDirectory.path == reviewed.backupDirectory.path,
               fresh.archiveSHA256 == reviewed.archiveSHA256,
               fresh.oldTreeSHA256 == reviewed.oldTreeSHA256,
               fresh.activeTreeSHA256 == reviewed.activeTreeSHA256,
@@ -122,6 +141,9 @@ actor LegacyOldMenuBinding {
             throw LegacyInspectionError.invalidBackup
         }
         let chipID = try await device.chipID()
+        guard LegacyDeviceIdentity.matches(chipID, fingerprint: fresh.chipIDFingerprint) else {
+            throw LegacyInspectionError.invalidBackup
+        }
         let verified: LegacyMenuSnapshot.Verified
         if FileManager.default.fileExists(atPath:
             fresh.backupDirectory.appendingPathComponent(LegacyMenuSnapshot.filename).path) {
@@ -138,6 +160,30 @@ actor LegacyOldMenuBinding {
         return verified
     }
 
+    /// Binds only the accepted journal. Creating a restore index remains a
+    /// separate action after explicit original-console confirmation.
+    func bindReviewedAcceptedIdentity(preview reviewed: Preview, originalConsoleConfirmed: Bool,
+                                      device: any LegacyOldMenuBindingDevice,
+                                      isSessionCurrent: @MainActor @Sendable () -> Bool) async throws {
+        guard originalConsoleConfirmed, reviewed.recordWasUnbound else {
+            throw LegacySyncJournalError.invalidTransition
+        }
+        let fresh = try await preview(operationID: reviewed.operationID, device: device)
+        guard fresh.recordWasUnbound, fresh.recordDigest == reviewed.recordDigest,
+              fresh.backupDirectory == reviewed.backupDirectory,
+              fresh.archiveSHA256 == reviewed.archiveSHA256,
+              fresh.oldTreeSHA256 == reviewed.oldTreeSHA256,
+              fresh.activeTreeSHA256 == reviewed.activeTreeSHA256,
+              fresh.chipIDFingerprint == reviewed.chipIDFingerprint else {
+            throw LegacyInspectionError.invalidBackup
+        }
+        try await MainActor.run {
+            guard isSessionCurrent() else { throw LegacyInspectionError.disconnected }
+            try store.bindReviewedAcceptedIdentity(reviewed.operationID, fingerprint: fresh.chipIDFingerprint,
+                                                   expectedRecordDigest: fresh.recordDigest)
+        }
+    }
+
     private func stageManifest(for record: LegacySyncJournal) throws -> LegacyMenuStageManifest {
         let file = record.stageDirectory.appendingPathComponent("manifest.json")
         let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
@@ -152,6 +198,16 @@ actor LegacyOldMenuBinding {
               stage.archiveBytes == record.archiveBytes,
               LegacyMenuSnapshot.treeDigest(stage.entries) == record.treeSHA256 else {
             throw LegacySyncJournalError.invalidRecord
+        }
+        if record.effectiveChipIDFingerprint == nil {
+            guard stage.menuDirectory.deletingLastPathComponent().standardizedFileURL == record.stageDirectory,
+                  stage.archiveURL.standardizedFileURL == record.stageDirectory.appendingPathComponent("menu.tar").standardizedFileURL else {
+                throw LegacySyncJournalError.invalidRecord
+            }
+            let archive = try LegacySyncPlan.SourceFile.capture(stage.archiveURL)
+            guard archive.byteCount == record.archiveBytes, archive.sha256 == record.archiveSHA256 else {
+                throw LegacySyncJournalError.invalidRecord
+            }
         }
         return stage
     }

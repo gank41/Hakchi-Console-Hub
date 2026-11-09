@@ -55,24 +55,27 @@ enum LegacyConsoleService {
         return (Array(displayedStock.values) + Array(custom.values)).sorted { ($0.name, $0.code) < ($1.name, $1.code) }
     }
     static func backup(client: any LegacyRequestExecuting, report: LegacyConsoleReport, destination: URL,
+                       expectedChipID: String? = nil,
                        progress: @Sendable (String, Double) -> Void = { _, _ in }) async throws -> URL {
         do {
-            return try await backupAttempt(client: client, report: report, destination: destination, progress: progress)
+            return try await backupAttempt(client: client, report: report, destination: destination, expectedChipID: expectedChipID, progress: progress)
         } catch LegacyInspectionError.archiveChanged(_) {
             // The running menu can flush its settings between the archive read
             // and independent hash. Re-read once; neither mismatched download
             // becomes a recovery backup. Never repeat a write or a USB failure.
             try Task.checkCancellation()
             progress("Console settings changed during the backup. Checking a fresh copy…", 0)
-            return try await backupAttempt(client: client, report: report, destination: destination, progress: progress)
+            return try await backupAttempt(client: client, report: report, destination: destination, expectedChipID: expectedChipID, progress: progress)
         }
     }
 
     private static func backupAttempt(client: any LegacyRequestExecuting, report: LegacyConsoleReport, destination: URL,
+                                      expectedChipID: String?,
                                       progress: @Sendable (String, Double) -> Void) async throws -> URL {
         let fresh = try await inspect(client: client)
         guard report.matchesLayout(of: fresh) else { throw LegacyInspectionError.invalidBackup }
         let identityBefore = try? await LegacyDeviceIdentity.read(client: client)
+        if let expectedChipID, identityBefore != expectedChipID { throw LegacyInspectionError.invalidBackup }
         progress("Reading legacy games, original games and saves...", 0.05)
         let archive = try await checked(.backup, client: client, timeout: 300_000).stdoutData
         try Task.checkCancellation()
@@ -90,6 +93,7 @@ enum LegacyConsoleService {
         let after = try await inspect(client: client)
         guard report.matchesLayout(of: after) else { throw LegacyInspectionError.invalidBackup }
         let identityAfter = try? await LegacyDeviceIdentity.read(client: client)
+        if let expectedChipID, identityAfter != expectedChipID { throw LegacyInspectionError.invalidBackup }
         let file = partial
         guard BackupManifest.digest(try Data(contentsOf: file)) == expected else { throw LegacyInspectionError.invalidBackup }
         let listingURL = directory.appendingPathComponent("archive-contents.txt")

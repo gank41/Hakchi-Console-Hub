@@ -48,20 +48,33 @@ struct LegacySyncJournal: Codable, Sendable {
     let consoleOrder: ConsoleMenuOrder?
     let structure: ConsoleStructure?
     let savedMenuBinding: SavedMenuBinding?
+    var chipIDFingerprint: String?
     let maximumGamesPerPage: Int
     let archiveBytes: Int64
     let createdAt: Date
     var phase: Phase
 
     var resolvedScope: Scope { scope ?? .trial(code: trialCode ?? "") }
+    /// Older saved-menu journals already carried the device in their binding.
+    var effectiveChipIDFingerprint: String? {
+        if let chipIDFingerprint { return chipIDFingerprint }
+        if case .savedMenu = resolvedScope { return savedMenuBinding?.chipIDFingerprint }
+        return nil
+    }
     var resolvedStructure: ConsoleStructure {
         structure ?? ConsoleStructure(maximumGamesPerPage:
             ConsoleMenuLimit(rawValue: maximumGamesPerPage) ?? .thirty)
     }
 
+    func identityReviewDigest() throws -> String {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        return BackupManifest.digest(try encoder.encode(self))
+    }
+
     init(operationID: UUID, reviewSHA256: String, archiveSHA256: String, treeSHA256: String,
          backupSHA256: String, backupDirectory: URL, stageDirectory: URL,
-         trialCode: String, maximumGamesPerPage: Int, archiveBytes: Int64) throws {
+         trialCode: String, maximumGamesPerPage: Int, archiveBytes: Int64,
+         chipIDFingerprint: String? = nil) throws {
         self.operationID = operationID
         self.reviewSHA256 = reviewSHA256
         self.archiveSHA256 = archiveSHA256
@@ -76,6 +89,7 @@ struct LegacySyncJournal: Codable, Sendable {
         self.consoleOrder = nil
         self.structure = nil
         self.savedMenuBinding = nil
+        self.chipIDFingerprint = chipIDFingerprint
         self.maximumGamesPerPage = maximumGamesPerPage
         self.archiveBytes = archiveBytes
         self.createdAt = Date()
@@ -88,7 +102,7 @@ struct LegacySyncJournal: Codable, Sendable {
          scope: Scope, selectedCodes: [String], reviewedLocalCodes: [String] = [],
          consoleOrder: ConsoleMenuOrder,
          maximumGamesPerPage: Int, archiveBytes: Int64,
-         structure: ConsoleStructure? = nil) throws {
+         structure: ConsoleStructure? = nil, chipIDFingerprint: String? = nil) throws {
         self.operationID = operationID
         self.reviewSHA256 = reviewSHA256
         self.archiveSHA256 = archiveSHA256
@@ -106,6 +120,7 @@ struct LegacySyncJournal: Codable, Sendable {
         self.consoleOrder = consoleOrder
         self.structure = structure
         self.savedMenuBinding = nil
+        self.chipIDFingerprint = chipIDFingerprint
         self.maximumGamesPerPage = maximumGamesPerPage
         self.archiveBytes = archiveBytes
         self.createdAt = Date()
@@ -129,6 +144,7 @@ struct LegacySyncJournal: Codable, Sendable {
         reviewedLocalCodes = nil
         consoleOrder = nil
         structure = nil
+        chipIDFingerprint = snapshot.manifest.chipIDFingerprint
         savedMenuBinding = .init(snapshotArchiveSHA256: snapshot.manifest.archiveSHA256,
             chipIDFingerprint: snapshot.manifest.chipIDFingerprint,
             previousOperationID: previous.operationID, previousTreeSHA256: previous.treeSHA256)
@@ -141,6 +157,9 @@ struct LegacySyncJournal: Codable, Sendable {
 
     func validate() throws {
         let hashes = [reviewSHA256, archiveSHA256, treeSHA256, backupSHA256]
+        guard chipIDFingerprint.map({ $0.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil }) ?? true else {
+            throw LegacySyncJournalError.invalidRecord
+        }
         guard hashes.allSatisfy({ $0.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil }),
               archiveBytes > 0, archiveBytes <= 256 * 1024 * 1024,
               backupDirectory.isFileURL, backupDirectory.path.hasPrefix("/"),
@@ -184,6 +203,7 @@ struct LegacySyncJournal: Codable, Sendable {
                       && SyncPlanner.validCode($0) }),
                   reviewedLocalCodes == nil, consoleOrder == nil,
                   let savedMenuBinding,
+                  (chipIDFingerprint == nil || chipIDFingerprint == savedMenuBinding.chipIDFingerprint),
                   savedMenuBinding.snapshotArchiveSHA256 == backupSHA256,
                   savedMenuBinding.snapshotArchiveSHA256.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil,
                   savedMenuBinding.chipIDFingerprint.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil,
@@ -211,16 +231,29 @@ struct LegacySyncJournal: Codable, Sendable {
 
 /// Durable host-side gate. A corrupt or unresolved journal blocks every new sync operation.
 actor LegacySyncJournalStore {
+    // Shared by every store in this process. Other app processes must not be
+    // used concurrently; the lock does not coordinate console operations.
+    private static let mutationLock = NSLock()
     private let directory: URL
-    init(directory: URL) { self.directory = directory.standardizedFileURL }
+    private let synchronize: @Sendable (Int32) -> Int32
+    init(directory: URL, synchronize: @escaping @Sendable (Int32) -> Int32 = { Darwin.fsync($0) }) {
+        self.directory = directory.standardizedFileURL
+        self.synchronize = synchronize
+    }
 
-    private func file(for id: UUID) -> URL {
+    private nonisolated func file(for id: UUID) -> URL {
         directory.appendingPathComponent("nes-sync-" + id.uuidString + ".json")
     }
 
     private func journalFiles() throws -> [URL] {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: directory.path) else { return [] }
+        guard directory == directory.resolvingSymlinksInPath() else { throw LegacySyncJournalError.invalidRecord }
+        var info = stat()
+        if lstat(directory.path, &info) != 0 {
+            if errno == ENOENT { return [] }
+            throw LegacySyncJournalError.invalidRecord
+        }
+        guard info.st_mode & S_IFMT == S_IFDIR else { throw LegacySyncJournalError.invalidRecord }
         let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         guard values.isDirectory == true, values.isSymbolicLink != true else {
             throw LegacySyncJournalError.invalidRecord
@@ -241,34 +274,84 @@ actor LegacySyncJournalStore {
         return record
     }
 
-    private func persist(_ record: LegacySyncJournal) throws {
+    private nonisolated func withMutationDirectory<T>(create: Bool = false,
+                                          _ body: (RestoreDirectory) throws -> T) throws -> T {
+        Self.mutationLock.lock()
+        defer { Self.mutationLock.unlock() }
+        if create {
+            let components = directory.standardizedFileURL.pathComponents
+            guard components.count > 2, components[0] == "/" else { throw LegacySyncJournalError.invalidRecord }
+            // The top-level system directory is the established anchor. Sync
+            // every parent below it even on retry after an interrupted mkdir.
+            let ancestor = URL(fileURLWithPath: "/" + components[1], isDirectory: true)
+            try RecoveryFirmwareJournalPolicy.createDirectoryWithoutFollowingSymlinks(
+                at: directory, durableFrom: ancestor, synchronize: synchronize)
+        }
+        let root = try RestoreDirectory(directory)
+        try root.check()
+        let result = try body(root)
+        try root.check()
+        return result
+    }
+
+    private nonisolated func read(_ id: UUID, in root: RestoreDirectory) throws -> LegacySyncJournal {
+        let name = file(for: id).lastPathComponent
+        let record = try JSONDecoder().decode(LegacySyncJournal.self, from: root.read(name, maximum: 16_384))
+        try record.validate()
+        guard record.operationID == id else { throw LegacySyncJournalError.invalidRecord }
+        return record
+    }
+
+    private nonisolated func unresolved(in root: RestoreDirectory) throws -> LegacySyncJournal? {
+        let names = try root.names().filter { $0.hasPrefix("nes-sync-") && $0.hasSuffix(".json") }
+        let records = try names.map { name -> LegacySyncJournal in
+            guard let id = UUID(uuidString: String(name.dropFirst("nes-sync-".count).dropLast(".json".count))),
+                  file(for: id).lastPathComponent == name else { throw LegacySyncJournalError.invalidRecord }
+            return try read(id, in: root)
+        }.filter { ![.accepted, .discarded, .rolledBack].contains($0.phase) }
+        guard records.count <= 1 else { throw LegacySyncJournalError.unresolvedOperation }
+        return records.first
+    }
+
+    private nonisolated func persist(_ record: LegacySyncJournal, in root: RestoreDirectory) throws {
         try record.validate()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let url = file(for: record.operationID)
-        try encoder.encode(record).write(to: url, options: .atomic)
-        let handle = try FileHandle(forWritingTo: url)
-        defer { try? handle.close() }
-        try handle.synchronize()
-        // The activation intent must survive a crash even if this was the first
-        // journal file or an atomic replacement of an earlier phase.
-        let descriptor = open(directory.path, O_RDONLY)
-        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        defer { _ = close(descriptor) }
-        guard fsync(descriptor) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        let data = try encoder.encode(record)
+        let name = file(for: record.operationID).lastPathComponent
+        let temp = ".nes-sync-" + UUID().uuidString + ".tmp"
+        try root.check()
+        let fd = openat(root.fd, temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { throw LegacySyncJournalError.invalidRecord }
+        defer { _ = close(fd); _ = unlinkat(root.fd, temp, 0) }
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.write(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                offset += count
+            }
         }
+        guard synchronize(fd) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        try root.check()
+        guard renameat(root.fd, temp, root.fd, name) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        guard synchronize(root.fd) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        // A failure here can occur after the atomic replacement; callers must
+        // reopen the journal before attempting a recovery action.
+        try root.check()
     }
 
     func begin(_ record: LegacySyncJournal) throws {
         try record.validate()
         guard record.phase == .prepared else { throw LegacySyncJournalError.invalidRecord }
-        guard try latestUnresolved() == nil else { throw LegacySyncJournalError.unresolvedOperation }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        guard !FileManager.default.fileExists(atPath: file(for: record.operationID).path) else {
-            throw LegacySyncJournalError.unresolvedOperation
+        try withMutationDirectory(create: true) { root in
+            guard try unresolved(in: root) == nil else { throw LegacySyncJournalError.unresolvedOperation }
+            var info = stat()
+            let found = fstatat(root.fd, file(for: record.operationID).lastPathComponent, &info, AT_SYMLINK_NOFOLLOW)
+            guard found != 0 && errno == ENOENT else { throw LegacySyncJournalError.unresolvedOperation }
+            try persist(record, in: root)
         }
-        try persist(record)
     }
 
     func load(_ id: UUID) throws -> LegacySyncJournal {
@@ -279,6 +362,40 @@ actor LegacySyncJournalStore {
 
     func allRecords() throws -> [LegacySyncJournal] {
         try journalFiles().map(read)
+    }
+
+    /// This compare-and-bind follows the existing single-app-instance journal
+    /// model. Other app processes are not serialized by this store.
+    nonisolated func bindReviewedIdentity(_ id: UUID, fingerprint: String, expectedRecordDigest: String) throws {
+        try Task.checkCancellation()
+        try withMutationDirectory { root in
+            guard fingerprint.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil,
+                  var current = try unresolved(in: root), current.operationID == id,
+                  current.effectiveChipIDFingerprint == nil,
+                  try current.identityReviewDigest() == expectedRecordDigest else {
+                throw LegacySyncJournalError.invalidRecord
+            }
+            current.chipIDFingerprint = fingerprint
+            try persist(current, in: root)
+        }
+    }
+
+    /// An accepted historical record is bound only after its independent
+    /// former-menu review. No backup index is created or changed here.
+    nonisolated func bindReviewedAcceptedIdentity(_ id: UUID, fingerprint: String, expectedRecordDigest: String) throws {
+        try Task.checkCancellation()
+        try withMutationDirectory { root in
+            guard fingerprint.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil,
+                  try unresolved(in: root) == nil else { throw LegacySyncJournalError.invalidRecord }
+            var current = try read(id, in: root)
+            guard current.phase == .accepted, current.resolvedScope != .savedMenu,
+                  current.effectiveChipIDFingerprint == nil,
+                  try current.identityReviewDigest() == expectedRecordDigest else {
+                throw LegacySyncJournalError.invalidRecord
+            }
+            current.chipIDFingerprint = fingerprint
+            try persist(current, in: root)
+        }
     }
 
     func latestUnresolved() throws -> LegacySyncJournal? {
@@ -301,23 +418,70 @@ actor LegacySyncJournalStore {
             .max { $0.createdAt < $1.createdAt }
     }
 
+    /// Accepted history is shared by the Mac library, so filter by the
+    /// connected console before selecting the newest record. Unbound legacy
+    /// records without a device binding are excluded.
+    func latestAcceptedMenu(matchingChipID chipID: String) throws -> LegacySyncJournal? {
+        try latestAccepted(matchingChipID: chipID, fullOnly: false)
+    }
+
+    func latestAcceptedFull(matchingChipID chipID: String) throws -> LegacySyncJournal? {
+        try latestAccepted(matchingChipID: chipID, fullOnly: true)
+    }
+
+    /// When reopening a saved preview, only its recorded fingerprint is
+    /// available. Unbound history is excluded until independently reviewed.
+    func latestAcceptedFull(matchingFingerprint fingerprint: String?) throws -> LegacySyncJournal? {
+        if let fingerprint, fingerprint.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) == nil {
+            throw LegacySyncJournalError.invalidRecord
+        }
+        guard let fingerprint else { return nil }
+        return try journalFiles().map(read)
+            .filter { record in
+                record.phase == .accepted && record.resolvedScope == .full &&
+                record.effectiveChipIDFingerprint == fingerprint
+            }
+            .max { $0.createdAt < $1.createdAt }
+    }
+
+    private func latestAccepted(matchingChipID chipID: String, fullOnly: Bool) throws -> LegacySyncJournal? {
+        guard chipID.contains(where: { $0 != "0" }),
+              LegacyDeviceIdentity.matches(chipID, fingerprint: BackupManifest.digest(Data(chipID.utf8))) else {
+            throw LegacyInspectionError.invalidResponse
+        }
+        return try journalFiles().map(read).filter { record in
+            guard record.phase == .accepted,
+                  record.resolvedScope == .full || (!fullOnly && record.resolvedScope == .savedMenu) else { return false }
+            return (try? LegacyDeviceIdentity.requireOperationIdentity(chipID, fingerprint: record.effectiveChipIDFingerprint)) != nil
+        }.max { $0.createdAt < $1.createdAt }
+    }
+
     func advance(_ id: UUID, from expected: LegacySyncJournal.Phase,
                  to next: LegacySyncJournal.Phase) throws {
-        var record = try load(id)
+        try withMutationDirectory { root in
+            try advance(id, from: expected, to: next, in: root)
+        }
+    }
+
+    private func advance(_ id: UUID, from expected: LegacySyncJournal.Phase,
+                         to next: LegacySyncJournal.Phase, in root: RestoreDirectory) throws {
+        var record = try read(id, in: root)
         guard record.phase == expected,
               Self.transitions.contains(.init(from: expected, to: next)) else {
             throw LegacySyncJournalError.invalidTransition
         }
         record.phase = next
-        try persist(record)
+        try persist(record, in: root)
     }
 
     func markUncertain(_ id: UUID) throws {
-        let current = try load(id).phase
-        guard current == .activationIntent || current == .activePendingAcceptance else {
-            throw LegacySyncJournalError.invalidTransition
+        try withMutationDirectory { root in
+            let current = try read(id, in: root).phase
+            guard current == .activationIntent || current == .activePendingAcceptance else {
+                throw LegacySyncJournalError.invalidTransition
+            }
+            try advance(id, from: current, to: .uncertain, in: root)
         }
-        try advance(id, from: current, to: .uncertain)
     }
 
     private struct Transition: Hashable {

@@ -33,7 +33,7 @@ struct SNESMenuPreparationView: View {
         }, accept: { check, upgrade in
             try await app.acceptSNESMenuUpgrade(upgrade, after: check, menu: stage.parent, confirmed: true)
         }), freshBackup: SNESMenuFreshBackupOperations(backup: { check in
-            try await app.backupSNESReviewedCurrentData(after: check, ready: true) { _ in }
+            try await app.backupSNESReviewedCurrentData(after: check, menu: stage.parent, ready: true) { _ in }
         }, rebuild: { check, backup in
             if let parent = stage.parent { return try await app.prepareSNESLibraryStartup(after: check, menu: parent, currentData: backup, confirmed: true) }
             return try await app.prepareSNESMenuStartup(after: check, currentData: backup)

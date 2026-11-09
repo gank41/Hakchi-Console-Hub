@@ -56,10 +56,14 @@ actor RecoveryPreflightService {
         }
         let result = console == .nes ? Self.inspectStock(backups: backups) : Self.inspectSNES(backups: backups)
         let payload: RecoveryCheck
-        do {
-            let evidence = try await payloadEvidence()
-            payload = RecoveryCheck(status: .verified, detail: "Audited bundled DRAM loader, hakchi module, base modules, U-Boot and custom recovery image match their pinned bytes. Custom recovery boot.img SHA256: \(evidence.bootImageSHA256). This does not validate booting or flashing them.")
-        } catch { payload = RecoveryCheck(status: .failed, detail: error.localizedDescription) }
+        if console == .snesUsa {
+            payload = RecoveryCheck(status: .unavailable, detail: "A complete SNES factory reset is not available yet. Restoring the original startup uses a separate, reviewed process; it does not erase games or saves.")
+        } else {
+            do {
+                let evidence = try await payloadEvidence()
+                payload = RecoveryCheck(status: .verified, detail: "Audited bundled DRAM loader, hakchi module, base modules, U-Boot and custom recovery image match their pinned bytes. Custom recovery boot.img SHA256: \(evidence.bootImageSHA256). This does not validate booting or flashing them.")
+            } catch { payload = RecoveryCheck(status: .failed, detail: error.localizedDescription) }
+        }
         return RecoveryReadinessReport(kernel: result.0, payload: payload, warnings: result.1)
     }
 

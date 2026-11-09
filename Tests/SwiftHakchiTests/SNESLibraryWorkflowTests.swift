@@ -13,19 +13,22 @@ struct SNESLibraryWorkflowTests {
     }
 
     @Test func copyingShowingAndFinishingAreSeparateAndCannotBeSkipped() {
+        #expect(SNESLibraryWorkflowPhase.deferredReady.action == .clearDeferred)
+        #expect(SNESLibraryWorkflowPhase.deferredReady.buttonTitle == "Continue Sync")
         #expect(SNESLibraryWorkflowPhase.ready.action == .copy)
         #expect(SNESLibraryWorkflowPhase.copied.action == .show)
         #expect(SNESLibraryWorkflowPhase.restart.action == .checkRestart)
         #expect(SNESLibraryWorkflowPhase.testing.action == .confirmTest)
         #expect(SNESLibraryWorkflowPhase.readyToFinish.action == .finish)
         #expect(SNESLibraryWorkflowPhase.complete.action == .close)
-        for phase in [SNESLibraryWorkflowPhase.copying, .savingSelection, .checkingRestart, .savingBackup, .finishing] {
+        for phase in [SNESLibraryWorkflowPhase.copying, .savingSelection, .checkingRestart, .savingBackup, .checkingCompletion, .clearingPrevious, .finishing] {
             #expect(phase.isBusy && phase.action == nil && !phase.canEdit)
         }
     }
     @Test func controlsUseTheApprovedPlainLanguageAndOnlyReviewsAreEditable() {
         #expect(SNESLibraryWorkflowPhase.ready.buttonTitle == "Copy Games to Console")
         #expect(SNESLibraryWorkflowPhase.copied.buttonTitle == "Show Updated Games")
+        #expect(SNESLibraryWorkflowPhase.testing.buttonTitle == "Finish Sync")
         #expect(SNESLibraryWorkflowPhase.readyToFinish.buttonTitle == "Finish Sync")
         #expect(SNESLibraryWorkflowPhase.complete.buttonTitle == "Done")
         #expect(SNESLibraryWorkflowPhase.review.canEdit && SNESLibraryWorkflowPhase.ready.canEdit)

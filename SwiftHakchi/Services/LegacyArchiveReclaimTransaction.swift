@@ -70,10 +70,11 @@ actor LegacyArchiveReclaimTransaction {
         }
         try await reclaimStore.advance(preview.operationID, from: .prepared, to: .removalIntent)
         do {
+            try await LegacyArchiveReclaim.requireBoundIdentity(record, device: device)
             try await device.removeArchive(operationID: preview.operationID,
                 treeSHA256: preview.treeSHA256, archiveSHA256: preview.archiveSHA256,
                 archiveBytes: preview.archiveBytes)
-            try await requireAbsent(journal: journal, device: device)
+            try await requireAbsent(journal: journal, record: record, device: device)
             try await reclaimStore.advance(preview.operationID, from: .removalIntent, to: .completed)
         } catch {
             try? await reclaimStore.advance(preview.operationID, from: .removalIntent, to: .uncertain)
@@ -94,7 +95,7 @@ actor LegacyArchiveReclaimTransaction {
               record.archiveBytes == journal.archiveBytes else {
             throw LegacySyncJournalError.invalidRecord
         }
-        try await device.requireIdentity()
+        try await LegacyArchiveReclaim.requireBoundIdentity(record, device: device)
         let report = try await device.inspect()
         try LegacyGameChangeService.validateReport(report)
         let state = try await device.inspectOperation(operationID: operationID,
@@ -104,14 +105,15 @@ actor LegacyArchiveReclaimTransaction {
                                                         workspace: workspace, device: device)
             try await reclaimStore.advance(operationID, from: journal.phase, to: .prepared)
         } else {
-            try await requireAbsent(journal: journal, device: device)
+            try await requireAbsent(journal: journal, record: record, device: device)
             try await reclaimStore.advance(operationID, from: journal.phase, to: .completed)
         }
     }
 
     private func requireAbsent(journal: LegacyArchiveReclaimJournal,
+                               record: LegacySyncJournal,
                                device: any LegacyArchiveReclaimDevice) async throws {
-        try await device.requireIdentity()
+        try await LegacyArchiveReclaim.requireBoundIdentity(record, device: device)
         let report = try await device.inspect()
         try LegacyGameChangeService.validateReport(report)
         let state = try await device.inspectOperation(operationID: journal.operationID,

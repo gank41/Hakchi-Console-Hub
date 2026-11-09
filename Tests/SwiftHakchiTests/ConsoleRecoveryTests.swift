@@ -44,6 +44,17 @@ import SwiftHakchiCore
         #expect(report.kernel.status == .missing)
         #expect(report.warnings.isEmpty && !report.canReset)
     }
+    @Test func SNESFactoryResetReadinessNeverUsesLegacyNESRecoveryTools() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let service = RecoveryPreflightService(payloadEvidence: {
+            Issue.record("SNES factory-reset readiness must not inspect the separate legacy NES recovery payload")
+            throw RecoveryImageError.invalid("Unexpected legacy payload inspection")
+        })
+        let report = await service.inspect(backups: root, console: .snesUsa)
+        #expect(report.payload.status == .unavailable)
+        #expect(report.payload.detail.contains("factory reset"))
+        #expect(!report.canReset)
+    }
 }
 
 extension ConsoleRecoveryTests {

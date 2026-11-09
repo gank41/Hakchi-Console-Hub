@@ -355,6 +355,18 @@ import Foundation
         phase = .dataReturnToNormal
     }
     private func updateDataDetail(_ detail: String) { dataDetail = detail }
+    /// Copy the already checked full-data backup; never contact a console.
+    func copyFullDataBackup(to destination: URL, updated: Bool) async throws -> URL {
+        guard let setup = backupReceipt, setup.kind == .backup,
+              let receipt = updated ? freshDataReceipt : dataReceipt else { throw SNESDataSnapshotError.refused }
+        return try await Task.detached {
+            let original = try SNESOfflineSource.load(snapshot: setup.directory)
+            guard original.manifestSHA256 == setup.manifestSHA256 else { throw SNESDataSnapshotError.refused }
+            let source = try SNESPreparationSource.load(original)
+            let checked = try SNESDataSnapshotPackage.load(receipt: receipt, source: source)
+            return try SNESPortableDataSnapshot.copy(checked, to: destination)
+        }.value
+    }
     func confirmDataNormalBoot() {
         guard phase == .dataReturnToNormal else { return }
         phase = dataError == nil ? .dataComplete : .dataFailed

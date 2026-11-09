@@ -9,6 +9,11 @@ struct LegacyArchiveReclaimView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @State private var candidate: LegacySyncJournal?
+    @State private var unboundAccepted: [LegacySyncJournal] = []
+    @State private var unsupportedAcceptedCount = 0
+    @State private var selectedUnboundID: UUID?
+    @State private var acceptedIdentityReview: LegacyOldMenuBinding.Preview?
+    @State private var confirmedOriginalNES = false
     @State private var preview: LegacyArchiveReclaim.Preview?
     @State private var formerMenuPreview: LegacyOldMenuReclaim.Preview?
     @State private var formerMenuJournal: LegacyOldMenuReclaimJournal?
@@ -87,6 +92,37 @@ struct LegacyArchiveReclaimView: View {
                          ? "The previous menu has a verified Mac backup. Review All Old Files checks that backup against the console before offering to remove the old copy."
                          : "Verify Former Menu Backup compares the previous NES menu with its Mac archive. It changes only the Mac backup. Review All Old Files checks files before offering to remove them.")
                         .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if !unboundAccepted.isEmpty || unsupportedAcceptedCount > 0 {
+                GroupBox("Older accepted NES history") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Close other copies of this app. Use only this instance and connect the original NES used for the selected update. The comparison cannot prove your recollection of which NES was used.")
+                            .font(.caption)
+                        if !unboundAccepted.isEmpty {
+                            Picker("Saved update", selection: $selectedUnboundID) {
+                                Text("Choose an update").tag(UUID?.none)
+                                ForEach(unboundAccepted, id: \.operationID) { record in
+                                    Text((record.resolvedScope == .full ? "Library — " : "Trial — ") + record.createdAt.formatted(date: .abbreviated, time: .shortened) + " — " + record.operationID.uuidString)
+                                        .tag(Optional(record.operationID))
+                                }
+                            }.disabled(working || !sameSession)
+                            Button("Review Original NES and Menus") { Task { await reviewAcceptedIdentity() } }
+                                .disabled(working || !sameSession || selectedUnboundID == nil)
+                            if acceptedIdentityReview != nil {
+                                Toggle("I confirm this is the original NES used for the selected accepted update.", isOn: $confirmedOriginalNES)
+                                    .disabled(working || !sameSession)
+                                Button("Save Original NES for This Update") { Task { await bindAcceptedIdentity() } }
+                                    .disabled(working || !sameSession || !confirmedOriginalNES)
+                            }
+                        }
+                        if unsupportedAcceptedCount > 0 {
+                            Text("Some older records need manual review. Keep their Mac backups; they are not linked automatically.")
+                                .font(.caption)
+                        }
+                        Text("If the saved transaction or either menu is missing or different, keep the NES and Mac backup unchanged and use the operation ID when seeking manual recovery help.")
+                            .font(.caption)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             if let preview {
@@ -179,7 +215,7 @@ struct LegacyArchiveReclaimView: View {
             }
         }
         .padding()
-        .frame(minWidth: 600, minHeight: 380)
+        .frame(minWidth: 600, minHeight: unboundAccepted.isEmpty && unsupportedAcceptedCount == 0 ? 380 : 600)
         .confirmationDialog("Remove this redundant transfer archive from the NES?",
                             isPresented: $showRemovalConfirmation) {
             Button("Reclaim Archive", role: .destructive) { Task { await remove() } }
@@ -203,6 +239,10 @@ struct LegacyArchiveReclaimView: View {
             Text("Remove \(ByteCountFormatter.string(fromByteCount: historical?.bytesToReclaim ?? 0, countStyle: .binary)) of verified older menus and transfer files. Their complete backup stays on this Mac. Keep the NES on its first game page with no game running.")
         }
         .task { await loadState() }
+        .onChange(of: selectedUnboundID) { _, _ in acceptedIdentityReview = nil; confirmedOriginalNES = false }
+        .onChange(of: sameSession) { _, connected in
+            if !connected { acceptedIdentityReview = nil; confirmedOriginalNES = false }
+        }
         .onDisappear { appState.isPreparingSync = false }
     }
 
@@ -289,13 +329,19 @@ struct LegacyArchiveReclaimView: View {
     @MainActor private func loadState() async {
         do {
             historical = try LegacyHistoricalCleanup.load(workspace: workspace)
+            let store = LegacySyncJournalStore(directory: workspace.journals)
+            let old = try await store.allRecords().filter { $0.phase == .accepted && $0.effectiveChipIDFingerprint == nil }
+            unboundAccepted = old.filter { $0.resolvedScope != .savedMenu }.sorted { $0.createdAt > $1.createdAt }
+            unsupportedAcceptedCount = old.count - unboundAccepted.count
             if let client = appState.deviceManager.legacyClient {
+                let chipID = try await LegacyDeviceIdentity.read(client: client)
+                candidate = try await store.latestAcceptedMenu(matchingChipID: chipID)
                 let result = try await client.execute(.storageReport, timeoutMilliseconds: 30_000)
                 guard result.succeeded else { throw LegacyInspectionError.invalidResponse }
                 storage = try LegacyStorageReport.parse(result.stdoutData)
+            } else {
+                candidate = nil
             }
-            let store = LegacySyncJournalStore(directory: workspace.journals)
-            candidate = try await store.latestAcceptedMenu()
             if let candidate {
                 oldMenuBound = candidate.resolvedScope == .full &&
                     (try? LegacyMenuSnapshot.verify(directory: candidate.backupDirectory)) != nil
@@ -323,6 +369,54 @@ struct LegacyArchiveReclaimView: View {
         } catch {
             self.error = error.localizedDescription
             status = "A saved sync record needs review before cleanup."
+        }
+    }
+
+    @MainActor private func reviewAcceptedIdentity() async {
+        guard !working, sameSession, let id = selectedUnboundID,
+              let client = appState.deviceManager.legacyClient else { return }
+        working = true; acceptedIdentityReview = nil; confirmedOriginalNES = false; error = nil
+        status = "Comparing the saved backup and both NES menus without changing the console…"
+        defer { working = false }
+        do {
+            let lease = try await client.reserveForChange()
+            do {
+                let binder = LegacyOldMenuBinding(workspace: workspace)
+                let proof = try await binder.preview(operationID: id, device: LegacySyncLeaseDevice(lease: lease))
+                guard sameSession, selectedUnboundID == id, proof.recordWasUnbound else { throw LegacyInspectionError.disconnected }
+                acceptedIdentityReview = proof
+                status = "The saved update and both menus match. Confirm only if this is the original NES."
+                await lease.release()
+            } catch { await lease.release(); throw error }
+        } catch { self.error = error.localizedDescription; status = "Review stopped. Keep the saved record and backup for manual inspection." }
+    }
+
+    @MainActor private func bindAcceptedIdentity() async {
+        guard !working, sameSession, confirmedOriginalNES, let reviewed = acceptedIdentityReview,
+              selectedUnboundID == reviewed.operationID, let client = appState.deviceManager.legacyClient else { return }
+        let trial = unboundAccepted.first(where: { $0.operationID == reviewed.operationID }).map {
+            if case .trial = $0.resolvedScope { return true }
+            return false
+        } ?? false
+        working = true; acceptedIdentityReview = nil; confirmedOriginalNES = false; error = nil
+        defer { working = false }
+        do {
+            let lease = try await client.reserveForChange()
+            do {
+                let binder = LegacyOldMenuBinding(workspace: workspace)
+                try await binder.bindReviewedAcceptedIdentity(preview: reviewed, originalConsoleConfirmed: true,
+                    device: LegacySyncLeaseDevice(lease: lease),
+                    isSessionCurrent: { @MainActor in sameSession && selectedUnboundID == reviewed.operationID })
+                await lease.release()
+            } catch { await lease.release(); throw error }
+            selectedUnboundID = nil
+            await loadState()
+            status = trial
+                ? "The accepted trial record is linked to the reviewed NES. It does not become library cleanup or restore history; its Mac backup was not changed."
+                : "The accepted update is linked to the reviewed NES. Its Mac backup was not changed."
+        } catch {
+            self.error = error.localizedDescription
+            status = "The review stopped. Reopen this window and check the saved record before continuing."
         }
     }
 

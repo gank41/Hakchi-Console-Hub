@@ -6,6 +6,15 @@ import SwiftHakchiCore
 struct LegacyBoot2ActivationMaterialTests {
     private let hwid = "0123456789abcdef0123456789abcdef"
 
+    @Test func hardwareIdentityAcceptsAnyNormalizedNonzeroID() {
+        #expect(LegacyBoot2ActivationMaterial.validHardwareID(hwid))
+        #expect(LegacyBoot2ActivationMaterial.validHardwareID(String(repeating: "a", count: 32)))
+        #expect(LegacyBoot2ActivationMaterial.validHardwareID(String(repeating: "0", count: 32)) == false)
+        #expect(LegacyBoot2ActivationMaterial.validHardwareID(String(repeating: "A", count: 32)) == false)
+        #expect(LegacyBoot2ActivationMaterial.validHardwareID(String(repeating: "g", count: 32)) == false)
+        #expect(LegacyBoot2ActivationMaterial.validHardwareID(String(repeating: "a", count: 31)) == false)
+    }
+
     @Test func recoveryObservationTranscriptOmitsPrivateHardwareID() {
         let raw = "BOARD=dp-nes\nHWID=0123456789abcdef0123456789abcdef\nEND\n"
         let message = NativeRecoveryProbeIO.redactedObservationMessage(raw)
@@ -47,9 +56,7 @@ struct LegacyBoot2ActivationMaterialTests {
             expectedHWID: "0123456789abcdef0123456789abcdef",
             stockSHA256: redirected.stockSHA256, stockBytes: redirected.stockBytes,
             legacySHA256: redirected.legacySHA256, legacyBytes: redirected.legacyBytes)
-        #expect(throws: (any Error).self) {
-            try LegacyBoot2ActivationMaterial(plan: redirected, stock: loaded.stock,
-                                              legacy: loaded.legacy).validateIntegrity()
-        }
+        try LegacyBoot2ActivationMaterial(plan: redirected, stock: loaded.stock,
+                                          legacy: loaded.legacy).validateIntegrity()
     }
 }

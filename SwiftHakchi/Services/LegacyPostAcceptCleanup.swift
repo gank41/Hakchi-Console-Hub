@@ -6,7 +6,9 @@ import SwiftHakchiCore
 enum LegacyPostAcceptCleanup {
     static func run(workspace: WorkspacePaths, lease: LegacySessionLease,
                     progress: @Sendable (String) -> Void) async throws {
-        guard let accepted = try await LegacySyncJournalStore(directory: workspace.journals).latestAcceptedMenu() else {
+        let chipID = try await LegacyDeviceIdentity.read(client: lease)
+        guard let accepted = try await LegacySyncJournalStore(directory: workspace.journals)
+            .latestAcceptedMenu(matchingChipID: chipID) else {
             throw LegacySyncJournalError.invalidRecord
         }
         let archiveStore = LegacyArchiveReclaimJournalStore(directory: workspace.journals)

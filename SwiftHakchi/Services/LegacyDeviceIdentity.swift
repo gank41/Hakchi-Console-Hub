@@ -35,9 +35,22 @@ enum LegacyDeviceIdentity {
             && BackupManifest.digest(Data(id.utf8)) == fingerprint
     }
 
-    static func requireFirstNES(_ id: String) throws {
-        guard matches(id, fingerprint: LegacyBoot2ActivationPlan.supportedHWIDSHA256) else {
+    static func requireOperationIdentity(_ id: String, fingerprint: String?) throws {
+        guard let fingerprint else {
+            throw LegacyChangeError.refused("This older operation has no verified NES identity. Review the original NES before continuing.")
+        }
+        guard matches(id, fingerprint: fingerprint) else { throw LegacyInspectionError.invalidBackup }
+    }
+
+    /// A valid unbound ID permits inspection only; false means the original
+    /// console has not been established and no recovery write is authorized.
+    static func requireReadOnlyInspection(_ id: String, fingerprint: String?) throws -> Bool {
+        guard id.contains(where: { $0 != "0" }),
+              matches(id, fingerprint: BackupManifest.digest(Data(id.utf8))) else {
             throw LegacyInspectionError.invalidResponse
         }
+        guard let fingerprint else { return false }
+        try requireOperationIdentity(id, fingerprint: fingerprint)
+        return true
     }
 }

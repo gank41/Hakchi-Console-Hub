@@ -34,6 +34,8 @@ struct LegacySyncTrialView: View {
     @State private var operationID: UUID?
     @State private var journal: LegacySyncJournal?
     @State private var observation: LegacySyncInspection?
+    @State private var identityReview: LegacySyncTransaction.UnboundIdentityReview?
+    @State private var originalNESConfirmed = false
     @State private var working = false
     @State private var confirmed = false
     @State private var rollbackConfirmed = false
@@ -107,31 +109,31 @@ struct LegacySyncTrialView: View {
         return visible.sorted { ($0.name, $0.code) < ($1.name, $1.code) }
     }
     private var canDiscard: Bool {
-        guard let phase, let observation else { return false }
+        guard journal?.effectiveChipIDFingerprint != nil, let phase, let observation else { return false }
         return [.prepared, .uploaded, .verified, .activationIntent, .uncertain].contains(phase)
             && observation.outcome == .beforeRename && observation.phase == .missing
             && !observation.old && !observation.lock
     }
     private var canVerifyUploaded: Bool {
-        guard phase == .uploaded, let observation else { return false }
+        guard journal?.effectiveChipIDFingerprint != nil, phase == .uploaded, let observation else { return false }
         return observation.phase == .missing && observation.outcome == .beforeRename
             && observation.transaction && observation.archive && observation.stage
             && observation.verified && observation.live && !observation.old
             && !observation.failed && !observation.lock
     }
     private var canRollback: Bool {
-        guard let phase, let observation else { return false }
+        guard journal?.effectiveChipIDFingerprint != nil, let phase, let observation else { return false }
         return [.activationIntent, .uncertain, .activePendingAcceptance].contains(phase)
             && observation.transaction && observation.outcome != .inconsistent
             && observation.phase != .accepted
             && (observation.lock || (observation.phase == .rolledBack && !observation.old))
     }
     private var canResumeAcceptance: Bool {
-        phase == .uncertain && (observation?.phase == .menuStarted || observation?.phase == .accepted)
+        journal?.effectiveChipIDFingerprint != nil && phase == .uncertain && (observation?.phase == .menuStarted || observation?.phase == .accepted)
             && observation?.outcome == .newTreePresent && observation?.lock == true
     }
     private var canFinishAcceptance: Bool {
-        phase == .uncertain && observation?.phase == .accepted
+        journal?.effectiveChipIDFingerprint != nil && (phase == .uncertain || phase == .activePendingAcceptance) && observation?.phase == .accepted
             && observation?.outcome == .newTreePresent && observation?.lock == false
     }
 
@@ -265,8 +267,27 @@ struct LegacySyncTrialView: View {
                                 .foregroundStyle(.orange)
                         }
                     }
+                    if let journal, journal.effectiveChipIDFingerprint == nil {
+                        GroupBox("Review an older unfinished update") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Close all other copies of this app and use only this instance while resolving the update. Connect the original NES used for this operation.")
+                                Text("The app can compare the saved backup and operation markers, but those checks cannot prove which NES you originally used. Review and continue only if you know this is the original NES.")
+                                    .font(.caption)
+                                Text("If the markers are missing or the review stops, keep the original NES and Mac backup unchanged. You can still check the sync status below; use its operation ID when asking for manual recovery help.")
+                                    .font(.caption)
+                                Button("Review Original NES") { Task { await reviewOriginalNES() } }
+                                    .disabled(working || !sameSession)
+                                if identityReview != nil {
+                                    Toggle("I confirm this is the original NES used for this unfinished update.", isOn: $originalNESConfirmed)
+                                        .disabled(working || !sameSession)
+                                    Button("Save Original NES for This Update") { Task { await bindOriginalNES() } }
+                                        .disabled(working || !sameSession || !originalNESConfirmed)
+                                }
+                            }
+                        }
+                    }
                     if let observation {
-                        Text("Console state: " + explanation(for: observation))
+                        Text((journal?.effectiveChipIDFingerprint == nil ? "Unverified, read-only console state: " : "Console state: ") + explanation(for: observation))
                             .font(.callout).textSelection(.enabled)
                         Text("Inactive transfer: archive \(observation.archive ? "present" : "absent"), extracted stage \(observation.stage ? "present" : "absent"), verified marker \(observation.verified ? "present" : "absent"). Console phase: \(observation.phase.rawValue).")
                             .font(.caption.monospaced()).textSelection(.enabled)
@@ -339,11 +360,11 @@ struct LegacySyncTrialView: View {
                 } else if phase == .verified, plan != nil {
                     Button(mode == .full ? "Step 2. Show Updated Games" : "Show Trial Games") { Task { await activate() } }
                         .help("Refresh the console menu to show the copied games, then try them before finishing the sync.")
-                        .disabled(working || !sameSession || !confirmed
+                        .disabled(working || !sameSession || !confirmed || journal?.effectiveChipIDFingerprint == nil
                                   || (plan.map { !LegacyStructureHardwareSupport.canActivate($0) } ?? true))
-                } else if phase == .activePendingAcceptance, manifest != nil {
+                } else if phase == .activePendingAcceptance, manifest != nil, !canFinishAcceptance {
                     Button(mode == .full ? "Step 3. Finish Sync" : "Accept Working Trial") { Task { await accept() } }
-                        .disabled(working || !sameSession || !confirmed)
+                        .disabled(working || !sameSession || !confirmed || journal?.effectiveChipIDFingerprint == nil)
                 }
             }
             }
@@ -359,6 +380,9 @@ struct LegacySyncTrialView: View {
                 .environmentObject(appState)
         }
         .task { await loadSavedState() }
+        .onChange(of: sameSession) { _, connected in
+            if !connected { identityReview = nil; originalNESConfirmed = false }
+        }
         .onChange(of: selectedReviewCodes) { _, _ in updateCapacityStatus() }
         .onDisappear {
             appState.isPreparingSync = false
@@ -573,7 +597,7 @@ struct LegacySyncTrialView: View {
             return "Remove only the unfinished copy. Keep my current console games and Mac backup."
         }
         if canFinishAcceptance {
-            return "The NES menu and selected games work. Record the console's completed acceptance."
+            return "The NES menu and selected games work, and I’m on the first game page. Record the console’s completed acceptance."
         }
         switch phase {
         case .verified:
@@ -642,7 +666,7 @@ struct LegacySyncTrialView: View {
                     let library = try LegacyBackupLibrary.read(journal.backupDirectory)
                     let hashes = try LegacyBackupLibrary.stockROMHashes(journal.backupDirectory)
                     let accepted = try await LegacySyncJournalStore(directory: workspace.journals)
-                        .latestAcceptedFull()
+                        .latestAcceptedFull(matchingFingerprint: journal.effectiveChipIDFingerprint)
                     let usable = accepted?.selectedCodes.map(Set.init) == library.report.visibleCodes
                         ? accepted : nil
                     let review = try LegacyFullSyncReview.make(
@@ -710,6 +734,7 @@ struct LegacySyncTrialView: View {
             let lease = try await client.reserveForChange()
             let fresh: LegacyConsoleReport
             let saved: URL
+            let savedFingerprint: String
             do {
                 fresh = try await LegacyConsoleService.inspect(client: lease)
                 try LegacyGameChangeService.validateReport(fresh, against: baseline)
@@ -721,6 +746,7 @@ struct LegacySyncTrialView: View {
                     device: device, workspace: workspace)
                 if let existing {
                     saved = existing.directory
+                    savedFingerprint = existing.chipIDFingerprint
                     status = "Reusing the verified Mac backup that exactly matches this NES…"
                 } else {
                     guard config.automaticallyCreateMissingBackup || forceBackup else {
@@ -736,6 +762,7 @@ struct LegacySyncTrialView: View {
                     let chipID = try await device.chipID()
                     let snapshot = try LegacyMenuSnapshot.verify(directory: saved,
                                                                   expectedChipID: chipID)
+                    savedFingerprint = snapshot.manifest.chipIDFingerprint
                     let selection = LegacyCurrentBackup.Selection(directory: saved,
                         archiveSHA256: snapshot.manifest.archiveSHA256,
                         treeSHA256: snapshot.menuTreeSHA256,
@@ -754,7 +781,7 @@ struct LegacySyncTrialView: View {
                 let library = try LegacyBackupLibrary.read(saved)
                 let hashes = try LegacyBackupLibrary.stockROMHashes(saved)
                 let accepted = try await LegacySyncJournalStore(directory: workspace.journals)
-                    .latestAcceptedFull()
+                    .latestAcceptedFull(matchingFingerprint: savedFingerprint)
                 let usable = accepted?.selectedCodes.map(Set.init) == library.report.visibleCodes
                     ? accepted : nil
                 baselineNotice = accepted != nil && usable == nil
@@ -937,6 +964,51 @@ struct LegacySyncTrialView: View {
         }
     }
 
+    @MainActor private func reviewOriginalNES() async {
+        guard !working, sameSession, let client = appState.deviceManager.legacyClient,
+              let journal, journal.effectiveChipIDFingerprint == nil else { return }
+        working = true; identityReview = nil; originalNESConfirmed = false; error = nil
+        status = "Checking the saved backup and the NES operation without changing the console…"
+        defer { working = false }
+        do {
+            let lease = try await client.reserveForChange()
+            do {
+                let transaction = LegacySyncTransaction(store: LegacySyncJournalStore(directory: workspace.journals), workspace: workspace)
+                let review = try await transaction.reviewUnboundIdentity(operationID: journal.operationID,
+                    device: LegacySyncLeaseDevice(lease: lease))
+                guard sameSession else { throw LegacyInspectionError.disconnected }
+                identityReview = review
+                status = "The saved backup and transaction markers match. Confirm only if this is the original NES."
+                await lease.release()
+            } catch { await lease.release(); throw error }
+        } catch { self.error = error.localizedDescription; status = "The older update could not be reviewed. No record was changed." }
+    }
+
+    @MainActor private func bindOriginalNES() async {
+        guard !working, sameSession, originalNESConfirmed, let review = identityReview,
+              let client = appState.deviceManager.legacyClient else { return }
+        working = true; identityReview = nil; originalNESConfirmed = false; error = nil
+        defer { working = false }
+        let store = LegacySyncJournalStore(directory: workspace.journals)
+        do {
+            let lease = try await client.reserveForChange()
+            do {
+                guard sameSession else { throw LegacyInspectionError.disconnected }
+                let transaction = LegacySyncTransaction(store: store, workspace: workspace)
+                try await transaction.bindUnboundIdentity(review, originalConsoleConfirmed: true,
+                    device: LegacySyncLeaseDevice(lease: lease), isSessionCurrent: { @MainActor in sameSession })
+                journal = try await store.load(review.operationID)
+                observation = nil
+                status = "This update is now linked to the reviewed NES. Check Sync Status before continuing."
+                await lease.release()
+            } catch { await lease.release(); throw error }
+        } catch {
+            journal = try? await store.load(review.operationID)
+            self.error = error.localizedDescription
+            status = "The review stopped. Reopen the update and check its saved state before continuing."
+        }
+    }
+
     @MainActor private func inspectRecovery() async {
         guard !working, sameSession, let client = appState.deviceManager.legacyClient,
               let journal else { return }
@@ -950,7 +1022,9 @@ struct LegacySyncTrialView: View {
                     store: LegacySyncJournalStore(directory: workspace.journals), workspace: workspace)
                 observation = try await transaction.inspectRecovery(operationID: journal.operationID,
                     device: LegacySyncLeaseDevice(lease: lease))
-                status = "Recovery inspection complete. Choose a reviewed recovery action if needed."
+                status = journal.effectiveChipIDFingerprint == nil
+                    ? "Read-only inspection complete. This NES is not yet verified for the saved update; no console changes are available."
+                    : "Recovery inspection complete. Choose a reviewed recovery action if needed."
                 await lease.release()
             } catch {
                 await lease.release()

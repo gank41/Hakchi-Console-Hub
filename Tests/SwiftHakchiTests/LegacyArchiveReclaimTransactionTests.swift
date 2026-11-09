@@ -6,12 +6,20 @@ import Testing
 private enum ReclaimTestFailure: Error { case disconnected }
 
 private actor ReclaimMutableDevice: LegacyArchiveReclaimDevice {
+    static let firstID = String(repeating: "1", count: 32)
+    static let secondID = String(repeating: "2", count: 32)
     let report: LegacyConsoleReport
+    var identity = firstID
+    var deleteCount = 0
+    var identityReadCount = 0
+    var flipOnIdentityRead: Int?
     var archivePresent = true
     var timeoutAfterDelete = false
     var timeoutBeforeDelete = false
+    var legacyIdentityAllowed = true
 
-    init() {
+    init(identity: String = firstID) {
+        self.identity = identity
         report = LegacyConsoleReport(bootVersion: "1.0.1", kernelVersion: "3.4.112.madmonkey",
             scriptVersion: "[master]v1.0.3-110(7f31082)",
             activePage: "/var/lib/hakchi/games/nes/000", freeBytes: 170_000_000,
@@ -22,8 +30,20 @@ private actor ReclaimMutableDevice: LegacyArchiveReclaimDevice {
     func setTimeoutAfterDelete() { timeoutAfterDelete = true }
     func setTimeoutBeforeDelete() { timeoutBeforeDelete = true }
     func setArchivePresent(_ present: Bool) { archivePresent = present }
+    func refuseLegacyIdentity() { legacyIdentityAllowed = false }
+    func setIdentity(_ value: String) { identity = value }
+    func flipIdentityAfterOneMoreCheck() { flipOnIdentityRead = identityReadCount + 2 }
+    func chipID() async throws -> String {
+        identityReadCount += 1
+        if identityReadCount == flipOnIdentityRead { identity = Self.secondID }
+        return identity
+    }
+    func deletions() -> Int { deleteCount }
     func inspect() async throws -> LegacyConsoleReport { report }
     func requireIdentity() async throws {}
+    func requireLegacyIdentity() async throws {
+        if !legacyIdentityAllowed { throw ReclaimTestFailure.disconnected }
+    }
     func inventoryLive(operationID: UUID) async throws -> Data { Data() }
     func inspectOperation(operationID: UUID, treeSHA256: String) async throws -> LegacySyncInspection {
         LegacySyncInspection(phase: .accepted, live: true, old: true,
@@ -35,6 +55,7 @@ private actor ReclaimMutableDevice: LegacyArchiveReclaimDevice {
     }
     func removeArchive(operationID: UUID, treeSHA256: String,
                        archiveSHA256: String, archiveBytes: Int64) async throws {
+        deleteCount += 1
         if timeoutBeforeDelete { throw ReclaimTestFailure.disconnected }
         archivePresent = false
         if timeoutAfterDelete { throw ReclaimTestFailure.disconnected }
@@ -42,6 +63,68 @@ private actor ReclaimMutableDevice: LegacyArchiveReclaimDevice {
 }
 
 struct LegacyArchiveReclaimTransactionTests {
+    @Test func unboundOldOperationCannotBeReclaimedButBoundOperationsCan() async throws {
+        let (oldWorkspace, oldRecord) = try fixture(bindIdentity: false)
+        defer { try? FileManager.default.removeItem(at: oldWorkspace.root) }
+        try await persistAccepted(oldRecord, in: oldWorkspace)
+        let device = ReclaimMutableDevice(identity: ReclaimMutableDevice.secondID)
+        await device.refuseLegacyIdentity()
+        await #expect(throws: (any Error).self) {
+            _ = try await LegacyArchiveReclaimTransaction(workspace: oldWorkspace)
+                .prepare(operationID: oldRecord.operationID, device: device)
+        }
+        let (newWorkspace, newRecord) = try fixture(bindIdentity: true, consoleID: ReclaimMutableDevice.secondID)
+        defer { try? FileManager.default.removeItem(at: newWorkspace.root) }
+        try await persistAccepted(newRecord, in: newWorkspace)
+        _ = try await LegacyArchiveReclaimTransaction(workspace: newWorkspace)
+            .prepare(operationID: newRecord.operationID, device: device)
+    }
+    @Test func changingConsoleAfterReviewDoesNotDeleteAndIsRecoverable() async throws {
+        let (workspace, record) = try fixture(bindIdentity: true)
+        defer { try? FileManager.default.removeItem(at: workspace.root) }
+        try await persistAccepted(record, in: workspace)
+        let device = ReclaimMutableDevice()
+        let transaction = LegacyArchiveReclaimTransaction(workspace: workspace)
+        let preview = try await transaction.prepare(operationID: record.operationID, device: device)
+        await device.flipIdentityAfterOneMoreCheck()
+        await #expect(throws: (any Error).self) { try await transaction.remove(preview: preview, device: device) }
+        #expect(await device.deletions() == 0)
+        let store = LegacyArchiveReclaimJournalStore(directory: workspace.journals)
+        #expect(try await store.load(record.operationID).phase == .uncertain)
+        await device.setIdentity(ReclaimMutableDevice.firstID)
+        try await transaction.reconcile(operationID: record.operationID, device: device)
+        #expect(try await store.load(record.operationID).phase == .prepared)
+    }
+    @Test func differentConsolesCanEachUseTheirOwnSyncRecord() async throws {
+        for id in [ReclaimMutableDevice.firstID, ReclaimMutableDevice.secondID] {
+            let (workspace, record) = try fixture(bindIdentity: true, consoleID: id)
+            defer { try? FileManager.default.removeItem(at: workspace.root) }
+            try await persistAccepted(record, in: workspace)
+            let device = ReclaimMutableDevice(identity: id)
+            let transaction = LegacyArchiveReclaimTransaction(workspace: workspace)
+            let preview = try await transaction.prepare(operationID: record.operationID, device: device)
+            try await transaction.remove(preview: preview, device: device)
+            #expect(await device.deletions() == 1)
+        }
+    }
+    @Test func refusesAnotherConsoleBeforeDeletionAndRecovery() async throws {
+        let (workspace, record) = try fixture(bindIdentity: true)
+        defer { try? FileManager.default.removeItem(at: workspace.root) }
+        try await persistAccepted(record, in: workspace)
+        let device = ReclaimMutableDevice()
+        let transaction = LegacyArchiveReclaimTransaction(workspace: workspace)
+        let preview = try await transaction.prepare(operationID: record.operationID, device: device)
+        await device.setIdentity(ReclaimMutableDevice.secondID)
+        await #expect(throws: (any Error).self) { try await transaction.remove(preview: preview, device: device) }
+        #expect(await device.deletions() == 0)
+        let store = LegacyArchiveReclaimJournalStore(directory: workspace.journals)
+        #expect(try await store.load(record.operationID).phase == .prepared)
+        try await store.advance(record.operationID, from: .prepared, to: .removalIntent)
+        await device.setArchivePresent(false)
+        await #expect(throws: (any Error).self) { try await transaction.reconcile(operationID: record.operationID, device: device) }
+        #expect(try await store.load(record.operationID).phase == .removalIntent)
+        #expect(await device.deletions() == 0)
+    }
     @Test func journalRefusesSymlinkedDirectory() async throws {
         let root = try testDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -98,7 +181,8 @@ struct LegacyArchiveReclaimTransactionTests {
             reviewSHA256: firstRecord.reviewSHA256, archiveSHA256: firstRecord.archiveSHA256,
             treeSHA256: firstRecord.treeSHA256, backupSHA256: firstRecord.backupSHA256,
             backupDirectory: firstRecord.backupDirectory, stageDirectory: firstRecord.stageDirectory,
-            trialCode: "CLV-H-ABCDE", maximumGamesPerPage: 30, archiveBytes: firstRecord.archiveBytes)
+            trialCode: "CLV-H-ABCDE", maximumGamesPerPage: 30, archiveBytes: firstRecord.archiveBytes,
+            chipIDFingerprint: firstRecord.chipIDFingerprint)
         try await persistAccepted(secondRecord, in: workspace)
 
         let newer = try await transaction.prepare(operationID: secondRecord.operationID, device: device)
@@ -164,7 +248,8 @@ struct LegacyArchiveReclaimTransactionTests {
         try await syncStore.advance(record.operationID, from: .activePendingAcceptance, to: .accepted)
     }
 
-    private func fixture() throws -> (WorkspacePaths, LegacySyncJournal) {
+    private func fixture(bindIdentity: Bool = true,
+                         consoleID: String = ReclaimMutableDevice.firstID) throws -> (WorkspacePaths, LegacySyncJournal) {
         let root = try testDirectory()
         let workspace = WorkspacePaths(root: root)
         let stage = root.appendingPathComponent("Stages/LegacyMenuStage-" + UUID().uuidString)
@@ -180,7 +265,8 @@ struct LegacyArchiveReclaimTransactionTests {
         var record = try LegacySyncJournal(operationID: UUID(), reviewSHA256: digest,
             archiveSHA256: digest, treeSHA256: digest, backupSHA256: digest,
             backupDirectory: backup, stageDirectory: stage, trialCode: "CLV-H-ABCDE",
-            maximumGamesPerPage: 30, archiveBytes: 1024)
+            maximumGamesPerPage: 30, archiveBytes: 1024,
+            chipIDFingerprint: bindIdentity ? BackupManifest.digest(Data(consoleID.utf8)) : nil)
         record.phase = .accepted
         return (workspace, record)
     }

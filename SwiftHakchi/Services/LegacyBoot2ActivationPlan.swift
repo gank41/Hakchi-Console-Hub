@@ -1,16 +1,14 @@
 import Foundation
 import SwiftHakchiCore
 
-/// The first legacy bridge is deliberately bound to the user's previously
-/// captured NES image. Other consoles require their own reviewed evidence.
+/// Binds a reviewed legacy activation to the identity recorded in its snapshot.
+/// The snapshot manifest is unsigned and does not prove where an image came from.
+/// Select only an image captured from the console being serviced.
 struct LegacyBoot2ActivationPlan: Codable, Sendable {
     static let stockSHA256 = "83efe33290867ec6e6b5c5a18e21f8cfe6f97b079c2e3c5039c628e729755888"
     static let stockBytes = 2_826_240
     static let legacySHA256 = "44568f4076be6d0ff9948d789409017eef1e06c37cb6c56b63acde53541c2276"
     static let legacyBytes = 3_788_800
-    // Independent fingerprint of the first NES's hardware ID. Keep the raw ID
-    // in private evidence only; a copied or edited snapshot cannot retarget it.
-    static let supportedHWIDSHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
     static let supportedScope = "Western-NES-legacy-boot2-hex30"
 
     let id: UUID
@@ -28,11 +26,13 @@ struct LegacyBoot2ActivationMaterial: Sendable {
     let stock: Data
     var legacy: Data
 
+    static func validHardwareID(_ id: String) -> Bool {
+        id.count == 32 && StockRestoreMaterial.hex(id) && id.contains(where: { $0 != "0" })
+    }
+
     func validateIntegrity() throws {
         guard plan.schemaVersion == 1, plan.scope == LegacyBoot2ActivationPlan.supportedScope,
-              plan.expectedHWID.count == 32, StockRestoreMaterial.hex(plan.expectedHWID),
-              plan.expectedHWID.contains(where: { $0 != "0" }),
-              BackupManifest.digest(Data(plan.expectedHWID.utf8)) == LegacyBoot2ActivationPlan.supportedHWIDSHA256,
+              Self.validHardwareID(plan.expectedHWID),
               plan.stockBytes == LegacyBoot2ActivationPlan.stockBytes,
               plan.stockSHA256 == LegacyBoot2ActivationPlan.stockSHA256,
               plan.legacyBytes == LegacyBoot2ActivationPlan.legacyBytes,

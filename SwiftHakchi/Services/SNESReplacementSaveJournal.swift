@@ -610,6 +610,13 @@ actor SNESReplacementSaveJournal {
 
     func recordedStage() throws -> StageIntent? { try state().stage }
     func markUncertain() throws { permitLife?.revoke(); try append(.uncertain) }
+    /// An interrupted staging attempt stays unresolved. This records no claim
+    /// about console files and grants no permission to retry or publish them.
+    func markInterruptedStageForReview() throws {
+        let current = try state()
+        guard current.phase == .writeIntent, current.stage != nil else { throw SNESLibraryInventory.failure() }
+        try markUncertain()
+    }
     func cancelUnsent() throws { try append(.cancelled) }
 
     /// Compares a supplied inventory; it neither attests a live console nor

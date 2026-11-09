@@ -17,6 +17,14 @@ struct SNESLibraryNavigationArgumentsTests {
     @Test func efficientRecipeRemainsByteExact() {
         #expect(BackupManifest.digest(Data(SNESLibraryStartupScripts.efficientChangePage.utf8))=="aa1b3e4efb747b83fe80ca443446a23953ddb0472ee3f153014d94d73fbe8808")
     }
+    @Test func queuedNavigationCandidateMatchesTheSeparatelyExercisedOfflineScript() throws {
+        let candidate = try SNESLibraryStartupScripts.queuedChangePageCandidate()
+        #expect(BackupManifest.digest(Data(candidate.utf8)) == "9652c21ad0341a80befe2e0b1676e06b90898128e1d48c13aa9317e1b3b81c78")
+        #expect(candidate != SNESLibraryStartupScripts.changePage)
+        if let output = ProcessInfo.processInfo.environment["HC_SNES_QUEUED_PAGE_EXPORT"] {
+            try Data(candidate.utf8).write(to: URL(fileURLWithPath: output), options: .withoutOverwriting)
+        }
+    }
 
     static let cloverArguments = ["--title-code", "CLV-S-00001", "--video-mode", "pixel-perfect", "--wait-transition-fd", "28", "--start-transition-fd", "31", "--finish-transition-fd", "33", "--save-data-backing-file", "/var/lib/clover/profiles/0/CLV-S-00001/cartridge.sram", "--rollback-mode", "record", "--rollback-output-dir", "/var/cache/clover//volatile/CLV-S-00001/suspendpoint0/rollback/", "--save-screenshot-on-quit", "/var/cache/clover//volatile/CLV-S-00001/suspendpoint0/state.png", "--save-time-path", "/var/cache/clover//volatile/CLV-S-00001/suspendpoint0/state.time"]
     @Test(arguments: ["direct", "clover", "title-mismatch", "unknown", "missing-value", "duplicate", "bad-fd", "large-fd", "leading-zero-fd", "bad-page", "many-options", "ignored-value"])

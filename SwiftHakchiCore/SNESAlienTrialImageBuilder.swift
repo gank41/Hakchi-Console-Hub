@@ -11,7 +11,7 @@ public enum SNESAlienTrialImageBuilder {
         var hashes = [
             "retroarch": "c2025cc98f2b755ef6759ead70a8e6dfe5aa85ff6772b78daa92bf91ad936e14",
             "snes9x2010_libretro.so": "ea4fab232ce2479c61099240d20196172051027fb7f55a9eabf2c5d9c4342286",
-            "alien3.smc": "0000000000000000000000000000000000000000000000000000000000000000",
+            "alien3.smc": "65feac0ff8bf834bdb3f1eade09102496e1bd021a261ca05fc3a75983c357c84",
             "retroarch.cfg": "d8dd1659a886e110745171e448055aa11497d44b82e4ac35f879668ac2f3d59b",
             "autoconfig/Nintendo Clovercon - controller1.cfg": "55018944a935bd04858d80f0f99d5a7ecfb61353565ba565eedd0075a55d2c35",
             "trial-start": "29428e580d8bec2ac3c9945f1d0e2cdd317b33b9c9d65ad93d97c43bac6b8f0f"
@@ -21,7 +21,7 @@ public enum SNESAlienTrialImageBuilder {
         let powerTrial = payload["trial-owner"] != nil
         if sramTrial {
             hashes.removeValue(forKey: "alien3.smc")
-            hashes["simcity.smc"] = "0000000000000000000000000000000000000000000000000000000000000000"
+            hashes["simcity.smc"] = "bf74c58e4190faca2f3a967dc190fe529d13887d1262b72e057b5353e43cf67f"
             hashes["retroarch"] = "9fd3707d1fcc3257cd8c57a988c75eefaf4d7b5e6838e34e67df74e277c6a2df"
             hashes["retroarch.cfg"] = "68a1951f54441c93f3dfa653f88bae32afe72ebb68b66422be212e1c54a1904f"
             hashes["trial-sram-owner"] = "cb45b19294730afa347ec52c720f445f92c6210ea4ec446ecbd898aa9ec783da"

@@ -37,6 +37,10 @@ struct RecoveryAssistantView: View {
             }
             ScrollView {
                 VStack(alignment:.leading,spacing:16) {
+                    GroupBox("Keep recovery together") {
+                        Text("Use this same Mac and macOS account until recovery is complete. The app does not check other accounts or Macs for unfinished operations, even when connected to the same console.")
+                            .frame(maxWidth:.infinity,alignment:.leading)
+                    }
                     if model.requiresPreservedPower {
                         GroupBox("Preserve the current state") {
                             Text("Keep the console powered and its USB cable connected. Preserve the operation folder. Do not retry or reboot; the stored write state needs inspection.")
@@ -113,7 +117,9 @@ struct RecoveryAssistantView: View {
                     Button("Prepare Legacy Activation — Mac files only") {
                         if let snapshot, let stock { start(.legacyPrepare(snapshot:snapshot,stock:stock,journals:RecoveryFirmwareJournalPolicy.root)) }
                     }.disabled(snapshot == nil || stock == nil)
-                    Text("This prepares the exact custom kernel previously captured from this NES. It does not write firmware or change games.")
+                    Text("This prepares the selected custom kernel. It does not write firmware or change games.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Choose only a startup backup captured from this console. The app cannot prove which console the backup came from.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
                     pickerRow("Legacy operation folder",url:operation) { operation = choose(directory:true,message:"Choose an existing LegacyBoot2Activation operation folder"); model.clearWriteReview() }

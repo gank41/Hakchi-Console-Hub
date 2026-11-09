@@ -22,7 +22,7 @@ import SwiftHakchiCore
         case .genesis: console = "Genesis"
         }
         let name = "CheatCode-" + console
-        guard let url = Bundle.module.url(forResource: name,
+        guard let url = Bundle.appBundle.url(forResource: name,
                                           withExtension: "png", subdirectory: "CheatCodes") else {
             throw SyncPlanError.missingFile("Cheat Codes artwork")
         }
