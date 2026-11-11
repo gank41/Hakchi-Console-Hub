@@ -31,7 +31,7 @@ Hakchi Console Hub is a GitHub fork of Swift Hakchi2. Hakchi2 CE is a community 
 | Famicom Mini, Super Famicom Mini, European models | Library and console choices exist, but hardware operations are not generally verified. |
 | Sega Genesis / Mega Drive Mini | Library support is experimental; console setup and synchronization are not ready. |
 
-Games requiring an additional SNES compatibility emulator **cannot yet be synced through the app**. Temporary gameplay and save tests have been performed, but the launcher, persistent save recovery and normal synchronization are not complete. No per-game compatibility is guaranteed.
+Games requiring an additional SNES compatibility emulator **cannot yet be synced through the app**. Temporary gameplay and save tests have been performed, but the launcher, persistent save recovery and normal synchronization are not complete. The [experimental console-launcher source and host tests](tools/snes-compatibility-launch/experimental-console/README.md) are available for contributors. No per-game compatibility is guaranteed.
 
 Consoles of the same model generally follow the same basic process, but the app still needs to recognize the connected device and its current software and backup. Regional models, software changes and previously modified consoles can require different handling. The testing above describes what has actually been exercised so far; it is not a separate procedure invented for each individual console.
 
