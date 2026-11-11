@@ -248,9 +248,18 @@ struct SNESLibraryBackupHistoryView: View {
                     Button("Review for Replacement…") { Task { await reviewReplacement() } }
                         .disabled(working || selected?.summary == nil || currentHWID == nil || !app.canReviewLibrarySync)
                 }
-                Button("Restore Games and Folders…") { Task { await reviewRestore() } }
+                Button("Restore Games and Folders…") {
+                    Task {
+                        if selected?.summary?.hwid == currentHWID {
+                            await reviewRestore()
+                        } else {
+                            await reviewReplacement()
+                        }
+                    }
+                }
                     .buttonStyle(.borderedProminent)
-                    .disabled(working || selected?.summary?.hwid != currentHWID || currentHWID == nil || !app.canReviewLibrarySync)
+                    .disabled(working || selected?.summary == nil || currentHWID == nil || !app.canReviewLibrarySync)
+                    .help("Review the games and folders in this backup for the connected SNES. No changes are made until you approve a later step.")
             }
         }
         .padding(22).frame(minWidth: 640, idealWidth: 760, maxWidth: 860, minHeight: 470, idealHeight: 600, maxHeight: 720)
@@ -758,6 +767,9 @@ struct SNESLibraryBackupHistoryView: View {
                   before.inventory.stateSHA256 == after.inventory.stateSHA256 else { throw SNESLibraryBackupHistory.failure("The console or selection changed. Review the backup again.") }
             try saveReview?.validate()
             replacement = plan; replacementSaves = saveReview; saveOptions = options; replacementReference = reference; replacementContextSHA256 = context.sha256
+            message = sameConsole
+                ? "Saved games are ready to review above. Nothing has been copied."
+                : "Backup reviewed for the connected SNES. Choose Review Copying Games above to continue. Nothing has been copied."
         } catch { message = error.localizedDescription }
     }
     private func clearStagingReview() {

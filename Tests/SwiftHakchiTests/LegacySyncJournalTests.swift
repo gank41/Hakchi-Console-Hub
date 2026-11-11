@@ -10,6 +10,43 @@ private func candidateTestRoot() -> URL {
 }
 
 struct LegacySyncJournalTests {
+    @Test func missingJournalDirectoryIsEmptyButDanglingAncestorIsRefused() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let missing = root.appendingPathComponent("absent/journals", isDirectory: true)
+        let empty = LegacySyncJournalStore(directory: missing)
+        #expect(try await empty.allRecords().isEmpty)
+        #expect(try await empty.latestUnresolved() == nil)
+
+        let link = root.appendingPathComponent("broken-link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: root.appendingPathComponent("does-not-exist"))
+        let unsafe = LegacySyncJournalStore(directory: link.appendingPathComponent("journals", isDirectory: true))
+        await #expect(throws: (any Error).self) { _ = try await unsafe.allRecords() }
+        await #expect(throws: (any Error).self) { _ = try await unsafe.latestUnresolved() }
+
+        let target = root.appendingPathComponent("existing", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+        let existingLink = root.appendingPathComponent("existing-link")
+        try FileManager.default.createSymbolicLink(at: existingLink, withDestinationURL: target)
+        let linked = LegacySyncJournalStore(directory: existingLink.appendingPathComponent("journals", isDirectory: true))
+        await #expect(throws: (any Error).self) { _ = try await linked.allRecords() }
+
+        let file = root.appendingPathComponent("not-a-folder")
+        try Data("existing".utf8).write(to: file)
+        let obstructed = LegacySyncJournalStore(directory: file.appendingPathComponent("journals", isDirectory: true))
+        await #expect(throws: (any Error).self) { _ = try await obstructed.allRecords() }
+    }
+
+    @Test func existingJournalDirectoryWorksWithEitherURLDirectoryHint() async throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("journals", isDirectory: true)
+        let writer = LegacySyncJournalStore(directory: folder)
+        let item = try record()
+        try await writer.begin(item)
+        for isDirectory in [true, false] {
+            let store = LegacySyncJournalStore(directory: URL(fileURLWithPath: folder.path, isDirectory: isDirectory))
+            #expect(try await store.allRecords().map(\.operationID) == [item.operationID])
+        }
+    }
     @Test func independentStoresSerializeCompetingBegins() async throws {
         let parent = candidateTestRoot().appendingPathComponent("sync-store-race-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)

@@ -10,6 +10,12 @@ also offers an experimental, separately confirmed saved-data transfer workflow.
 It has not been tested between two physical consoles and must not be described
 as a verified restore feature.
 
+To start a review, connect the prepared SNES, open **SNES Backup History**,
+select the backup, and choose **Restore Games and Folders**. The app opens the
+appropriate review for this console or a replacement; selecting the button does
+not itself copy or erase anything. A replacement review has a separate
+**Review Copying Games** step, followed by a separate saved-game review.
+
 For a single connected SNES, Backup History also offers a read-only comparison
 between one of its Mac backups and its current saved-game files. It counts
 matching, changed, backup-only and console-only files after checking the console
@@ -21,6 +27,12 @@ Backup History also offers **Back Up This SNES**, which saves a fresh library
 backup without a sync. One prepared SNES has been used to verify this path and
 compare its saved files with the result. This library backup contains added game
 objects, the menu and profile data; it is not a fresh full firmware image.
+
+In **Restore Console**, **Check a Full Console Backup** checks an existing
+full-data backup's files on the Mac without connecting to a console or making a
+copy. A successful check means the files match their saved checksums; it does
+not establish which console created the backup or make a full-data restore
+available. Keep the original backup even if a check fails.
 
 The saved-file review binds the source backup, replacement backup, game identity,
 ROM and launch command. It excludes missing or mismatched games and conflicting

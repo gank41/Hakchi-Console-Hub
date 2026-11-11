@@ -20,6 +20,9 @@ struct RecoveryReadinessView: View {
     @State private var showSNESBackupHistory = false
     @State private var showSNESOriginalStartup = false
     @State private var ownsSNESStartupRestore = false
+    @State private var checkingFullDataBackup = false
+    @State private var fullDataBackupMessage: String?
+    @State private var fullDataBackupPassed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -34,13 +37,29 @@ struct RecoveryReadinessView: View {
                             .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         Text("If you skipped the backup at the end of your last sync, open Sync Library and choose Continue Sync before restoring startup or transferring saves. This lets the app safely remove the previous game-menu copy.")
                             .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        GroupBox("Check a Full Console Backup") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Choose a full-data backup to check its files on this Mac. This does not connect to or change the console.")
+                                    .font(.callout).foregroundStyle(.secondary)
+                                Button("Choose Backup to Check…") { checkFullDataBackup() }
+                                    .disabled(checkingFullDataBackup)
+                                if checkingFullDataBackup {
+                                    ProgressView("Checking backup files… This may take a few minutes.")
+                                }
+                                if let fullDataBackupMessage {
+                                    Label(fullDataBackupMessage, systemImage: fullDataBackupPassed ? "checkmark.circle" : "exclamationmark.triangle")
+                                        .foregroundStyle(fullDataBackupPassed ? Color.green : Color.orange)
+                                        .font(.callout).fixedSize(horizontal: false, vertical: true)
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
+                        }
                         GroupBox("Restore Games and Folders") {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Choose a saved SNES library backup to review the games and folders it contains. Your current console saves and settings are kept.")
                                     .font(.callout).foregroundStyle(.secondary)
                                 Button("Open SNES Backup History…") { showSNESBackupHistory = true }
                                     .disabled(appState.taskRunner.isRunning || appState.isPreparingSync || appState.gameManager.isLoading)
-                                Text("To restore, connect the same prepared SNES that the backup came from.")
+                                Text("You can also review a backup for a replacement SNES. Copying saved progress is experimental and has not yet been tested on a replacement console.")
                                     .font(.caption).foregroundStyle(.secondary)
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
                         }
@@ -118,6 +137,29 @@ struct RecoveryReadinessView: View {
             let report = await service.inspect(backups: backups, console: capturedContext.console)
             guard !Task.isCancelled else { return }
             checked = CheckedReport(context: capturedContext, report: report)
+        }
+    }
+
+    private func checkFullDataBackup() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a Full Console Backup"
+        panel.message = "Select the SNES full-data backup folder. The app will only read its files."
+        panel.canChooseFiles = false; panel.canChooseDirectories = true
+        panel.canCreateDirectories = false; panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+        checkingFullDataBackup = true; fullDataBackupMessage = nil; fullDataBackupPassed = false
+        Task {
+            defer { checkingFullDataBackup = false }
+            do {
+                let bytes = try await Task.detached(priority: .userInitiated) {
+                    try SNESPortableDataSnapshot.inspect(directory: directory).byteCount
+                }.value
+                let size = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+                fullDataBackupPassed = true
+                fullDataBackupMessage = "Backup files passed the check (\(size)); their origin has not been verified. Full console-data restore is not available yet. To review games and saved progress for another compatible SNES, use a library backup in SNES Backup History."
+            } catch {
+                fullDataBackupMessage = "The backup could not be checked. Keep the original and choose another backup or check the folder. No console was changed."
+            }
         }
     }
 

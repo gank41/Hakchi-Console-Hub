@@ -247,12 +247,13 @@ actor LegacySyncJournalStore {
 
     private func journalFiles() throws -> [URL] {
         let fm = FileManager.default
-        guard directory == directory.resolvingSymlinksInPath() else { throw LegacySyncJournalError.invalidRecord }
+        // Walk existing components without following links, rather than
+        // resolving a URL for a path that may not exist yet. A genuinely
+        // missing component means there are no journals at this path.
+        guard try directoryExistsWithoutFollowingLinks() else { return [] }
+        guard directory.path == directory.resolvingSymlinksInPath().path else { throw LegacySyncJournalError.invalidRecord }
         var info = stat()
-        if lstat(directory.path, &info) != 0 {
-            if errno == ENOENT { return [] }
-            throw LegacySyncJournalError.invalidRecord
-        }
+        guard lstat(directory.path, &info) == 0 else { throw LegacySyncJournalError.invalidRecord }
         guard info.st_mode & S_IFMT == S_IFDIR else { throw LegacySyncJournalError.invalidRecord }
         let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         guard values.isDirectory == true, values.isSymbolicLink != true else {
@@ -260,6 +261,25 @@ actor LegacySyncJournalStore {
         }
         return try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])
             .filter { $0.lastPathComponent.hasPrefix("nes-sync-") && $0.pathExtension == "json" }
+    }
+
+    private func directoryExistsWithoutFollowingLinks() throws -> Bool {
+        guard directory.isFileURL, directory.path.hasPrefix("/") else {
+            throw LegacySyncJournalError.invalidRecord
+        }
+        var current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard current >= 0 else { throw LegacySyncJournalError.invalidRecord }
+        defer { close(current) }
+        for component in directory.pathComponents.dropFirst() {
+            let next = openat(current, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            if next < 0 {
+                if errno == ENOENT { return false }
+                throw LegacySyncJournalError.invalidRecord
+            }
+            close(current)
+            current = next
+        }
+        return true
     }
 
     private func read(_ url: URL) throws -> LegacySyncJournal {
@@ -270,7 +290,7 @@ actor LegacySyncJournalStore {
         }
         let record = try JSONDecoder().decode(LegacySyncJournal.self, from: Data(contentsOf: url))
         try record.validate()
-        guard url == file(for: record.operationID) else { throw LegacySyncJournalError.invalidRecord }
+        guard url.standardizedFileURL.path == file(for: record.operationID).path else { throw LegacySyncJournalError.invalidRecord }
         return record
     }
 

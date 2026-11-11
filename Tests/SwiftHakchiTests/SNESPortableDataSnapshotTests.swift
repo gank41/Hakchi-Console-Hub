@@ -2,10 +2,37 @@ import Foundation
 import Darwin
 import CryptoKit
 import Testing
+import SwiftHakchiCore
 @testable import SwiftHakchi
 
 @Suite(.serialized)
 struct SNESPortableDataSnapshotTests {
+    @Test func checkingAnInvalidBackupDoesNotCreateOrChangeFiles() throws {
+        let root = try testDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("SNES-Current-Data-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let manifest = folder.appendingPathComponent("manifest.json")
+        let original = Data("{}".utf8)
+        try original.write(to: manifest)
+        #expect(throws: (any Error).self) { _ = try SNESPortableDataSnapshot.inspect(directory: folder) }
+        #expect(try Data(contentsOf: manifest) == original)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path) == ["manifest.json"])
+        #expect(throws: (any Error).self) { _ = try SNESPortableDataSnapshot.inspect(directory: root.appendingPathComponent("missing")) }
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_CURRENT_DATA"] != nil))
+    func checksAnExistingBackupWithoutChangingIt() throws {
+        let input = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_CURRENT_DATA"]))
+        let manifestURL = input.appendingPathComponent("manifest.json")
+        let before = try Data(contentsOf: manifestURL)
+        let names = try FileManager.default.contentsOfDirectory(atPath: input.path).sorted()
+        let checked = try SNESPortableDataSnapshot.inspect(directory: input)
+        #expect(checked.byteCount > 0)
+        #expect(checked.manifestSHA256 == BackupManifest.digest(before))
+        #expect(try Data(contentsOf: manifestURL) == before)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: input.path).sorted() == names)
+    }
+
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_CURRENT_DATA"] != nil))
     func reconstructsTheEntireSnapshotInDisposableFileStorage() throws {
         let input = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["SWIFTHAKCHI_SNES_CURRENT_DATA"]))
@@ -108,6 +135,7 @@ struct SNESPortableDataSnapshotTests {
         }
         #expect(delivered == plan.chunkCount)
         #expect(throws: (any Error).self) { try reviewedCopy.readVerifiedChunk(0) }
+        #expect(throws: (any Error).self) { _ = try SNESPortableDataSnapshot.inspect(directory: damagedSource) }
         let rejectedRoot = root.appendingPathComponent("rejected")
         try FileManager.default.createDirectory(at: rejectedRoot, withIntermediateDirectories: false)
         #expect(throws: (any Error).self) { try SNESPortableDataSnapshot.copy(directory: damagedSource, to: rejectedRoot) }

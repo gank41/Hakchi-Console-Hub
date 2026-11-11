@@ -9,18 +9,21 @@ enum SNESPortableDataSnapshot {
         .refused("The full-data backup could not be copied and checked. Keep the original. No console was changed.")
     }
 
-    /// Check the backup's internal integrity before copying an existing folder.
-    /// Its claimed console identity is metadata, not proof of physical origin.
-    static func copy(directory: URL, to parentURL: URL) throws -> URL {
-        let package: SNESDataSnapshotPackage
+    /// Check all files without changing them or contacting a console. The
+    /// identity in the manifest is a claim, not proof of physical origin.
+    static func inspect(directory: URL) throws -> SNESDataSnapshotPackage {
         do {
             let input = try RestoreDirectory(directory)
             let manifest = try JSONDecoder().decode(SNESDataSnapshotResult.Manifest.self, from: input.read("manifest.json", maximum: 65_536))
             try manifest.binding.validate(); try input.check()
-            package = try SNESDataSnapshotPackage.load(directory: input.url, expectedHWID: manifest.binding.expectedHWID)
+            return try SNESDataSnapshotPackage.load(directory: input.url, expectedHWID: manifest.binding.expectedHWID)
         } catch is CancellationError { throw CancellationError() }
-        catch { throw failure() }
-        return try copy(package, to: parentURL)
+        catch { throw RecoveryProbeError.refused("The full-data backup could not be checked. Keep the original. No console was changed.") }
+    }
+
+    /// Check the backup's internal integrity before copying an existing folder.
+    static func copy(directory: URL, to parentURL: URL) throws -> URL {
+        return try copy(inspect(directory: directory), to: parentURL)
     }
 
     static func copy(_ source: SNESDataSnapshotPackage, to parentURL: URL,
